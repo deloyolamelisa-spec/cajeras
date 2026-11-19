@@ -25,6 +25,7 @@ interface GastosRefrendosViewProps {
   sucursales: Sucursal[];
   selectedSucursalId: string;
   userRole: RolUsuario;
+  fixedTab?: 'gastos' | 'refrendos';
   onCreateRegistro: (nuevo: GastoYRefrendo) => Promise<void>;
   onDeleteRegistro: (registro: GastoYRefrendo) => Promise<void>;
   onDeleteEvidenciaRegistro: (registro: GastoYRefrendo) => Promise<void>;
@@ -38,6 +39,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
   sucursales,
   selectedSucursalId,
   userRole,
+  fixedTab,
   onCreateRegistro,
   onDeleteRegistro,
   onDeleteEvidenciaRegistro,
@@ -47,8 +49,9 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
   const isCajera = userRole === 'cajera';
   const isCreador = userRole === 'creador';
   const [subTab, setSubTab] = useState<'gastos' | 'refrendos' | 'bitacora'>(
-    'gastos'
+    fixedTab ?? 'gastos'
   );
+  const activeTab = fixedTab ?? subTab;
   const [showNewModal, setShowNewModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
@@ -69,7 +72,9 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
 
   const [form, setForm] = useState({
     sucursal_id: defaultSucursal,
-    tipo: 'Gasto' as 'Gasto' | 'Refrendo',
+    tipo: (fixedTab === 'refrendos' ? 'Refrendo' : 'Gasto') as
+      | 'Gasto'
+      | 'Refrendo',
     categoria: 'Operación de Sucursal',
     concepto: '',
     monto_real: '1200',
@@ -78,6 +83,16 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
     meta_refrendos: '45',
     notas: '',
   });
+
+  const openCreateModal = () => {
+    if (fixedTab) {
+      setForm((prev) => ({
+        ...prev,
+        tipo: fixedTab === 'refrendos' ? 'Refrendo' : 'Gasto',
+      }));
+    }
+    setShowNewModal(true);
+  };
 
   const isModalOpen = isCajera && (showNewModal || openCreateModalExternal);
   const closeModal = () => {
@@ -159,50 +174,69 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
     <div className="space-y-6">
       {/* Header & Sub-Navigation */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-1 p-1 bg-white border border-[#EAE3F5] rounded-xl w-fit">
-          <button
-            type="button"
-            onClick={() => setSubTab('gastos')}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-              subTab === 'gastos'
-                ? 'bg-[#F3ECFC] text-[#5B21B6]'
-                : 'text-[#6E5F87] hover:text-[#1F172B]'
-            }`}
-          >
-            Control de Gastos (Techo Máximo)
-          </button>
-          <button
-            type="button"
-            onClick={() => setSubTab('refrendos')}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-              subTab === 'refrendos'
-                ? 'bg-[#F3ECFC] text-[#5B21B6]'
-                : 'text-[#6E5F87] hover:text-[#1F172B]'
-            }`}
-          >
-            Refrendos por Sucursal
-          </button>
-          <button
-            type="button"
-            onClick={() => setSubTab('bitacora')}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-              subTab === 'bitacora'
-                ? 'bg-[#F3ECFC] text-[#5B21B6]'
-                : 'text-[#6E5F87] hover:text-[#1F172B]'
-            }`}
-          >
-            Bitácora ({scopedRegistros.length})
-          </button>
-        </div>
+        {!fixedTab ? (
+          <div className="flex items-center gap-1 p-1 bg-white border border-[#EAE3F5] rounded-xl w-fit">
+            <button
+              type="button"
+              onClick={() => setSubTab('gastos')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                activeTab === 'gastos'
+                  ? 'bg-[#F3ECFC] text-[#5B21B6]'
+                  : 'text-[#6E5F87] hover:text-[#1F172B]'
+              }`}
+            >
+              Control de Gastos (Techo Máximo)
+            </button>
+            <button
+              type="button"
+              onClick={() => setSubTab('refrendos')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                activeTab === 'refrendos'
+                  ? 'bg-[#F3ECFC] text-[#5B21B6]'
+                  : 'text-[#6E5F87] hover:text-[#1F172B]'
+              }`}
+            >
+              Refrendos por Sucursal
+            </button>
+            <button
+              type="button"
+              onClick={() => setSubTab('bitacora')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                activeTab === 'bitacora'
+                  ? 'bg-[#F3ECFC] text-[#5B21B6]'
+                  : 'text-[#6E5F87] hover:text-[#1F172B]'
+              }`}
+            >
+              Bitácora ({scopedRegistros.length})
+            </button>
+          </div>
+        ) : (
+          <div>
+            <h2 className="font-display text-lg font-bold text-[#1F172B]">
+              {fixedTab === 'refrendos'
+                ? 'Mis Refrendos'
+                : 'Mis Gastos y Techo Máximo'}
+            </h2>
+            <p className="text-xs text-[#7A6B93]">
+              {fixedTab === 'refrendos'
+                ? 'Avance mensual de renovaciones y captura diaria de refrendos'
+                : 'Control operativo de gastos dentro del techo autorizado'}
+            </p>
+          </div>
+        )}
 
         {isCajera ? (
           <button
             type="button"
-            onClick={() => setShowNewModal(true)}
+            onClick={openCreateModal}
             className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap"
           >
             <Plus className="h-4 w-4" />
-            Registrar gasto o refrendo
+            {fixedTab === 'refrendos'
+              ? 'Registrar refrendo'
+              : fixedTab === 'gastos'
+                ? 'Registrar gasto'
+                : 'Registrar gasto o refrendo'}
           </button>
         ) : (
           <span className="px-3 py-1.5 rounded-xl text-xs font-medium bg-[#FAF7FE] text-[#6D28D9] border border-[#EAE3F5] w-fit">
@@ -211,7 +245,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
         )}
       </div>
 
-      {subTab === 'gastos' && (
+      {activeTab === 'gastos' && (
         <div className="space-y-6">
           {/* Alert Banner for Over-Budget Branches */}
           {excedidas.length > 0 ? (
@@ -544,83 +578,136 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
         </div>
       )}
 
-      {subTab === 'refrendos' && (
-        <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 md:p-6 space-y-5">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="font-display text-base font-bold text-[#1F172B]">
-                Desempeño de refrendos por sucursal
-              </h2>
-              <p className="text-xs text-[#7A6B93]">
-                Comparativa de operaciones renovadas respecto a la meta asignada.
-              </p>
+      {activeTab === 'refrendos' && (
+        <div className="space-y-6">
+          <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 md:p-6 space-y-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-display text-base font-bold text-[#1F172B]">
+                  Desempeño de refrendos por sucursal
+                </h2>
+                <p className="text-xs text-[#7A6B93]">
+                  Comparativa de operaciones renovadas respecto a la meta asignada.
+                </p>
+              </div>
+              <TrendingUp className="h-5 w-5 text-[#DB2777]" />
             </div>
-            <TrendingUp className="h-5 w-5 text-[#DB2777]" />
-          </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {visibleSummaries
-              .slice()
-              .sort((a, b) => b.pctRefrendos - a.pctRefrendos)
-              .map((s) => {
-                const enMeta = s.pctRefrendos >= 100;
-                return (
-                  <div
-                    key={s.sucursal.id}
-                    className="rounded-xl border border-[#EAE3F5] bg-[#FCFAFE] p-4 space-y-3"
-                  >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <h3 className="text-sm font-bold text-[#1F172B]">
-                          {s.sucursal.nombre}
-                        </h3>
-                        <p className="text-xs text-[#7A6B93]">
-                          Responsable: {s.sucursal.responsable_caja}
-                        </p>
-                      </div>
-                      <span
-                        className={`text-xs font-semibold ${
-                          enMeta ? 'text-[#15803D]' : 'text-[#6D28D9]'
-                        }`}
-                      >
-                        {enMeta
-                          ? 'Meta superada'
-                          : `${formatPercent(s.pctRefrendos)} de meta`}
-                      </span>
-                    </div>
-
-                    <div className="flex items-baseline justify-between font-mono-num">
-                      <span className="text-lg font-bold text-[#1F172B]">
-                        {s.refrendosRealizados}{' '}
-                        <span className="text-xs font-normal text-[#8B7CA5]">
-                          / {s.refrendosMeta} refrendos
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {visibleSummaries
+                .slice()
+                .sort((a, b) => b.pctRefrendos - a.pctRefrendos)
+                .map((s) => {
+                  const enMeta = s.pctRefrendos >= 100;
+                  return (
+                    <div
+                      key={s.sucursal.id}
+                      className="rounded-xl border border-[#EAE3F5] bg-[#FCFAFE] p-4 space-y-3"
+                    >
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <h3 className="text-sm font-bold text-[#1F172B]">
+                            {s.sucursal.nombre}
+                          </h3>
+                          <p className="text-xs text-[#7A6B93]">
+                            Responsable: {s.sucursal.responsable_caja}
+                          </p>
+                        </div>
+                        <span
+                          className={`text-xs font-semibold ${
+                            enMeta ? 'text-[#15803D]' : 'text-[#6D28D9]'
+                          }`}
+                        >
+                          {enMeta
+                            ? 'Meta superada'
+                            : `${formatPercent(s.pctRefrendos)} de meta`}
                         </span>
-                      </span>
-                      <span className="text-sm font-semibold text-[#BE185D]">
-                        {formatMXN(s.montoRefrendos)}
-                      </span>
-                    </div>
+                      </div>
 
-                    <div className="h-2.5 w-full rounded-full bg-[#EFE9F8] overflow-hidden">
-                      <div
-                        className={`h-full rounded-full ${
-                          enMeta
-                            ? 'bg-[#16A34A]'
-                            : 'bg-gradient-to-r from-[#8B5CF6] to-[#EC4899]'
-                        }`}
-                        style={{
-                          width: `${Math.min(100, Math.max(4, s.pctRefrendos))}%`,
-                        }}
-                      />
+                      <div className="flex items-baseline justify-between font-mono-num">
+                        <span className="text-lg font-bold text-[#1F172B]">
+                          {s.refrendosRealizados}{' '}
+                          <span className="text-xs font-normal text-[#8B7CA5]">
+                            / {s.refrendosMeta} refrendos
+                          </span>
+                        </span>
+                        <span className="text-sm font-semibold text-[#BE185D]">
+                          {formatMXN(s.montoRefrendos, 2)}
+                        </span>
+                      </div>
+
+                      <div className="h-2.5 w-full rounded-full bg-[#EFE9F8] overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${
+                            enMeta
+                              ? 'bg-[#16A34A]'
+                              : 'bg-gradient-to-r from-[#8B5CF6] to-[#EC4899]'
+                          }`}
+                          style={{
+                            width: `${Math.min(100, Math.max(4, s.pctRefrendos))}%`,
+                          }}
+                        />
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-          </div>
-        </section>
+                  );
+                })}
+            </div>
+          </section>
+
+          <section className="bg-white rounded-2xl border border-[#EAE3F5] overflow-hidden">
+            <div className="px-6 py-4 border-b border-[#F1ECF9]">
+              <h3 className="font-display text-sm font-bold text-[#1F172B]">
+                Movimientos de refrendos capturados (
+                {scopedRegistros.filter((r) => r.tipo === 'Refrendo').length})
+              </h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-[#F1ECF9] bg-[#FAF8FC] text-[12px] font-semibold text-[#6E5F87]">
+                    <th className="py-3 px-4">Fecha / Sucursal</th>
+                    <th className="py-3 px-4">Concepto</th>
+                    <th className="py-3 px-4 text-right">Cantidad</th>
+                    <th className="py-3 px-4 text-right">Monto ($)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#F3EEF9] text-sm">
+                  {scopedRegistros
+                    .filter((r) => r.tipo === 'Refrendo')
+                    .map((r) => (
+                      <tr key={r.id} className="hover:bg-[#FCFAFE]">
+                        <td className="py-3 px-4">
+                          <div className="font-semibold text-[#1F172B]">
+                            {r.sucursal_nombre}
+                          </div>
+                          <div className="text-xs text-[#8B7CA5] font-mono-num">
+                            {r.fecha} · {r.responsable}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="font-medium text-[#1F172B]">
+                            {r.concepto}
+                          </div>
+                          <div className="text-xs text-[#8B7CA5]">
+                            {r.notas || r.categoria}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono-num font-semibold text-[#5B21B6]">
+                          {r.cantidad_refrendos}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono-num font-bold text-[#1F172B]">
+                          {formatMXN(r.monto_real, 2)}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
       )}
 
-      {subTab === 'bitacora' && (
+      {activeTab === 'bitacora' && (
         <section className="bg-white rounded-2xl border border-[#EAE3F5] overflow-hidden">
           <div className="px-6 py-4 border-b border-[#F1ECF9]">
             <h2 className="font-display text-sm font-bold text-[#1F172B]">

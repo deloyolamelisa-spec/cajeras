@@ -1,7 +1,9 @@
 export type SectionId =
+  | 'mi_dia'
   | 'ranking'
   | 'llamadas'
   | 'actividades'
+  | 'refrendos'
   | 'gastos'
   | 'horarios'
   | 'admin';

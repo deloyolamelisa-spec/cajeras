@@ -8,6 +8,7 @@ import { ActividadesView } from './components/ActividadesView';
 import { GastosRefrendosView } from './components/GastosRefrendosView';
 import { HorariosView } from './components/HorariosView';
 import { AdminCatalogosView } from './components/AdminCatalogosView';
+import { CajeraMiDiaView } from './components/CajeraMiDiaView';
 import { SupabaseSetupModal } from './components/SupabaseSetupModal';
 import {
   ActividadDiaria,
@@ -51,6 +52,10 @@ import { isSupabaseConfigured } from './lib/supabaseConfig';
 import { INITIAL_CATALOGOS } from './data/mockData';
 
 const SECTION_TITLES: Record<SectionId, { title: string; subtitle: string }> = {
+  mi_dia: {
+    title: 'Mi día',
+    subtitle: 'Resumen de avance mensual, tareas de hoy y desglose diario',
+  },
   ranking: {
     title: 'Ranking General por Sucursal',
     subtitle: 'Comparativa integral de actividades, gastos, refrendos y llamadas',
@@ -62,6 +67,10 @@ const SECTION_TITLES: Record<SectionId, { title: string; subtitle: string }> = {
   actividades: {
     title: 'Actividades Diarias y Evidencias',
     subtitle: 'Cumplimiento operativo, horarios límite y respaldo fotográfico',
+  },
+  refrendos: {
+    title: 'Refrendos',
+    subtitle: 'Seguimiento de renovaciones y meta mensual de la sucursal',
   },
   gastos: {
     title: 'Gastos (Techo Máximo) y Refrendos',
@@ -83,7 +92,7 @@ export default function App() {
   );
   const [activeSection, setActiveSection] = useState<SectionId>(() => {
     const saved = getSavedSessionUser();
-    return saved?.rol === 'cajera' ? 'llamadas' : 'ranking';
+    return saved?.rol === 'cajera' ? 'mi_dia' : 'ranking';
   });
   const [selectedSucursalId, setSelectedSucursalId] = useState<string>(() => {
     const saved = getSavedSessionUser();
@@ -144,7 +153,7 @@ export default function App() {
     saveSessionUser(res.user);
     if (res.user.rol === 'cajera') {
       setSelectedSucursalId(res.user.sucursal_id);
-      setActiveSection('llamadas');
+      setActiveSection('mi_dia');
     } else {
       setSelectedSucursalId('todas');
       setActiveSection('ranking');
@@ -458,29 +467,48 @@ export default function App() {
   }
 
   // Guard protected routes
-  const safeSection: SectionId =
-    activeSection === 'admin' && currentUser.rol !== 'creador'
+  const isCajera = currentUser.rol === 'cajera';
+  const cajeraAllowedSections: SectionId[] = [
+    'mi_dia',
+    'llamadas',
+    'refrendos',
+    'gastos',
+  ];
+
+  const safeSection: SectionId = isCajera
+    ? cajeraAllowedSections.includes(activeSection)
+      ? activeSection
+      : 'mi_dia'
+    : activeSection === 'admin' && currentUser.rol !== 'creador'
       ? 'ranking'
-      : activeSection === 'ranking' && currentUser.rol === 'cajera'
-        ? 'llamadas'
+      : activeSection === 'mi_dia' || activeSection === 'refrendos'
+        ? 'ranking'
         : activeSection;
 
   const activeHeader = SECTION_TITLES[safeSection];
+  const currentCajeraSucursal =
+    sucursales.find((s) => s.id === effectiveSucursalId) || sucursales[0];
+  const currentCajeraMeta = metas.find(
+    (m) => m.sucursal_id === currentCajeraSucursal?.id
+  );
   const selectedBranchName =
     effectiveSucursalId === 'todas'
       ? 'Todas las sucursales'
-      : sucursales.find((s) => s.id === effectiveSucursalId)?.nombre ||
-        'Sucursal';
+      : currentCajeraSucursal?.nombre || 'Sucursal';
 
   return (
-    <div className="min-h-screen flex bg-[#F8F6FB] text-[#1F172B]">
+    <div
+      className={`min-h-screen flex text-[#1F172B] ${
+        isCajera ? 'bg-[#FAF7FF]' : 'bg-[#F8F6FB]'
+      }`}
+    >
       <Sidebar
         activeSection={safeSection}
         onSelectSection={setActiveSection}
         sucursales={sucursales}
         selectedSucursalId={effectiveSucursalId}
         onSelectSucursal={(id) => {
-          if (currentUser.rol !== 'cajera') {
+          if (!isCajera) {
             setSelectedSucursalId(id);
           }
         }}
@@ -495,69 +523,103 @@ export default function App() {
       />
 
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Top Bar */}
-        <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-xs border-b border-[#EAE3F5] px-4 sm:px-6 lg:px-8 py-3.5">
-          <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 min-w-0">
+        {/* Top Bar (compact on Cajera Mi día, full on other views) */}
+        {isCajera && safeSection === 'mi_dia' ? (
+          <header className="lg:hidden sticky top-0 z-30 bg-white/95 backdrop-blur-xs border-b border-[#EAE3F5] px-4 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-3">
               <button
                 type="button"
                 onClick={() => setMobileMenuOpen(true)}
-                className="lg:hidden p-2 rounded-xl border border-[#EAE3F5] text-[#55476E] hover:bg-[#FAF7FE]"
+                className="p-2 rounded-xl border border-[#EAE3F5] text-[#55476E] hover:bg-[#FAF7FF]"
                 aria-label="Abrir menú"
               >
                 <Menu className="h-5 w-5" />
               </button>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 text-xs text-[#7A6B93]">
-                  <span>ControlOps</span>
-                  <span aria-hidden="true">/</span>
-                  <span className="font-medium text-[#DB2777] truncate">
-                    {selectedBranchName}
-                  </span>
-                </div>
-                <h1 className="font-display text-lg sm:text-xl font-bold text-[#1F172B] truncate">
-                  {activeHeader.title}
-                </h1>
+              <div>
+                <span className="font-display text-sm font-bold text-[#1F172B]">
+                  ControlOps
+                </span>
+                <span className="ml-2 text-[10px] font-extrabold tracking-wider text-[#7C3AED] uppercase">
+                  CAJERAS
+                </span>
               </div>
             </div>
-
-            <div className="flex items-center gap-2.5 shrink-0">
-              {currentUser.rol !== 'cajera' ? (
-                <select
-                  aria-label="Sucursal activa"
-                  value={effectiveSucursalId}
-                  onChange={(e) => setSelectedSucursalId(e.target.value)}
-                  className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#4C1D95] focus:outline-none focus:border-[#7C3AED]"
+            <button
+              type="button"
+              onClick={fetchData}
+              title="Actualizar datos"
+              className="p-2 rounded-xl border border-[#E6DDF5] bg-white hover:bg-[#FAF7FF] text-[#7C3AED] transition-colors"
+              aria-label="Recargar datos"
+            >
+              <RefreshCw
+                className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`}
+              />
+            </button>
+          </header>
+        ) : (
+          <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-xs border-b border-[#EAE3F5] px-4 sm:px-6 lg:px-8 py-3.5">
+            <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setMobileMenuOpen(true)}
+                  className="lg:hidden p-2 rounded-xl border border-[#EAE3F5] text-[#55476E] hover:bg-[#FAF7FE]"
+                  aria-label="Abrir menú"
                 >
-                  <option value="todas">Todas las sucursales</option>
-                  {sucursales
-                    .filter((s) => s.activa)
-                    .map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.nombre}
-                      </option>
-                    ))}
-                </select>
-              ) : (
-                <span className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#5B21B6]">
-                  {selectedBranchName}
-                </span>
-              )}
+                  <Menu className="h-5 w-5" />
+                </button>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-xs text-[#7A6B93]">
+                    <span>ControlOps</span>
+                    <span aria-hidden="true">/</span>
+                    <span className="font-medium text-[#DB2777] truncate">
+                      {selectedBranchName}
+                    </span>
+                  </div>
+                  <h1 className="font-display text-lg sm:text-xl font-bold text-[#1F172B] truncate">
+                    {activeHeader.title}
+                  </h1>
+                </div>
+              </div>
 
-              <button
-                type="button"
-                onClick={fetchData}
-                title="Actualizar datos"
-                className="p-2 rounded-xl border border-[#E6DDF5] bg-white hover:bg-[#FAF7FE] text-[#6D28D9] transition-colors"
-                aria-label="Recargar datos"
-              >
-                <RefreshCw
-                  className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`}
-                />
-              </button>
+              <div className="flex items-center gap-2.5 shrink-0">
+                {!isCajera ? (
+                  <select
+                    aria-label="Sucursal activa"
+                    value={effectiveSucursalId}
+                    onChange={(e) => setSelectedSucursalId(e.target.value)}
+                    className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#4C1D95] focus:outline-none focus:border-[#7C3AED]"
+                  >
+                    <option value="todas">Todas las sucursales</option>
+                    {sucursales
+                      .filter((s) => s.activa)
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.nombre}
+                        </option>
+                      ))}
+                  </select>
+                ) : (
+                  <span className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF7FF] text-xs font-semibold text-[#6D28D9]">
+                    {selectedBranchName}
+                  </span>
+                )}
+
+                <button
+                  type="button"
+                  onClick={fetchData}
+                  title="Actualizar datos"
+                  className="p-2 rounded-xl border border-[#E6DDF5] bg-white hover:bg-[#FAF7FE] text-[#6D28D9] transition-colors"
+                  aria-label="Recargar datos"
+                >
+                  <RefreshCw
+                    className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`}
+                  />
+                </button>
+              </div>
             </div>
-          </div>
-        </header>
+          </header>
+        )}
 
         {/* Main Viewport */}
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6">
@@ -592,6 +654,22 @@ export default function App() {
               </div>
             ) : (
               <>
+                {safeSection === 'mi_dia' &&
+                  isCajera &&
+                  currentCajeraSucursal && (
+                    <CajeraMiDiaView
+                      currentUser={currentUser}
+                      sucursal={currentCajeraSucursal}
+                      metaSucursal={currentCajeraMeta}
+                      actividades={actividades}
+                      llamadas={llamadas}
+                      gastosYRefrendos={gastosYRefrendos}
+                      horarios={horarios}
+                      diaActivo={diaActivo}
+                      onUpdateActividad={handleUpdateActividad}
+                    />
+                  )}
+
                 {safeSection === 'ranking' &&
                   currentUser.rol !== 'cajera' && (
                     <RankingView
@@ -623,7 +701,7 @@ export default function App() {
                   />
                 )}
 
-                {safeSection === 'actividades' && (
+                {safeSection === 'actividades' && !isCajera && (
                   <ActividadesView
                     actividades={actividades}
                     sucursales={sucursales}
@@ -633,11 +711,7 @@ export default function App() {
                     userRole={currentUser.rol}
                     tareasCatalogo={catalogos.tareas_obligatorias}
                     onChangeDiaActivo={setDiaActivo}
-                    onSelectSucursal={
-                      currentUser.rol !== 'cajera'
-                        ? setSelectedSucursalId
-                        : undefined
-                    }
+                    onSelectSucursal={setSelectedSucursalId}
                     onUpdateActividad={handleUpdateActividad}
                     onCreateActividad={handleCreateActividad}
                     onCreateActividadesBatch={handleCreateActividadesBatch}
@@ -650,13 +724,21 @@ export default function App() {
                   />
                 )}
 
-                {safeSection === 'gastos' && (
+                {(safeSection === 'gastos' || safeSection === 'refrendos') && (
                   <GastosRefrendosView
+                    key={`gr-${safeSection}-${currentUser.rol}`}
                     registros={gastosYRefrendos}
                     summaries={branchSummaries}
                     sucursales={sucursales}
                     selectedSucursalId={effectiveSucursalId}
                     userRole={currentUser.rol}
+                    fixedTab={
+                      safeSection === 'refrendos'
+                        ? 'refrendos'
+                        : isCajera
+                          ? 'gastos'
+                          : undefined
+                    }
                     onCreateRegistro={handleCreateGastoORefrendo}
                     onDeleteRegistro={handleDeleteGastoORefrendo}
                     onDeleteEvidenciaRegistro={handleDeleteEvidenciaRegistro}

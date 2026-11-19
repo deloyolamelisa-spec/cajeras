@@ -11,6 +11,8 @@ import {
   X,
   ShieldCheck,
   LogOut,
+  CalendarCheck,
+  TrendingUp,
 } from 'lucide-react';
 import {
   RolUsuario,
@@ -34,6 +36,17 @@ interface SidebarProps {
   currentUser: UsuarioControlOps;
   onLogout: () => void;
 }
+
+const CAJERA_NAV_ITEMS: {
+  id: SectionId;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}[] = [
+  { id: 'mi_dia', label: 'Mi día', icon: CalendarCheck },
+  { id: 'llamadas', label: 'Llamadas', icon: PhoneCall },
+  { id: 'refrendos', label: 'Refrendos', icon: TrendingUp },
+  { id: 'gastos', label: 'Gastos', icon: Wallet },
+];
 
 const NAV_ITEMS: {
   id: SectionId;
@@ -109,7 +122,130 @@ export const Sidebar: React.FC<SidebarProps> = ({
       ? activeSucursales.filter((s) => s.id === currentUser.sucursal_id)
       : activeSucursales;
 
-  const sidebarContent = (
+  const isCajera = currentUser.rol === 'cajera';
+  const cajeraSucursal = activeSucursales.find(
+    (s) => s.id === currentUser.sucursal_id
+  );
+
+  const sidebarContent = isCajera ? (
+    <div className="flex h-full flex-col bg-white border-r border-[#EAE3F5] text-[#1F172B]">
+      {/* Cajera Brand Header */}
+      <div className="flex items-center justify-between px-5 py-5 border-b border-[#F3EEF9]">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#7C3AED] text-white shadow-sm">
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <rect
+                x="3"
+                y="4"
+                width="8"
+                height="7"
+                rx="2"
+                fill="currentColor"
+                fillOpacity="0.95"
+              />
+              <rect
+                x="13"
+                y="4"
+                width="8"
+                height="11"
+                rx="2"
+                fill="currentColor"
+                fillOpacity="0.65"
+              />
+              <rect
+                x="3"
+                y="13"
+                width="8"
+                height="7"
+                rx="2"
+                fill="currentColor"
+                fillOpacity="0.65"
+              />
+              <circle cx="17" cy="18.5" r="2.5" fill="#FDE68A" />
+            </svg>
+          </div>
+          <div>
+            <span className="font-display text-lg font-bold tracking-tight text-[#1F172B] block leading-tight">
+              ControlOps
+            </span>
+            <p className="text-[10px] font-extrabold tracking-[0.14em] text-[#7C3AED] uppercase mt-0.5">
+              CAJERAS
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onCloseMobile}
+          className="lg:hidden rounded-lg p-1.5 text-[#6E5F87] hover:bg-[#FAF7FF]"
+          aria-label="Cerrar menú"
+        >
+          <X className="h-5 w-5" />
+        </button>
+      </div>
+
+      {/* 4 Exclusive Navigation Tabs */}
+      <nav
+        aria-label="Navegación Cajeras"
+        className="flex-1 px-4 py-5 space-y-1.5"
+      >
+        {CAJERA_NAV_ITEMS.map((item) => {
+          const Icon = item.icon;
+          const isActive = activeSection === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                onSelectSection(item.id);
+                onCloseMobile();
+              }}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-semibold transition-all text-left ${
+                isActive
+                  ? 'bg-[#7C3AED] text-white shadow-[0_4px_12px_rgba(124,58,237,0.28)]'
+                  : 'text-[#55476E] hover:bg-[#FAF7FF] hover:text-[#1F172B]'
+              }`}
+            >
+              <Icon
+                className={`h-4 w-4 shrink-0 ${
+                  isActive ? 'text-white' : 'text-[#8B7CA5]'
+                }`}
+              />
+              <span className="truncate">{item.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* Cajera User & Logout Footer */}
+      <div className="p-4 border-t border-[#F3EEF9] bg-[#FCFAFF]">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-xs font-bold text-[#1F172B] truncate">
+              {currentUser.nombre}
+            </p>
+            <p className="text-[11px] text-[#7A6B93] truncate">
+              {cajeraSucursal?.nombre || 'Sucursal asignada'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onLogout}
+            title="Cerrar sesión"
+            className="p-2 rounded-xl text-[#6E5F87] hover:bg-white hover:text-[#BE123C] border border-transparent hover:border-[#EAE3F5] transition-colors shrink-0"
+            aria-label="Cerrar sesión"
+          >
+            <LogOut className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : (
     <div className="flex h-full flex-col bg-white border-r border-[#EAE3F5] text-[#1F172B]">
       {/* Brand Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-[#F1ECF9]">

@@ -18,6 +18,42 @@ export function formatMXN(amount: number, decimals = 0): string {
   }).format(amount);
 }
 
+export function formatCurrencyClean(amount: number): string {
+  const rounded = Math.round((Number(amount) || 0) * 100) / 100;
+  return new Intl.NumberFormat('es-MX', {
+    style: 'currency',
+    currency: 'MXN',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(rounded);
+}
+
+export function formatHora12h(hhmm: string | null | undefined): string {
+  if (!hhmm) return '';
+  const [hStr, mStr] = hhmm.split(':');
+  const h = Number(hStr);
+  const m = Number(mStr);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const suffix = h >= 12 ? 'p.m.' : 'a.m.';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m).padStart(2, '0')} ${suffix}`;
+}
+
+export function getDiaSemanaFromDate(yyyyMmDd: string): DiaSemana {
+  const [y, m, d] = yyyyMmDd.split('-').map(Number);
+  const dateObj = new Date(y, (m || 1) - 1, d || 1);
+  const map: Record<number, DiaSemana> = {
+    0: 'domingo',
+    1: 'lunes',
+    2: 'martes',
+    3: 'miercoles',
+    4: 'jueves',
+    5: 'viernes',
+    6: 'sabado',
+  };
+  return map[dateObj.getDay()] ?? 'lunes';
+}
+
 export function formatPercent(value: number, decimals = 1): string {
   return `${value.toFixed(decimals)}%`;
 }
