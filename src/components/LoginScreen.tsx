@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Eye, EyeOff, Lock, Mail, ArrowRight } from 'lucide-react';
+import { Eye, EyeOff, Lock, Mail, ArrowRight, AlertTriangle } from 'lucide-react';
+import { getSupabaseConfigStatus } from '../lib/supabaseConfig';
 
 interface LoginScreenProps {
   onLogin: (correo: string, password: string) => Promise<string | null>;
@@ -11,6 +12,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
   const [showPass, setShowPass] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const configStatus = getSupabaseConfigStatus();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -79,8 +81,24 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
           </div>
         </div>
 
+        {!configStatus.configured && (
+          <div
+            role="alert"
+            className="rounded-xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3 text-xs text-[#BE123C] flex items-start gap-2"
+          >
+            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-[#E11D48]" />
+            <div>
+              <p className="font-bold">Error de configuración Supabase</p>
+              <p className="mt-0.5">{configStatus.errorMessage}</p>
+            </div>
+          </div>
+        )}
+
         {error && (
-          <div className="rounded-xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3 text-xs font-medium text-[#BE123C]">
+          <div
+            role="alert"
+            className="rounded-xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3 text-xs font-medium text-[#BE123C]"
+          >
             {error}
           </div>
         )}

@@ -2,6 +2,7 @@ import { getSupabaseClient } from '../lib/supabaseClient';
 import {
   SUPABASE_BUCKETS,
   SUPABASE_TABLES,
+  getSupabaseConfigStatus,
   isSupabaseConfigured,
 } from '../lib/supabaseConfig';
 import {
@@ -47,6 +48,7 @@ export interface LoadedOperationalData {
   gastosYRefrendos: GastoYRefrendo[];
   horarios: HorarioSucursalDia[];
   source: 'supabase' | 'demo';
+  remoteCounts?: Record<string, number>;
   warning?: string;
 }
 
@@ -54,6 +56,13 @@ export interface ServiceResult<T = unknown> {
   ok: boolean;
   error?: string;
   data?: T;
+}
+
+export interface TableDiagnosticResult {
+  table: string;
+  ok: boolean;
+  rowCount: number;
+  error?: string;
 }
 
 function formatSupabaseError(err: {
@@ -68,6 +77,29 @@ function formatSupabaseError(err: {
   if (err.details) parts.push(`Detalle: ${err.details}`);
   if (err.hint) parts.push(`Sugerencia: ${err.hint}`);
   return parts.join(' · ') || 'Error desconocido en Supabase';
+}
+
+function requireConfiguredSupabase():
+  | { ok: true; client: NonNullable<ReturnType<typeof getSupabaseClient>> }
+  | { ok: false; error: string } {
+  const status = getSupabaseConfigStatus();
+  if (!status.configured) {
+    return {
+      ok: false,
+      error:
+        status.errorMessage ||
+        'Falta configurar VITE_SUPABASE_URL o VITE_SUPABASE_ANON_KEY.',
+    };
+  }
+  const client = getSupabaseClient();
+  if (!client) {
+    return {
+      ok: false,
+      error:
+        'No se pudo inicializar el cliente de Supabase. Verifica VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY.',
+    };
+  }
+  return { ok: true, client };
 }
 
 function readLocal<T>(key: string, fallback: T): T {
@@ -104,6 +136,58 @@ export function saveSessionUser(user: UsuarioControlOps | null): void {
   writeLocal(STORAGE_KEYS.SESSION_USER, user);
 }
 
+export async function runSupabaseDiagnostics(): Promise<{
+  status: ReturnType<typeof getSupabaseConfigStatus>;
+  tables: TableDiagnosticResult[];
+}> {
+  const status = getSupabaseConfigStatus();
+  const client = getSupabaseClient();
+  const tableList = Object.values(SUPABASE_TABLES);
+
+  if (!status.configured || !client) {
+    return {
+      status,
+      tables: tableList.map((table) => ({
+        table,
+        ok: false,
+        rowCount: 0,
+        error: status.errorMessage || 'Cliente Supabase no inicializado',
+      })),
+    };
+  }
+
+  const tables = await Promise.all(
+    tableList.map(async (table): Promise<TableDiagnosticResult> => {
+      try {
+        const { data, error } = await client.from(table).select('id');
+        if (error) {
+          return {
+            table,
+            ok: false,
+            rowCount: 0,
+            error: formatSupabaseError(error),
+          };
+        }
+        return {
+          table,
+          ok: true,
+          rowCount: data ? data.length : 0,
+        };
+      } catch (err) {
+        return {
+          table,
+          ok: false,
+          rowCount: 0,
+          error:
+            err instanceof Error ? err.message : 'Error de red al consultar',
+        };
+      }
+    })
+  );
+
+  return { status, tables };
+}
+
 export async function authenticateUsuario(
   correoOrNombre: string,
   password: string
@@ -115,89 +199,69 @@ export async function authenticateUsuario(
     return { user: null, error: 'Ingresa tu usuario/correo y contraseña.' };
   }
 
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
-    try {
-      const { data, error } = await supabase
-        .from(SUPABASE_TABLES.USUARIOS)
-        .select('*');
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) {
+    return { user: null, error: conn.error };
+  }
 
-      if (error) {
-        return {
-          user: null,
-          error: `Error al consultar ${SUPABASE_TABLES.USUARIOS} en Supabase: ${formatSupabaseError(error)}`,
-        };
-      }
+  try {
+    const { data, error } = await conn.client
+      .from(SUPABASE_TABLES.USUARIOS)
+      .select('*');
 
-      const users = (data || []) as UsuarioControlOps[];
-      if (users.length === 0) {
-        return {
-          user: null,
-          error: `La tabla ${SUPABASE_TABLES.USUARIOS} en Supabase no tiene usuarios registrados.`,
-        };
-      }
-
-      writeLocal(STORAGE_KEYS.USUARIOS, users);
-
-      const matched = users.find((u) => {
-        const uCorreo = (u.correo || '').trim().toLowerCase();
-        const uNombre = (u.nombre || '').trim().toLowerCase();
-        const uPass = (u.password || '').trim();
-        return (uCorreo === input || uNombre === input) && uPass === pass;
-      });
-
-      if (!matched) {
-        return {
-          user: null,
-          error: `Usuario o contraseña incorrectos en ${SUPABASE_TABLES.USUARIOS}.`,
-        };
-      }
-      if (!matched.activo) {
-        return {
-          user: null,
-          error: 'Esta cuenta se encuentra desactivada. Contacta al Creador.',
-        };
-      }
-      return { user: matched };
-    } catch (err) {
+    if (error) {
       return {
         user: null,
-        error:
-          err instanceof Error
-            ? `Error de red al conectar con Supabase: ${err.message}`
-            : 'No se pudo conectar con Supabase para validar acceso.',
+        error: `Error al consultar ${SUPABASE_TABLES.USUARIOS} en Supabase: ${formatSupabaseError(error)}`,
       };
     }
-  }
 
-  const localUsers = readLocal<UsuarioControlOps[]>(
-    STORAGE_KEYS.USUARIOS,
-    INITIAL_USUARIOS
-  );
-  const matchedLocal = localUsers.find((u) => {
-    const uCorreo = (u.correo || '').trim().toLowerCase();
-    const uNombre = (u.nombre || '').trim().toLowerCase();
-    const uPass = (u.password || '').trim();
-    return (uCorreo === input || uNombre === input) && uPass === pass;
-  });
+    const users = (data || []) as UsuarioControlOps[];
+    if (users.length === 0) {
+      return {
+        user: null,
+        error: `La tabla ${SUPABASE_TABLES.USUARIOS} en Supabase no tiene usuarios registrados.`,
+      };
+    }
 
-  if (!matchedLocal) {
-    return { user: null, error: 'Usuario o contraseña incorrectos.' };
-  }
-  if (!matchedLocal.activo) {
+    writeLocal(STORAGE_KEYS.USUARIOS, users);
+
+    const matched = users.find((u) => {
+      const uCorreo = (u.correo || '').trim().toLowerCase();
+      const uNombre = (u.nombre || '').trim().toLowerCase();
+      const uPass = (u.password || '').trim();
+      return (uCorreo === input || uNombre === input) && uPass === pass;
+    });
+
+    if (!matched) {
+      return {
+        user: null,
+        error: `Usuario o contraseña incorrectos en ${SUPABASE_TABLES.USUARIOS}.`,
+      };
+    }
+    if (!matched.activo) {
+      return {
+        user: null,
+        error: 'Esta cuenta se encuentra desactivada. Contacta al Creador.',
+      };
+    }
+    return { user: matched };
+  } catch (err) {
     return {
       user: null,
-      error: 'Esta cuenta está desactivada. Contacta al Administrador Total.',
+      error:
+        err instanceof Error
+          ? `Error de red al conectar con Supabase: ${err.message}`
+          : 'No se pudo conectar con Supabase para validar acceso.',
     };
   }
-
-  return { user: matchedLocal };
 }
 
 export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
+  const status = getSupabaseConfigStatus();
   const supabase = getSupabaseClient();
 
-  const localFallback = (): LoadedOperationalData => {
+  const localFallback = (warning?: string): LoadedOperationalData => {
     const sucursales = readLocal(STORAGE_KEYS.SUCURSALES, INITIAL_SUCURSALES);
     return {
       sucursales,
@@ -215,11 +279,15 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
         buildInitialHorarios(sucursales)
       ),
       source: 'demo',
+      warning,
     };
   };
 
-  if (!supabase || !isSupabaseConfigured()) {
-    return localFallback();
+  if (!status.configured || !supabase) {
+    return localFallback(
+      status.errorMessage ||
+        'Supabase no está configurado (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY).'
+    );
   }
 
   try {
@@ -255,42 +323,55 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
     const tableWarnings: string[] = [];
     if (usuariosRes.error) {
       tableWarnings.push(
-        `${SUPABASE_TABLES.USUARIOS}: ${usuariosRes.error.message}`
+        `${SUPABASE_TABLES.USUARIOS}: ${formatSupabaseError(usuariosRes.error)}`
       );
     }
     if (sucursalesRes.error) {
       tableWarnings.push(
-        `${SUPABASE_TABLES.SUCURSALES}: ${sucursalesRes.error.message}`
+        `${SUPABASE_TABLES.SUCURSALES}: ${formatSupabaseError(sucursalesRes.error)}`
       );
     }
     if (metasRes.error) {
-      tableWarnings.push(`${SUPABASE_TABLES.METAS}: ${metasRes.error.message}`);
+      tableWarnings.push(
+        `${SUPABASE_TABLES.METAS}: ${formatSupabaseError(metasRes.error)}`
+      );
     }
     if (catalogosRes.error) {
       tableWarnings.push(
-        `${SUPABASE_TABLES.CATALOGOS}: ${catalogosRes.error.message}`
+        `${SUPABASE_TABLES.CATALOGOS}: ${formatSupabaseError(catalogosRes.error)}`
       );
     }
     if (horariosRes.error) {
       tableWarnings.push(
-        `${SUPABASE_TABLES.HORARIOS}: ${horariosRes.error.message}`
+        `${SUPABASE_TABLES.HORARIOS}: ${formatSupabaseError(horariosRes.error)}`
       );
     }
     if (llamadasRes.error) {
       tableWarnings.push(
-        `${SUPABASE_TABLES.LLAMADAS}: ${llamadasRes.error.message}`
+        `${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(llamadasRes.error)}`
       );
     }
     if (actividadesRes.error) {
       tableWarnings.push(
-        `${SUPABASE_TABLES.ACTIVIDADES}: ${actividadesRes.error.message}`
+        `${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(actividadesRes.error)}`
       );
     }
     if (gastosRes.error) {
       tableWarnings.push(
-        `${SUPABASE_TABLES.GASTOS_REFRENDOS}: ${gastosRes.error.message}`
+        `${SUPABASE_TABLES.GASTOS_REFRENDOS}: ${formatSupabaseError(gastosRes.error)}`
       );
     }
+
+    const remoteCounts: Record<string, number> = {
+      [SUPABASE_TABLES.USUARIOS]: usuariosRes.data?.length ?? 0,
+      [SUPABASE_TABLES.SUCURSALES]: sucursalesRes.data?.length ?? 0,
+      [SUPABASE_TABLES.METAS]: metasRes.data?.length ?? 0,
+      [SUPABASE_TABLES.CATALOGOS]: catalogosRes.data?.length ?? 0,
+      [SUPABASE_TABLES.HORARIOS]: horariosRes.data?.length ?? 0,
+      [SUPABASE_TABLES.ACTIVIDADES]: actividadesRes.data?.length ?? 0,
+      [SUPABASE_TABLES.LLAMADAS]: llamadasRes.data?.length ?? 0,
+      [SUPABASE_TABLES.GASTOS_REFRENDOS]: gastosRes.data?.length ?? 0,
+    };
 
     const sucursales =
       !sucursalesRes.error && sucursalesRes.data && sucursalesRes.data.length > 0
@@ -325,31 +406,25 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
     }
 
     const llamadas =
-      !llamadasRes.error && llamadasRes.data && llamadasRes.data.length > 0
+      !llamadasRes.error && llamadasRes.data
         ? (llamadasRes.data as LlamadaSucursal[])
-        : !llamadasRes.error && llamadasRes.data
-          ? []
-          : readLocal(STORAGE_KEYS.LLAMADAS, INITIAL_LLAMADAS);
+        : readLocal(STORAGE_KEYS.LLAMADAS, INITIAL_LLAMADAS);
     if (!llamadasRes.error && llamadasRes.data) {
       writeLocal(STORAGE_KEYS.LLAMADAS, llamadas);
     }
 
     const actividades =
-      !actividadesRes.error && actividadesRes.data && actividadesRes.data.length > 0
+      !actividadesRes.error && actividadesRes.data
         ? (actividadesRes.data as ActividadDiaria[])
-        : !actividadesRes.error && actividadesRes.data
-          ? []
-          : readLocal(STORAGE_KEYS.ACTIVIDADES, INITIAL_ACTIVIDADES);
+        : readLocal(STORAGE_KEYS.ACTIVIDADES, INITIAL_ACTIVIDADES);
     if (!actividadesRes.error && actividadesRes.data) {
       writeLocal(STORAGE_KEYS.ACTIVIDADES, actividades);
     }
 
     const gastosYRefrendos =
-      !gastosRes.error && gastosRes.data && gastosRes.data.length > 0
+      !gastosRes.error && gastosRes.data
         ? (gastosRes.data as GastoYRefrendo[])
-        : !gastosRes.error && gastosRes.data
-          ? []
-          : readLocal(STORAGE_KEYS.GASTOS_REFRENDOS, INITIAL_GASTOS_REFRENDOS);
+        : readLocal(STORAGE_KEYS.GASTOS_REFRENDOS, INITIAL_GASTOS_REFRENDOS);
     if (!gastosRes.error && gastosRes.data) {
       writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, gastosYRefrendos);
     }
@@ -372,19 +447,18 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
       gastosYRefrendos,
       horarios,
       source: 'supabase',
+      remoteCounts,
       warning:
         tableWarnings.length > 0
           ? `Algunas tablas de Supabase reportaron error: ${tableWarnings.join(' | ')}`
           : undefined,
     };
   } catch (err) {
-    return {
-      ...localFallback(),
-      warning:
-        err instanceof Error
-          ? err.message
-          : 'No se pudo conectar con Supabase.',
-    };
+    return localFallback(
+      err instanceof Error
+        ? `Error de conexión con Supabase: ${err.message}`
+        : 'No se pudo conectar con Supabase.'
+    );
   }
 }
 
@@ -392,17 +466,37 @@ export async function saveLlamada(
   llamada: LlamadaSucursal,
   allLlamadas: LlamadaSucursal[]
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
-    const { error } = await supabase
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.LLAMADAS)
-      .upsert(llamada, { onConflict: 'id' });
+      .upsert(llamada, { onConflict: 'id' })
+      .select();
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error en ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.LLAMADAS} (revisa políticas RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al guardar en ${SUPABASE_TABLES.LLAMADAS}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
-  return { ok: true };
 }
 
 export async function saveLlamadasBatch(
@@ -410,35 +504,68 @@ export async function saveLlamadasBatch(
   allLlamadas: LlamadaSucursal[]
 ): Promise<ServiceResult> {
   if (nuevasLlamadas.length === 0) return { ok: true };
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
-    const { error } = await supabase
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.LLAMADAS)
-      .upsert(nuevasLlamadas, { onConflict: 'id' });
+      .upsert(nuevasLlamadas, { onConflict: 'id' })
+      .select();
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error al importar en ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó la importación en ${SUPABASE_TABLES.LLAMADAS} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al importar en ${SUPABASE_TABLES.LLAMADAS}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
-  return { ok: true };
 }
 
 export async function deleteLlamadaRecord(
   id: string,
   allLlamadas: LlamadaSucursal[]
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
-    const { error } = await supabase
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const { error } = await conn.client
       .from(SUPABASE_TABLES.LLAMADAS)
       .delete()
       .eq('id', id);
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error al eliminar en ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(error)}`,
+      };
     }
+    writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al eliminar en ${SUPABASE_TABLES.LLAMADAS}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
-  return { ok: true };
 }
 
 export async function deleteEvidenciaFoto(
@@ -489,18 +616,38 @@ export async function saveActividad(
   actividad: ActividadDiaria,
   allActividades: ActividadDiaria[]
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
     const payload = buildActividadPayload(actividad);
-    const { error } = await supabase
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.ACTIVIDADES)
-      .upsert(payload, { onConflict: 'id' });
+      .upsert(payload, { onConflict: 'id' })
+      .select();
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.ACTIVIDADES} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al guardar en ${SUPABASE_TABLES.ACTIVIDADES}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
-  return { ok: true };
 }
 
 export async function saveActividadesBatch(
@@ -508,85 +655,153 @@ export async function saveActividadesBatch(
   allActividades: ActividadDiaria[]
 ): Promise<ServiceResult> {
   if (nuevas.length === 0) return { ok: true };
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
     const payloads = nuevas.map(buildActividadPayload);
-    const { error } = await supabase
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.ACTIVIDADES)
-      .upsert(payloads, { onConflict: 'id' });
+      .upsert(payloads, { onConflict: 'id' })
+      .select();
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó el guardado en ${SUPABASE_TABLES.ACTIVIDADES} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al guardar en ${SUPABASE_TABLES.ACTIVIDADES}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
-  return { ok: true };
 }
 
 export async function deleteActividadRecord(
   actividad: ActividadDiaria,
   allActividades: ActividadDiaria[]
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
-    const { error } = await supabase
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const { error } = await conn.client
       .from(SUPABASE_TABLES.ACTIVIDADES)
       .delete()
       .eq('id', actividad.id);
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error al eliminar en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (actividad.evidencia_url) {
+      await deleteEvidenciaFoto(actividad.evidencia_url);
+    }
+    writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al eliminar en ${SUPABASE_TABLES.ACTIVIDADES}`,
+    };
   }
-  if (actividad.evidencia_url) {
-    await deleteEvidenciaFoto(actividad.evidencia_url);
-  }
-  writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
-  return { ok: true };
 }
 
 export async function saveGastoORefrendo(
   registro: GastoYRefrendo,
   allRegistros: GastoYRefrendo[]
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
-    const { error } = await supabase
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
-      .upsert(registro, { onConflict: 'id' });
+      .upsert(registro, { onConflict: 'id' })
+      .select();
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error en ${SUPABASE_TABLES.GASTOS_REFRENDOS}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.GASTOS_REFRENDOS} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, allRegistros);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al guardar en ${SUPABASE_TABLES.GASTOS_REFRENDOS}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, allRegistros);
-  return { ok: true };
 }
 
 export async function deleteGastoORefrendoRecord(
   registro: GastoYRefrendo,
   allRegistros: GastoYRefrendo[]
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
-    const { error } = await supabase
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const { error } = await conn.client
       .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
       .delete()
       .eq('id', registro.id);
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error al eliminar en ${SUPABASE_TABLES.GASTOS_REFRENDOS}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (registro.evidencia_url) {
+      await deleteEvidenciaFoto(registro.evidencia_url);
+    }
+    writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, allRegistros);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al eliminar en ${SUPABASE_TABLES.GASTOS_REFRENDOS}`,
+    };
   }
-  if (registro.evidencia_url) {
-    await deleteEvidenciaFoto(registro.evidencia_url);
-  }
-  writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, allRegistros);
-  return { ok: true };
 }
 
 export async function saveHorarioDia(
   horario: HorarioSucursalDia,
   allHorarios: HorarioSucursalDia[]
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
     const payload = {
       id: horario.id,
       sucursal_id: horario.sucursal_id,
@@ -595,15 +810,33 @@ export async function saveHorarioDia(
       hora_limite_corte: horario.hora_limite_corte,
       sin_horario_limite: Boolean(horario.sin_horario_limite),
     };
-    const { error } = await supabase
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.HORARIOS)
-      .upsert(payload, { onConflict: 'id' });
+      .upsert(payload, { onConflict: 'id' })
+      .select();
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error en ${SUPABASE_TABLES.HORARIOS}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.HORARIOS} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.HORARIOS, allHorarios);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al guardar en ${SUPABASE_TABLES.HORARIOS}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.HORARIOS, allHorarios);
-  return { ok: true };
 }
 
 export async function saveHorariosBatch(
@@ -611,8 +844,10 @@ export async function saveHorariosBatch(
   allHorarios: HorarioSucursalDia[]
 ): Promise<ServiceResult> {
   if (targets.length === 0) return { ok: true };
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
     const payloads = targets.map((h) => ({
       id: h.id,
       sucursal_id: h.sucursal_id,
@@ -621,70 +856,204 @@ export async function saveHorariosBatch(
       hora_limite_corte: h.hora_limite_corte,
       sin_horario_limite: Boolean(h.sin_horario_limite),
     }));
-    const { error } = await supabase
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.HORARIOS)
-      .upsert(payloads, { onConflict: 'id' });
+      .upsert(payloads, { onConflict: 'id' })
+      .select();
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error en ${SUPABASE_TABLES.HORARIOS}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.HORARIOS} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.HORARIOS, allHorarios);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al guardar en ${SUPABASE_TABLES.HORARIOS}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.HORARIOS, allHorarios);
-  return { ok: true };
+}
+
+function buildSucursalPayload(sucursal: Sucursal) {
+  return {
+    id: sucursal.id,
+    nombre: sucursal.nombre.trim(),
+    codigo: sucursal.codigo.trim(),
+    ciudad: (sucursal.ciudad ?? '').trim(),
+    responsable_caja: (sucursal.responsable_caja ?? '').trim(),
+    meta_llamadas_diarias: Number(sucursal.meta_llamadas_diarias) || 30,
+    meta_actividades_diarias: Number(sucursal.meta_actividades_diarias) || 5,
+    meta_refrendos_mensual: Number(sucursal.meta_refrendos_mensual) || 40,
+    techo_gasto_mensual: Number(sucursal.techo_gasto_mensual) || 0,
+    activa: Boolean(sucursal.activa),
+  };
+}
+
+export async function createSucursal(
+  sucursal: Sucursal,
+  allSucursales: Sucursal[]
+): Promise<ServiceResult<Sucursal>> {
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const payload = buildSucursalPayload(sucursal);
+    const { data, error } = await conn.client
+      .from(SUPABASE_TABLES.SUCURSALES)
+      .insert(payload)
+      .select()
+      .single();
+    if (error) {
+      return {
+        ok: false,
+        error: `Error al insertar en ${SUPABASE_TABLES.SUCURSALES}: ${formatSupabaseError(error)}`,
+      };
+    }
+    if (!data) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó la inserción en ${SUPABASE_TABLES.SUCURSALES} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.SUCURSALES, allSucursales);
+    return { ok: true, data: data as Sucursal };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al insertar en ${SUPABASE_TABLES.SUCURSALES}`,
+    };
+  }
 }
 
 export async function saveSucursal(
   sucursal: Sucursal,
   allSucursales: Sucursal[]
-): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
-    const payload = {
-      id: sucursal.id,
-      nombre: sucursal.nombre,
-      codigo: sucursal.codigo,
-      ciudad: sucursal.ciudad ?? '',
-      responsable_caja: sucursal.responsable_caja ?? '',
-      meta_llamadas_diarias: Number(sucursal.meta_llamadas_diarias) || 30,
-      meta_actividades_diarias: Number(sucursal.meta_actividades_diarias) || 5,
-      meta_refrendos_mensual: Number(sucursal.meta_refrendos_mensual) || 40,
-      techo_gasto_mensual: Number(sucursal.techo_gasto_mensual) || 0,
-      activa: Boolean(sucursal.activa),
-    };
-    const { error } = await supabase
+): Promise<ServiceResult<Sucursal>> {
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const payload = buildSucursalPayload(sucursal);
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.SUCURSALES)
-      .upsert(payload, { onConflict: 'id' });
+      .upsert(payload, { onConflict: 'id' })
+      .select();
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error al guardar en ${SUPABASE_TABLES.SUCURSALES}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó el guardado en ${SUPABASE_TABLES.SUCURSALES} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.SUCURSALES, allSucursales);
+    return { ok: true, data: data[0] as Sucursal };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al guardar en ${SUPABASE_TABLES.SUCURSALES}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.SUCURSALES, allSucursales);
-  return { ok: true };
+}
+
+export async function saveSucursalesBatch(
+  sucursales: Sucursal[]
+): Promise<ServiceResult> {
+  if (sucursales.length === 0) return { ok: true };
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const payloads = sucursales.map(buildSucursalPayload);
+    const { data, error } = await conn.client
+      .from(SUPABASE_TABLES.SUCURSALES)
+      .upsert(payloads, { onConflict: 'id' })
+      .select();
+    if (error) {
+      return {
+        ok: false,
+        error: `Error al sincronizar ${SUPABASE_TABLES.SUCURSALES}: ${formatSupabaseError(error)}`,
+      };
+    }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó el guardado en ${SUPABASE_TABLES.SUCURSALES} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.SUCURSALES, sucursales);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al sincronizar ${SUPABASE_TABLES.SUCURSALES}`,
+    };
+  }
 }
 
 export async function deleteSucursalRecord(
   id: string,
   allSucursales: Sucursal[]
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
-    const { error } = await supabase
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const { error } = await conn.client
       .from(SUPABASE_TABLES.SUCURSALES)
       .delete()
       .eq('id', id);
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error al eliminar en ${SUPABASE_TABLES.SUCURSALES}: ${formatSupabaseError(error)}`,
+      };
     }
+    writeLocal(STORAGE_KEYS.SUCURSALES, allSucursales);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al eliminar en ${SUPABASE_TABLES.SUCURSALES}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.SUCURSALES, allSucursales);
-  return { ok: true };
 }
 
 export async function saveMetaSucursal(
   meta: MetaSucursal,
   allMetas: MetaSucursal[]
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
     const payload = {
       id: meta.id,
       sucursal_id: meta.sucursal_id,
@@ -693,15 +1062,33 @@ export async function saveMetaSucursal(
       meta_refrendos_mensual: Number(meta.meta_refrendos_mensual) || 40,
       techo_gasto_mensual: Number(meta.techo_gasto_mensual) || 0,
     };
-    const { error } = await supabase
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.METAS)
-      .upsert(payload, { onConflict: 'id' });
+      .upsert(payload, { onConflict: 'id' })
+      .select();
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error en ${SUPABASE_TABLES.METAS}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.METAS} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.METAS, allMetas);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al guardar en ${SUPABASE_TABLES.METAS}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.METAS, allMetas);
-  return { ok: true };
 }
 
 function buildUsuarioInsertPayload(usuario: UsuarioControlOps) {
@@ -720,11 +1107,12 @@ export async function createUsuario(
   usuario: UsuarioControlOps,
   allUsuarios: UsuarioControlOps[]
 ): Promise<ServiceResult<UsuarioControlOps>> {
-  const payload = buildUsuarioInsertPayload(usuario);
-  const supabase = getSupabaseClient();
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
 
-  if (supabase && isSupabaseConfigured()) {
-    const { data, error } = await supabase
+  try {
+    const payload = buildUsuarioInsertPayload(usuario);
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.USUARIOS)
       .insert(payload)
       .select()
@@ -737,30 +1125,40 @@ export async function createUsuario(
       };
     }
 
-    const savedUser = (data as UsuarioControlOps) || {
-      ...usuario,
-      ...payload,
-    };
+    if (!data) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó la inserción en ${SUPABASE_TABLES.USUARIOS} (revisa RLS).`,
+      };
+    }
+
+    const savedUser = data as UsuarioControlOps;
     const nextList = allUsuarios.map((u) =>
       u.id === savedUser.id ? savedUser : u
     );
     writeLocal(STORAGE_KEYS.USUARIOS, nextList);
     return { ok: true, data: savedUser };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al insertar en ${SUPABASE_TABLES.USUARIOS}`,
+    };
   }
-
-  writeLocal(STORAGE_KEYS.USUARIOS, allUsuarios);
-  return { ok: true, data: { ...usuario, ...payload } };
 }
 
 export async function updateUsuario(
   usuario: UsuarioControlOps,
   allUsuarios: UsuarioControlOps[]
 ): Promise<ServiceResult<UsuarioControlOps>> {
-  const payload = buildUsuarioInsertPayload(usuario);
-  const supabase = getSupabaseClient();
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
 
-  if (supabase && isSupabaseConfigured()) {
-    const { data, error } = await supabase
+  try {
+    const payload = buildUsuarioInsertPayload(usuario);
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.USUARIOS)
       .update({
         nombre: payload.nombre,
@@ -784,9 +1182,8 @@ export async function updateUsuario(
       | UsuarioControlOps
       | undefined;
 
-    // Si la fila aún no existía en Supabase, insertarla directamente
     if (!savedUser) {
-      const { data: inserted, error: insertError } = await supabase
+      const { data: inserted, error: insertError } = await conn.client
         .from(SUPABASE_TABLES.USUARIOS)
         .insert(payload)
         .select()
@@ -806,19 +1203,26 @@ export async function updateUsuario(
     );
     writeLocal(STORAGE_KEYS.USUARIOS, nextList);
     return { ok: true, data: savedUser };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al actualizar en ${SUPABASE_TABLES.USUARIOS}`,
+    };
   }
-
-  writeLocal(STORAGE_KEYS.USUARIOS, allUsuarios);
-  return { ok: true, data: { ...usuario, ...payload } };
 }
 
 export async function deleteUsuarioRecord(
   id: string,
   allUsuarios: UsuarioControlOps[]
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
-    const { error } = await supabase
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const { error } = await conn.client
       .from(SUPABASE_TABLES.USUARIOS)
       .delete()
       .eq('id', id);
@@ -828,30 +1232,58 @@ export async function deleteUsuarioRecord(
         error: `Error al eliminar en ${SUPABASE_TABLES.USUARIOS}: ${formatSupabaseError(error)}`,
       };
     }
+    writeLocal(STORAGE_KEYS.USUARIOS, allUsuarios);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al eliminar en ${SUPABASE_TABLES.USUARIOS}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.USUARIOS, allUsuarios);
-  return { ok: true };
 }
 
 export async function saveCatalogos(
   catalogos: CatalogosControlOps
 ): Promise<ServiceResult> {
-  const supabase = getSupabaseClient();
-  if (supabase && isSupabaseConfigured()) {
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
     const payload = {
       id: catalogos.id || 'cat-global',
       tareas_obligatorias: catalogos.tareas_obligatorias ?? [],
       opciones_llamada: catalogos.opciones_llamada ?? [],
     };
-    const { error } = await supabase
+    const { data, error } = await conn.client
       .from(SUPABASE_TABLES.CATALOGOS)
-      .upsert(payload, { onConflict: 'id' });
+      .upsert(payload, { onConflict: 'id' })
+      .select();
     if (error) {
-      return { ok: false, error: formatSupabaseError(error) };
+      return {
+        ok: false,
+        error: `Error en ${SUPABASE_TABLES.CATALOGOS}: ${formatSupabaseError(error)}`,
+      };
     }
+    if (!data || data.length === 0) {
+      return {
+        ok: false,
+        error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.CATALOGOS} (revisa RLS).`,
+      };
+    }
+    writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al guardar en ${SUPABASE_TABLES.CATALOGOS}`,
+    };
   }
-  writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
-  return { ok: true };
 }
 
 export async function uploadEvidenciaFoto(

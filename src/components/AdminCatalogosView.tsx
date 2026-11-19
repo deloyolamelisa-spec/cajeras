@@ -26,7 +26,10 @@ import {
   TareaCatalogo,
   UsuarioControlOps,
 } from '../types/controlops';
-import { ServiceResult } from '../services/controlOpsService';
+import {
+  ServiceResult,
+} from '../services/controlOpsService';
+import { getSupabaseConfigStatus } from '../lib/supabaseConfig';
 import { formatMXN } from '../utils/calculations';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
@@ -38,8 +41,10 @@ interface AdminCatalogosViewProps {
   actividades: ActividadDiaria[];
   currentUserId: string;
   supabaseConnected: boolean;
+  remoteSucursalesCount?: number;
+  onSyncBaseSucursales?: () => Promise<ServiceResult>;
   onOpenSupabaseModal: () => void;
-  onSaveSucursal: (suc: Sucursal) => Promise<ServiceResult>;
+  onSaveSucursal: (suc: Sucursal, isNew?: boolean) => Promise<ServiceResult>;
   onDeleteSucursal: (id: string) => Promise<ServiceResult>;
   onSaveMeta: (meta: MetaSucursal) => Promise<ServiceResult>;
   onSaveCatalogos: (catalogos: CatalogosControlOps) => Promise<ServiceResult>;
@@ -85,6 +90,8 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   actividades,
   currentUserId,
   supabaseConnected,
+  remoteSucursalesCount,
+  onSyncBaseSucursales,
   onOpenSupabaseModal,
   onSaveSucursal,
   onDeleteSucursal,
@@ -100,6 +107,8 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   const [feedback, setFeedback] = useState<string | null>(null);
   const [errorAlert, setErrorAlert] = useState<string | null>(null);
   const [savingUser, setSavingUser] = useState(false);
+  const [savingBranch, setSavingBranch] = useState(false);
+  const configStatus = getSupabaseConfigStatus();
 
   const notify = (msg: string) => {
     setErrorAlert(null);
@@ -167,64 +176,96 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   const handleAddBranch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newBranch.nombre.trim()) return;
+    setSavingBranch(true);
     setErrorAlert(null);
-    const id = `suc-${Date.now()}`;
-    const created: Sucursal = {
-      id,
-      nombre: newBranch.nombre.trim(),
-      codigo:
-        newBranch.codigo.trim() || `SUC-${String(sucursales.length + 1).padStart(2, '0')}`,
-      ciudad: newBranch.ciudad.trim() || 'CDMX',
-      responsable_caja: newBranch.responsable_caja.trim() || 'Por asignar',
-      meta_llamadas_diarias: 30,
-      meta_actividades_diarias: 5,
-      meta_refrendos_mensual: 40,
-      techo_gasto_mensual: 4500,
-      activa: true,
-    };
-    const resSuc = await onSaveSucursal(created);
-    if (!resSuc.ok) {
-      fail(resSuc.error);
-      return;
+    try {
+      const id = `suc-${Date.now()}`;
+      const created: Sucursal = {
+        id,
+        nombre: newBranch.nombre.trim(),
+        codigo:
+          newBranch.codigo.trim() ||
+          `SUC-${String(sucursales.length + 1).padStart(2, '0')}`,
+        ciudad: newBranch.ciudad.trim() || 'CDMX',
+        responsable_caja: newBranch.responsable_caja.trim() || 'Por asignar',
+        meta_llamadas_diarias: 30,
+        meta_actividades_diarias: 5,
+        meta_refrendos_mensual: 40,
+        techo_gasto_mensual: 4500,
+        activa: true,
+      };
+      const resSuc = await onSaveSucursal(created, true);
+      if (!resSuc.ok) {
+        fail(resSuc.error);
+        return;
+      }
+      const resMeta = await onSaveMeta({
+        id: `meta-${id}`,
+        sucursal_id: id,
+        meta_llamadas_diarias: 30,
+        meta_actividades_diarias: 5,
+        meta_refrendos_mensual: 40,
+        techo_gasto_mensual: 4500,
+      });
+      if (!resMeta.ok) {
+        fail(
+          `Sucursal creada en sucursales_config, pero falló metas_sucursal: ${resMeta.error}`
+        );
+        return;
+      }
+      setNewBranch({ nombre: '', codigo: '', ciudad: '', responsable_caja: '' });
+      notify(`Sucursal "${created.nombre}" guardada en sucursales_config de Supabase.`);
+    } catch (err) {
+      fail(
+        err instanceof Error
+          ? err.message
+          : 'Error inesperado al crear sucursal en Supabase.'
+      );
+    } finally {
+      setSavingBranch(false);
     }
-    const resMeta = await onSaveMeta({
-      id: `meta-${id}`,
-      sucursal_id: id,
-      meta_llamadas_diarias: 30,
-      meta_actividades_diarias: 5,
-      meta_refrendos_mensual: 40,
-      techo_gasto_mensual: 4500,
-    });
-    if (!resMeta.ok) {
-      fail(resMeta.error);
-      return;
-    }
-    setNewBranch({ nombre: '', codigo: '', ciudad: '', responsable_caja: '' });
-    notify(`Sucursal "${created.nombre}" agregada en sucursales_config.`);
   };
 
   const handleSaveBranchRow = async (suc: Sucursal) => {
-    const merged = branchDrafts[suc.id] || suc;
-    const res = await onSaveSucursal(merged);
-    if (!res.ok) {
-      fail(res.error);
-      return;
+    setErrorAlert(null);
+    try {
+      const merged = branchDrafts[suc.id] || suc;
+      const res = await onSaveSucursal(merged, false);
+      if (!res.ok) {
+        fail(res.error);
+        return;
+      }
+      notify(`Cambios guardados para ${merged.nombre} en sucursales_config.`);
+    } catch (err) {
+      fail(
+        err instanceof Error
+          ? err.message
+          : 'Error inesperado al guardar sucursal.'
+      );
     }
-    notify(`Cambios guardados para ${merged.nombre}.`);
   };
 
   const handleToggleBranchActive = async (suc: Sucursal) => {
-    const base = branchDrafts[suc.id] || suc;
-    const updated = { ...base, activa: !base.activa };
-    const res = await onSaveSucursal(updated);
-    if (!res.ok) {
-      fail(res.error);
-      return;
+    setErrorAlert(null);
+    try {
+      const base = branchDrafts[suc.id] || suc;
+      const updated = { ...base, activa: !base.activa };
+      const res = await onSaveSucursal(updated, false);
+      if (!res.ok) {
+        fail(res.error);
+        return;
+      }
+      setBranchDrafts((prev) => ({ ...prev, [suc.id]: updated }));
+      notify(
+        `${updated.nombre} ${updated.activa ? 'activada' : 'desactivada'} en Supabase.`
+      );
+    } catch (err) {
+      fail(
+        err instanceof Error
+          ? err.message
+          : 'Error inesperado al cambiar estado de sucursal.'
+      );
     }
-    setBranchDrafts((prev) => ({ ...prev, [suc.id]: updated }));
-    notify(
-      `${updated.nombre} ${updated.activa ? 'activada' : 'desactivada'}.`
-    );
   };
 
   const getEffectiveMeta = (suc: Sucursal): MetaSucursal => {
@@ -497,6 +538,22 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Configuration Error Banner (Missing Env Vars / Invalid URL) */}
+      {!configStatus.configured && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3.5 flex items-start gap-3 text-xs text-[#BE123C]"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-[#E11D48]" />
+          <div>
+            <p className="font-bold">
+              Configuración de Supabase incompleta en Vercel / entorno
+            </p>
+            <p className="mt-0.5">{configStatus.errorMessage}</p>
+          </div>
+        </div>
+      )}
+
       {/* Error Alert Banner */}
       {errorAlert && (
         <div
@@ -582,7 +639,7 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                 supabaseConnected ? 'text-[#15803D]' : 'text-[#DB2777]'
               }`}
             />
-            Conexión Supabase y Script SQL
+            Conexión Supabase y Diagnóstico
           </button>
         </div>
       </div>
@@ -590,6 +647,45 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
       {/* TAB 1: SUCURSALES */}
       {tab === 'sucursales' && (
         <div className="space-y-5">
+          {supabaseConnected && remoteSucursalesCount === 0 && (
+            <div className="rounded-2xl bg-[#FFFBEB] border border-[#FDE68A] px-4 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-[#92400E]">
+              <div>
+                <p className="font-bold">
+                  La tabla sucursales_config en Supabase tiene 0 registros guardados todavía
+                </p>
+                <p className="mt-0.5">
+                  Las sucursales que ves abajo son la plantilla base local. Puedes agregar una sucursal nueva abajo o subir estas {sucursales.length} sucursales base a Supabase ahora.
+                </p>
+              </div>
+              {onSyncBaseSucursales && (
+                <button
+                  type="button"
+                  disabled={savingBranch}
+                  onClick={async () => {
+                    setSavingBranch(true);
+                    try {
+                      const res = await onSyncBaseSucursales();
+                      if (!res.ok) {
+                        fail(res.error);
+                        return;
+                      }
+                      notify(
+                        `Se guardaron ${sucursales.length} sucursales en sucursales_config de Supabase.`
+                      );
+                    } finally {
+                      setSavingBranch(false);
+                    }
+                  }}
+                  className="px-3.5 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white whitespace-nowrap shrink-0 disabled:opacity-50"
+                >
+                  {savingBranch
+                    ? 'Sincronizando...'
+                    : `Subir ${sucursales.length} sucursales a Supabase`}
+                </button>
+              )}
+            </div>
+          )}
+
           <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5">
             <h2 className="font-display text-sm font-bold text-[#1F172B] mb-3">
               Agregar nueva sucursal
@@ -640,10 +736,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
               />
               <button
                 type="submit"
-                className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white"
+                disabled={savingBranch}
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
               >
                 <Plus className="h-3.5 w-3.5" />
-                Agregar sucursal
+                {savingBranch ? 'Guardando...' : 'Agregar sucursal'}
               </button>
             </form>
           </section>

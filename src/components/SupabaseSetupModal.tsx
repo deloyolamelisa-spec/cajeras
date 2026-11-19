@@ -1,11 +1,23 @@
-import React, { useState } from 'react';
-import { X, Copy, Check, Database, RotateCcw } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  SUPABASE_ANON_KEY,
+  X,
+  Copy,
+  Check,
+  Database,
+  RotateCcw,
+  RefreshCw,
+  AlertTriangle,
+  CheckCircle2,
+} from 'lucide-react';
+import {
   SUPABASE_BUCKETS,
   SUPABASE_TABLES,
-  SUPABASE_URL,
+  getSupabaseConfigStatus,
 } from '../lib/supabaseConfig';
+import {
+  TableDiagnosticResult,
+  runSupabaseDiagnostics,
+} from '../services/controlOpsService';
 
 interface SupabaseSetupModalProps {
   open: boolean;
@@ -172,6 +184,25 @@ export const SupabaseSetupModal: React.FC<SupabaseSetupModalProps> = ({
   onResetDemoData,
 }) => {
   const [copied, setCopied] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [diagTables, setDiagTables] = useState<TableDiagnosticResult[]>([]);
+  const configStatus = getSupabaseConfigStatus();
+
+  const handleRunDiagnostics = useCallback(async () => {
+    setTesting(true);
+    try {
+      const res = await runSupabaseDiagnostics();
+      setDiagTables(res.tables);
+    } finally {
+      setTesting(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open) {
+      handleRunDiagnostics();
+    }
+  }, [open, handleRunDiagnostics]);
 
   if (!open) return null;
 
@@ -185,9 +216,11 @@ export const SupabaseSetupModal: React.FC<SupabaseSetupModalProps> = ({
     }
   };
 
+  const hasTableErrors = diagTables.some((t) => !t.ok);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/40 backdrop-blur-[2px]">
-      <div className="w-full max-w-2xl rounded-2xl bg-white border border-[#E6DDF5] shadow-xl overflow-hidden flex flex-col max-h-[90vh]">
+      <div className="w-full max-w-3xl rounded-2xl bg-white border border-[#E6DDF5] shadow-xl overflow-hidden flex flex-col max-h-[92vh]">
         <div className="flex items-center justify-between px-6 py-4 border-b border-[#F1ECF9]">
           <div className="flex items-center gap-3">
             <div className="h-9 w-9 rounded-xl bg-[#F3ECFC] text-[#6D28D9] flex items-center justify-center">
@@ -195,12 +228,10 @@ export const SupabaseSetupModal: React.FC<SupabaseSetupModalProps> = ({
             </div>
             <div>
               <h2 className="font-display text-base font-bold text-[#1F172B]">
-                Integración directa con Supabase
+                Conexión y Diagnóstico de Supabase
               </h2>
               <p className="text-xs text-[#6E5F87]">
-                Tablas conectadas: {SUPABASE_TABLES.LLAMADAS},{' '}
-                {SUPABASE_TABLES.ACTIVIDADES}, {SUPABASE_TABLES.GASTOS_REFRENDOS}{' '}
-                · Bucket: {SUPABASE_BUCKETS.EVIDENCIAS}
+                Estado de variables de entorno, lectura/escritura en vivo y script SQL
               </p>
             </div>
           </div>
@@ -215,32 +246,120 @@ export const SupabaseSetupModal: React.FC<SupabaseSetupModalProps> = ({
         </div>
 
         <div className="p-6 overflow-y-auto space-y-5">
+          {/* Env Vars & Client Status */}
           <div
-            className={`rounded-xl p-4 border text-sm ${
-              isConnected
-                ? 'bg-[#F0FDF4] border-[#BBF7D0] text-[#166534]'
-                : 'bg-[#FAF7FE] border-[#E6DDF5] text-[#4C1D95]'
+            className={`rounded-xl p-4 border text-sm space-y-2 ${
+              !configStatus.configured
+                ? 'bg-[#FFF1F2] border-[#FECDD3] text-[#BE123C]'
+                : isConnected && !hasTableErrors
+                  ? 'bg-[#F0FDF4] border-[#BBF7D0] text-[#166534]'
+                  : 'bg-[#FFFBEB] border-[#FDE68A] text-[#92400E]'
             }`}
           >
-            <p className="font-semibold">
-              {isConnected
-                ? `Conectado a Supabase (${SUPABASE_URL})`
-                : SUPABASE_ANON_KEY && !SUPABASE_URL
-                  ? 'Falta únicamente tu SUPABASE_URL'
-                  : 'Modo de ejemplo local activo'}
-            </p>
-            <p className="text-xs mt-1 opacity-90">
-              {isConnected
-                ? 'Las operaciones de llamadas, actividades, gastos, refrendos, horarios y subida de fotos se envían directamente a tu proyecto Supabase.'
-                : SUPABASE_ANON_KEY && !SUPABASE_URL
-                  ? 'Tu llave pública (SUPABASE_ANON_KEY) ya está guardada. Solo pega tu Project URL (https://tu-proyecto.supabase.co) en SUPABASE_URL dentro de src/lib/supabaseConfig.ts para activar el guardado real.'
-                  : 'Para conectar tu base real, abre el archivo src/lib/supabaseConfig.ts y pega tu SUPABASE_URL y tu SUPABASE_ANON_KEY (o configúralas como VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY).'}
-            </p>
-            {warningMessage && (
-              <p className="text-xs mt-2 text-[#B45309] font-medium">
-                Aviso: {warningMessage}
+            <div className="flex items-center justify-between gap-2">
+              <p className="font-semibold">
+                {!configStatus.configured
+                  ? 'Error de configuración en variables de entorno'
+                  : isConnected
+                    ? `Conectado a Supabase (${configStatus.url})`
+                    : 'No se pudo completar la carga inicial desde Supabase'}
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs pt-1">
+              <div className="rounded-lg bg-white/70 px-3 py-2 border border-black/5">
+                <span className="font-semibold block">VITE_SUPABASE_URL</span>
+                <span className="font-mono-num break-all">
+                  {configStatus.url || 'No definida'}
+                </span>
+                <span className="block text-[11px] opacity-80 mt-0.5">
+                  Origen:{' '}
+                  {configStatus.hasEnvUrl
+                    ? 'Variable de entorno (Vercel / .env)'
+                    : 'Configuración base del proyecto'}
+                </span>
+              </div>
+              <div className="rounded-lg bg-white/70 px-3 py-2 border border-black/5">
+                <span className="font-semibold block">
+                  VITE_SUPABASE_ANON_KEY
+                </span>
+                <span className="font-mono-num">
+                  {configStatus.keyValid
+                    ? 'Configurada y válida'
+                    : 'Faltante o inválida'}
+                </span>
+                <span className="block text-[11px] opacity-80 mt-0.5">
+                  Origen:{' '}
+                  {configStatus.hasEnvKey
+                    ? 'Variable de entorno (Vercel / .env)'
+                    : 'Configuración base del proyecto'}
+                </span>
+              </div>
+            </div>
+
+            {configStatus.errorMessage && (
+              <p className="text-xs font-semibold pt-1">
+                {configStatus.errorMessage}
               </p>
             )}
+            {warningMessage && (
+              <p className="text-xs font-medium pt-1">
+                Aviso de sincronización: {warningMessage}
+              </p>
+            )}
+          </div>
+
+          {/* Live per-table diagnostics */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-semibold text-[#1F172B]">
+                Diagnóstico en vivo de tablas en Supabase
+              </h3>
+              <button
+                type="button"
+                disabled={testing}
+                onClick={handleRunDiagnostics}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#F3ECFC] hover:bg-[#E9DDFB] text-[#5B21B6] transition-colors disabled:opacity-50"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${testing ? 'animate-spin' : ''}`}
+                />
+                {testing ? 'Probando...' : 'Probar conexión en vivo'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {diagTables.map((t) => (
+                <div
+                  key={t.table}
+                  className={`rounded-xl border px-3.5 py-2.5 text-xs flex items-start justify-between gap-2 ${
+                    t.ok
+                      ? 'bg-[#FAF8FC] border-[#EAE3F5]'
+                      : 'bg-[#FFF1F2] border-[#FECDD3]'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <p className="font-mono-num font-semibold text-[#1F172B] truncate">
+                      {t.table}
+                    </p>
+                    {t.ok ? (
+                      <p className="text-[11px] text-[#6E5F87]">
+                        {t.rowCount} registro(s) en Supabase
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-[#BE123C] break-words mt-0.5">
+                        {t.error}
+                      </p>
+                    )}
+                  </div>
+                  {t.ok ? (
+                    <CheckCircle2 className="h-4 w-4 text-[#15803D] shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertTriangle className="h-4 w-4 text-[#E11D48] shrink-0 mt-0.5" />
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -266,7 +385,7 @@ export const SupabaseSetupModal: React.FC<SupabaseSetupModalProps> = ({
                 )}
               </button>
             </div>
-            <pre className="p-4 rounded-xl bg-[#1F172B] text-[#EDE9FE] text-[11px] font-mono overflow-x-auto max-h-64 leading-relaxed">
+            <pre className="p-4 rounded-xl bg-[#1F172B] text-[#EDE9FE] text-[11px] font-mono overflow-x-auto max-h-56 leading-relaxed">
               {SQL_SCHEMA}
             </pre>
           </div>

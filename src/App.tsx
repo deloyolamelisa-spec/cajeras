@@ -25,6 +25,7 @@ import {
 import {
   ServiceResult,
   authenticateUsuario,
+  createSucursal,
   createUsuario,
   deleteActividadRecord,
   deleteEvidenciaFoto,
@@ -46,6 +47,7 @@ import {
   saveMetaSucursal,
   saveSessionUser,
   saveSucursal,
+  saveSucursalesBatch,
   updateUsuario,
 } from './services/controlOpsService';
 import {
@@ -116,6 +118,7 @@ export default function App() {
 
   const [loading, setLoading] = useState(true);
   const [dataSource, setDataSource] = useState<'supabase' | 'demo'>('demo');
+  const [remoteCounts, setRemoteCounts] = useState<Record<string, number>>({});
   const [supabaseWarning, setSupabaseWarning] = useState<string | undefined>();
   const [syncError, setSyncError] = useState<string | null>(null);
 
@@ -137,6 +140,7 @@ export default function App() {
     setGastosYRefrendos(loaded.gastosYRefrendos);
     setHorarios(loaded.horarios);
     setDataSource(loaded.source);
+    setRemoteCounts(loaded.remoteCounts || {});
     setSupabaseWarning(loaded.warning);
     if (loaded.warning) {
       setSyncError(loaded.warning);
@@ -446,17 +450,44 @@ export default function App() {
   };
 
   // --- Admin Total (Creador) Handlers ---
-  const handleSaveSucursal = async (suc: Sucursal): Promise<ServiceResult> => {
+  const handleSaveSucursal = async (
+    suc: Sucursal,
+    isNew = false
+  ): Promise<ServiceResult> => {
     const exists = sucursales.some((s) => s.id === suc.id);
     const next = exists
       ? sucursales.map((s) => (s.id === suc.id ? suc : s))
       : [...sucursales, suc];
-    const res = await saveSucursal(suc, next);
+    const res =
+      isNew || !exists
+        ? await createSucursal(suc, next)
+        : await saveSucursal(suc, next);
     if (!res.ok) {
       if (res.error) setSyncError(res.error);
       return res;
     }
-    setSucursales(next);
+    const savedSuc = (res.data as Sucursal) || suc;
+    const syncedNext = exists
+      ? sucursales.map((s) => (s.id === savedSuc.id ? savedSuc : s))
+      : [...sucursales, savedSuc];
+    setSucursales(syncedNext);
+    setRemoteCounts((prev) => ({
+      ...prev,
+      sucursales_config: Math.max(prev.sucursales_config || 0, isNew ? (prev.sucursales_config || 0) + 1 : 1),
+    }));
+    return res;
+  };
+
+  const handleSyncBaseSucursales = async (): Promise<ServiceResult> => {
+    const res = await saveSucursalesBatch(sucursales);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
+    setRemoteCounts((prev) => ({
+      ...prev,
+      sucursales_config: sucursales.length,
+    }));
     return res;
   };
 
@@ -879,6 +910,8 @@ export default function App() {
                     supabaseConnected={
                       dataSource === 'supabase' && isSupabaseConfigured()
                     }
+                    remoteSucursalesCount={remoteCounts.sucursales_config}
+                    onSyncBaseSucursales={handleSyncBaseSucursales}
                     onOpenSupabaseModal={() => setSupabaseModalOpen(true)}
                     onSaveSucursal={handleSaveSucursal}
                     onDeleteSucursal={handleDeleteSucursal}
