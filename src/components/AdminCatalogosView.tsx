@@ -10,6 +10,7 @@ import {
   Check,
   Power,
   KeyRound,
+  Database,
 } from 'lucide-react';
 import {
   CatalogosControlOps,
@@ -27,6 +28,8 @@ interface AdminCatalogosViewProps {
   catalogos: CatalogosControlOps;
   usuarios: UsuarioControlOps[];
   currentUserId: string;
+  supabaseConnected: boolean;
+  onOpenSupabaseModal: () => void;
   onSaveSucursal: (suc: Sucursal) => Promise<void>;
   onDeleteSucursal: (id: string) => Promise<void>;
   onSaveMeta: (meta: MetaSucursal) => Promise<void>;
@@ -43,6 +46,8 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   catalogos,
   usuarios,
   currentUserId,
+  supabaseConnected,
+  onOpenSupabaseModal,
   onSaveSucursal,
   onDeleteSucursal,
   onSaveMeta,
@@ -257,6 +262,8 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
     const merged = userDrafts[usr.id] || usr;
     const normalized: UsuarioControlOps = {
       ...merged,
+      nombre: merged.nombre.trim(),
+      correo: merged.correo.trim().toLowerCase(),
       sucursal_id:
         merged.rol === 'cajera'
           ? merged.sucursal_id === 'todas'
@@ -265,7 +272,7 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
           : 'todas',
     };
     await onSaveUsuario(normalized);
-    notify(`Usuario ${normalized.nombre} actualizado.`);
+    notify(`Usuario ${normalized.nombre} guardado en usuarios_controlops.`);
   };
 
   return (
@@ -312,12 +319,27 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
           })}
         </div>
 
-        {feedback && (
-          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#15803D] bg-[#F0FDF4] border border-[#BBF7D0] px-3.5 py-2 rounded-xl">
-            <Check className="h-3.5 w-3.5" />
-            {feedback}
-          </span>
-        )}
+        <div className="flex flex-wrap items-center gap-2.5">
+          {feedback && (
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#15803D] bg-[#F0FDF4] border border-[#BBF7D0] px-3.5 py-2 rounded-xl">
+              <Check className="h-3.5 w-3.5" />
+              {feedback}
+            </span>
+          )}
+
+          <button
+            type="button"
+            onClick={onOpenSupabaseModal}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white hover:bg-[#FAF7FE] text-[#5B21B6] border border-[#E6DDF5] transition-colors whitespace-nowrap"
+          >
+            <Database
+              className={`h-3.5 w-3.5 ${
+                supabaseConnected ? 'text-[#15803D]' : 'text-[#DB2777]'
+              }`}
+            />
+            Conexión Supabase y Script SQL
+          </button>
+        </div>
       </div>
 
       {/* TAB 1: SUCURSALES */}
@@ -892,9 +914,10 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                     const isSelf = usr.id === currentUserId;
                     return (
                       <tr key={usr.id} className="hover:bg-[#FCFAFE]">
-                        <td className="py-3 px-4">
+                        <td className="py-3 px-4 space-y-1.5">
                           <input
                             type="text"
+                            aria-label="Nombre de usuario"
                             value={draft.nombre}
                             onChange={(e) =>
                               setUserDrafts((p) => ({
@@ -902,11 +925,20 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                                 [usr.id]: { ...draft, nombre: e.target.value },
                               }))
                             }
-                            className="w-44 px-2.5 py-1 rounded-lg border border-[#E6DDF5] font-semibold text-xs bg-white block mb-1"
+                            className="w-48 px-2.5 py-1 rounded-lg border border-[#E6DDF5] font-semibold text-xs bg-white block"
                           />
-                          <span className="text-[11px] text-[#7A6B93]">
-                            {draft.correo}
-                          </span>
+                          <input
+                            type="email"
+                            aria-label="Correo de usuario"
+                            value={draft.correo}
+                            onChange={(e) =>
+                              setUserDrafts((p) => ({
+                                ...p,
+                                [usr.id]: { ...draft, correo: e.target.value },
+                              }))
+                            }
+                            className="w-48 px-2.5 py-1 rounded-lg border border-[#E6DDF5] text-[11px] text-[#55476E] bg-[#FAF8FC] block"
+                          />
                         </td>
                         <td className="py-3 px-4">
                           <select

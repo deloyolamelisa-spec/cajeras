@@ -316,6 +316,10 @@ export default function App() {
       ? usuarios.map((u) => (u.id === usr.id ? usr : u))
       : [...usuarios, usr];
     setUsuarios(next);
+    if (currentUser && usr.id === currentUser.id) {
+      setCurrentUser(usr);
+      saveSessionUser(usr);
+    }
     const res = await saveUsuario(usr, next);
     if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
@@ -354,23 +358,7 @@ export default function App() {
   };
 
   if (!currentUser) {
-    return (
-      <>
-        <LoginScreen
-          onLogin={handleLogin}
-          onOpenSupabaseModal={() => setSupabaseModalOpen(true)}
-        />
-        <SupabaseSetupModal
-          open={supabaseModalOpen}
-          onClose={() => setSupabaseModalOpen(false)}
-          isConnected={
-            dataSource === 'supabase' && isSupabaseConfigured()
-          }
-          warningMessage={supabaseWarning}
-          onResetDemoData={handleResetDemo}
-        />
-      </>
-    );
+    return <LoginScreen onLogin={handleLogin} />;
   }
 
   // Guard protected routes
@@ -581,6 +569,10 @@ export default function App() {
                     catalogos={catalogos}
                     usuarios={usuarios}
                     currentUserId={currentUser.id}
+                    supabaseConnected={
+                      dataSource === 'supabase' && isSupabaseConfigured()
+                    }
+                    onOpenSupabaseModal={() => setSupabaseModalOpen(true)}
                     onSaveSucursal={handleSaveSucursal}
                     onDeleteSucursal={handleDeleteSucursal}
                     onSaveMeta={handleSaveMeta}
@@ -595,13 +587,15 @@ export default function App() {
         </main>
       </div>
 
-      <SupabaseSetupModal
-        open={supabaseModalOpen}
-        onClose={() => setSupabaseModalOpen(false)}
-        isConnected={dataSource === 'supabase' && isSupabaseConfigured()}
-        warningMessage={supabaseWarning}
-        onResetDemoData={handleResetDemo}
-      />
+      {currentUser.rol === 'creador' && (
+        <SupabaseSetupModal
+          open={supabaseModalOpen}
+          onClose={() => setSupabaseModalOpen(false)}
+          isConnected={dataSource === 'supabase' && isSupabaseConfigured()}
+          warningMessage={supabaseWarning}
+          onResetDemoData={handleResetDemo}
+        />
+      )}
     </div>
   );
 }
