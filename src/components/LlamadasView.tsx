@@ -15,6 +15,7 @@ import {
   EstatusVencimiento,
   LlamadaSucursal,
   ReporteCajeraOpcion,
+  RolUsuario,
   Sucursal,
 } from '../types/controlops';
 import { formatMXN, sanitizePhoneForWhatsApp } from '../utils/calculations';
@@ -23,29 +24,30 @@ interface LlamadasViewProps {
   llamadas: LlamadaSucursal[];
   sucursales: Sucursal[];
   selectedSucursalId: string;
+  userRole: RolUsuario;
+  opcionesReporte: string[];
   onUpdateLlamada: (updated: LlamadaSucursal) => Promise<void>;
   onCreateLlamada: (nueva: LlamadaSucursal) => Promise<void>;
   openCreateModalExternal?: boolean;
   onCloseCreateModalExternal?: () => void;
 }
 
-const REPORTE_CAJERA_OPCIONES: ReporteCajeraOpcion[] = [
-  'Sin reporte',
-  'Promesa de pago',
-  'No contesta',
-  'Número equivocado',
-  'Irá a sucursal',
-];
-
 export const LlamadasView: React.FC<LlamadasViewProps> = ({
   llamadas,
   sucursales,
   selectedSucursalId,
+  userRole,
+  opcionesReporte,
   onUpdateLlamada,
   onCreateLlamada,
   openCreateModalExternal = false,
   onCloseCreateModalExternal,
 }) => {
+  const canAudit = userRole === 'supervisor' || userRole === 'creador';
+  const dropdownOpciones: ReporteCajeraOpcion[] = [
+    'Sin reporte',
+    ...opcionesReporte,
+  ];
   const [searchQuery, setSearchQuery] = useState('');
   const [filterAuditoria, setFilterAuditoria] = useState<string>('todos');
   const [filterVencimiento, setFilterVencimiento] = useState<string>('todos');
@@ -186,8 +188,10 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newForm.cliente_nombre.trim() || !newForm.telefono.trim()) return;
+    const targetSucId =
+      userRole === 'cajera' ? selectedSucursalId : newForm.sucursal_id;
     const suc =
-      sucursales.find((s) => s.id === newForm.sucursal_id) || sucursales[0];
+      sucursales.find((s) => s.id === targetSucId) || sucursales[0];
     const nueva: LlamadaSucursal = {
       id: `ll-${Date.now()}`,
       sucursal_id: suc.id,
@@ -492,7 +496,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                       }
                       className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
                     >
-                      {REPORTE_CAJERA_OPCIONES.map((op) => (
+                      {dropdownOpciones.map((op) => (
                         <option key={op} value={op}>
                           {op}
                         </option>
@@ -506,87 +510,110 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                       <span className="text-[11px] font-medium text-[#7A6B93]">
                         Auditoría administración
                       </span>
-                      <div className="flex items-center gap-1 bg-[#F5F0FC] p-0.5 rounded-lg">
-                        {(
-                          [
-                            {
-                              val: 'Verificada',
-                              icon: CheckCircle2,
-                              activeClass: 'bg-white text-[#15803D] shadow-xs',
-                            },
-                            {
-                              val: 'Falsa',
-                              icon: XCircle,
-                              activeClass: 'bg-white text-[#BE123C] shadow-xs',
-                            },
-                            {
-                              val: 'Sin auditar',
-                              icon: Clock,
-                              activeClass: 'bg-white text-[#B45309] shadow-xs',
-                            },
-                          ] as const
-                        ).map((st) => {
-                          const Icon = st.icon;
-                          const isActive = item.estatus_auditoria === st.val;
-                          return (
-                            <button
-                              key={st.val}
-                              type="button"
-                              onClick={() =>
-                                onUpdateLlamada({
-                                  ...item,
-                                  estatus_auditoria:
-                                    st.val as EstatusAuditoriaLlamada,
-                                })
-                              }
-                              className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
-                                isActive
-                                  ? st.activeClass
-                                  : 'text-[#6E5F87] hover:text-[#1F172B]'
-                              }`}
-                            >
-                              <Icon className="h-3 w-3" />
-                              {st.val === 'Sin auditar' ? 'Pend.' : st.val}
-                            </button>
-                          );
-                        })}
-                      </div>
+                      {canAudit ? (
+                        <div className="flex items-center gap-1 bg-[#F5F0FC] p-0.5 rounded-lg">
+                          {(
+                            [
+                              {
+                                val: 'Verificada',
+                                icon: CheckCircle2,
+                                activeClass:
+                                  'bg-white text-[#15803D] shadow-xs',
+                              },
+                              {
+                                val: 'Falsa',
+                                icon: XCircle,
+                                activeClass:
+                                  'bg-white text-[#BE123C] shadow-xs',
+                              },
+                              {
+                                val: 'Sin auditar',
+                                icon: Clock,
+                                activeClass:
+                                  'bg-white text-[#B45309] shadow-xs',
+                              },
+                            ] as const
+                          ).map((st) => {
+                            const Icon = st.icon;
+                            const isActive = item.estatus_auditoria === st.val;
+                            return (
+                              <button
+                                key={st.val}
+                                type="button"
+                                onClick={() =>
+                                  onUpdateLlamada({
+                                    ...item,
+                                    estatus_auditoria:
+                                      st.val as EstatusAuditoriaLlamada,
+                                  })
+                                }
+                                className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                                  isActive
+                                    ? st.activeClass
+                                    : 'text-[#6E5F87] hover:text-[#1F172B]'
+                                }`}
+                              >
+                                <Icon className="h-3 w-3" />
+                                {st.val === 'Sin auditar' ? 'Pend.' : st.val}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <span
+                          className={`text-[11px] font-semibold ${
+                            item.estatus_auditoria === 'Verificada'
+                              ? 'text-[#15803D]'
+                              : item.estatus_auditoria === 'Falsa'
+                                ? 'text-[#BE123C]'
+                                : 'text-[#B45309]'
+                          }`}
+                        >
+                          {item.estatus_auditoria}
+                        </span>
+                      )}
                     </div>
 
-                    <div className="flex items-center gap-1.5">
-                      <input
-                        type="text"
-                        value={currentObs}
-                        onChange={(e) =>
-                          setDraftObs((prev) => ({
-                            ...prev,
-                            [item.id]: e.target.value,
-                          }))
-                        }
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            handleSaveObservation(item);
+                    {canAudit ? (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={currentObs}
+                          onChange={(e) =>
+                            setDraftObs((prev) => ({
+                              ...prev,
+                              [item.id]: e.target.value,
+                            }))
                           }
-                        }}
-                        placeholder="Observaciones de auditoría..."
-                        className="flex-1 px-3 py-1.5 rounded-lg border border-[#E6DDF5] bg-[#FAF8FC] text-xs text-[#1F172B] placeholder:text-[#9D8FB5] focus:outline-none focus:border-[#7C3AED] focus:bg-white"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handleSaveObservation(item)}
-                        title="Guardar observación"
-                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium inline-flex items-center gap-1 transition-colors shrink-0 ${
-                          savedToastId === item.id
-                            ? 'bg-[#DCFCE7] text-[#15803D]'
-                            : obsModified
-                              ? 'bg-[#7C3AED] text-white hover:bg-[#6D28D9]'
-                              : 'bg-[#F3ECFC] text-[#5B21B6] hover:bg-[#E7DAFA]'
-                        }`}
-                      >
-                        <Save className="h-3.5 w-3.5" />
-                        {savedToastId === item.id ? 'Listo' : 'Guardar'}
-                      </button>
-                    </div>
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              handleSaveObservation(item);
+                            }
+                          }}
+                          placeholder="Observaciones de auditoría..."
+                          className="flex-1 px-3 py-1.5 rounded-lg border border-[#E6DDF5] bg-[#FAF8FC] text-xs text-[#1F172B] placeholder:text-[#9D8FB5] focus:outline-none focus:border-[#7C3AED] focus:bg-white"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleSaveObservation(item)}
+                          title="Guardar observación"
+                          className={`px-2.5 py-1.5 rounded-lg text-xs font-medium inline-flex items-center gap-1 transition-colors shrink-0 ${
+                            savedToastId === item.id
+                              ? 'bg-[#DCFCE7] text-[#15803D]'
+                              : obsModified
+                                ? 'bg-[#7C3AED] text-white hover:bg-[#6D28D9]'
+                                : 'bg-[#F3ECFC] text-[#5B21B6] hover:bg-[#E7DAFA]'
+                          }`}
+                        >
+                          <Save className="h-3.5 w-3.5" />
+                          {savedToastId === item.id ? 'Listo' : 'Guardar'}
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-[#6E5F87] bg-[#FAF8FC] rounded-lg px-3 py-1.5 border border-[#F1ECF9]">
+                        {item.observaciones_admin || 'Sin observaciones de supervisión'}
+                      </p>
+                    )}
                   </div>
                 </div>
               );
@@ -619,17 +646,24 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                     Sucursal
                   </label>
                   <select
-                    value={newForm.sucursal_id}
+                    disabled={userRole === 'cajera'}
+                    value={
+                      userRole === 'cajera'
+                        ? selectedSucursalId
+                        : newForm.sucursal_id
+                    }
                     onChange={(e) =>
                       setNewForm({ ...newForm, sucursal_id: e.target.value })
                     }
-                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm"
+                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm disabled:opacity-60"
                   >
-                    {sucursales.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.nombre}
-                      </option>
-                    ))}
+                    {sucursales
+                      .filter((s) => s.activa)
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.nombre}
+                        </option>
+                      ))}
                   </select>
                 </div>
 
@@ -730,7 +764,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                   }
                   className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm"
                 >
-                  {REPORTE_CAJERA_OPCIONES.map((op) => (
+                  {dropdownOpciones.map((op) => (
                     <option key={op} value={op}>
                       {op}
                     </option>

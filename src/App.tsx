@@ -1,34 +1,49 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Menu, RefreshCw } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
+import { LoginScreen } from './components/LoginScreen';
 import { RankingView } from './components/RankingView';
 import { LlamadasView } from './components/LlamadasView';
 import { ActividadesView } from './components/ActividadesView';
 import { GastosRefrendosView } from './components/GastosRefrendosView';
 import { HorariosView } from './components/HorariosView';
+import { AdminCatalogosView } from './components/AdminCatalogosView';
 import { SupabaseSetupModal } from './components/SupabaseSetupModal';
 import {
   ActividadDiaria,
+  CatalogosControlOps,
   DiaSemana,
   GastoYRefrendo,
   HorarioSucursalDia,
   LlamadaSucursal,
+  MetaSucursal,
   SectionId,
   Sucursal,
+  UsuarioControlOps,
 } from './types/controlops';
 import {
+  authenticateUsuario,
+  deleteSucursalRecord,
+  deleteUsuarioRecord,
+  getSavedSessionUser,
   loadAllOperationalData,
   resetDemoLocalData,
   saveActividad,
+  saveCatalogos,
   saveGastoORefrendo,
   saveHorarioDia,
   saveLlamada,
+  saveMetaSucursal,
+  saveSessionUser,
+  saveSucursal,
+  saveUsuario,
 } from './services/controlOpsService';
 import {
   computeBranchSummaries,
   getTodayDiaSemana,
 } from './utils/calculations';
 import { isSupabaseConfigured } from './lib/supabaseConfig';
+import { INITIAL_CATALOGOS } from './data/mockData';
 
 const SECTION_TITLES: Record<SectionId, { title: string; subtitle: string }> = {
   ranking: {
@@ -51,14 +66,31 @@ const SECTION_TITLES: Record<SectionId, { title: string; subtitle: string }> = {
     title: 'Configuración de Horarios',
     subtitle: 'Límites de vencimiento por día y sucursal',
   },
+  admin: {
+    title: 'Administración y Catálogos',
+    subtitle: 'Control total de sucursales, metas, catálogos y usuarios',
+  },
 };
 
 export default function App() {
-  const [activeSection, setActiveSection] = useState<SectionId>('ranking');
-  const [selectedSucursalId, setSelectedSucursalId] = useState<string>('todas');
+  const [currentUser, setCurrentUser] = useState<UsuarioControlOps | null>(() =>
+    getSavedSessionUser()
+  );
+  const [activeSection, setActiveSection] = useState<SectionId>(() => {
+    const saved = getSavedSessionUser();
+    return saved?.rol === 'cajera' ? 'llamadas' : 'ranking';
+  });
+  const [selectedSucursalId, setSelectedSucursalId] = useState<string>(() => {
+    const saved = getSavedSessionUser();
+    return saved?.rol === 'cajera' ? saved.sucursal_id : 'todas';
+  });
   const [diaActivo, setDiaActivo] = useState<DiaSemana>(getTodayDiaSemana());
 
   const [sucursales, setSucursales] = useState<Sucursal[]>([]);
+  const [metas, setMetas] = useState<MetaSucursal[]>([]);
+  const [catalogos, setCatalogos] =
+    useState<CatalogosControlOps>(INITIAL_CATALOGOS);
+  const [usuarios, setUsuarios] = useState<UsuarioControlOps[]>([]);
   const [llamadas, setLlamadas] = useState<LlamadaSucursal[]>([]);
   const [actividades, setActividades] = useState<ActividadDiaria[]>([]);
   const [gastosYRefrendos, setGastosYRefrendos] = useState<GastoYRefrendo[]>([]);
@@ -79,6 +111,9 @@ export default function App() {
     setLoading(true);
     const loaded = await loadAllOperationalData();
     setSucursales(loaded.sucursales);
+    setMetas(loaded.metas);
+    setCatalogos(loaded.catalogos);
+    setUsuarios(loaded.usuarios);
     setLlamadas(loaded.llamadas);
     setActividades(loaded.actividades);
     setGastosYRefrendos(loaded.gastosYRefrendos);
@@ -92,6 +127,40 @@ export default function App() {
     fetchData();
   }, [fetchData]);
 
+  const handleLogin = async (
+    correo: string,
+    password: string
+  ): Promise<string | null> => {
+    const res = await authenticateUsuario(correo, password);
+    if (!res.user) {
+      return res.error || 'No se pudo iniciar sesión.';
+    }
+    setCurrentUser(res.user);
+    saveSessionUser(res.user);
+    if (res.user.rol === 'cajera') {
+      setSelectedSucursalId(res.user.sucursal_id);
+      setActiveSection('llamadas');
+    } else {
+      setSelectedSucursalId('todas');
+      setActiveSection('ranking');
+    }
+    await fetchData();
+    return null;
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    saveSessionUser(null);
+    setSelectedSucursalId('todas');
+    setActiveSection('ranking');
+  };
+
+  // Enforce strict role boundaries whenever user or section changes
+  const effectiveSucursalId =
+    currentUser?.rol === 'cajera'
+      ? currentUser.sucursal_id
+      : selectedSucursalId;
+
   const branchSummaries = useMemo(
     () =>
       computeBranchSummaries(
@@ -100,9 +169,18 @@ export default function App() {
         actividades,
         gastosYRefrendos,
         horarios,
-        diaActivo
+        diaActivo,
+        metas
       ),
-    [sucursales, llamadas, actividades, gastosYRefrendos, horarios, diaActivo]
+    [
+      sucursales,
+      llamadas,
+      actividades,
+      gastosYRefrendos,
+      horarios,
+      diaActivo,
+      metas,
+    ]
   );
 
   const branchAlerts = useMemo(() => {
@@ -117,45 +195,35 @@ export default function App() {
     const next = llamadas.map((l) => (l.id === updated.id ? updated : l));
     setLlamadas(next);
     const res = await saveLlamada(updated, next);
-    if (!res.ok && res.error) {
-      setSyncError(`Supabase (${res.error})`);
-    }
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
   const handleCreateLlamada = async (nueva: LlamadaSucursal) => {
     const next = [nueva, ...llamadas];
     setLlamadas(next);
     const res = await saveLlamada(nueva, next);
-    if (!res.ok && res.error) {
-      setSyncError(`Supabase (${res.error})`);
-    }
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
   const handleUpdateActividad = async (updated: ActividadDiaria) => {
     const next = actividades.map((a) => (a.id === updated.id ? updated : a));
     setActividades(next);
     const res = await saveActividad(updated, next);
-    if (!res.ok && res.error) {
-      setSyncError(`Supabase (${res.error})`);
-    }
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
   const handleCreateActividad = async (nueva: ActividadDiaria) => {
     const next = [nueva, ...actividades];
     setActividades(next);
     const res = await saveActividad(nueva, next);
-    if (!res.ok && res.error) {
-      setSyncError(`Supabase (${res.error})`);
-    }
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
   const handleCreateGastoORefrendo = async (nuevo: GastoYRefrendo) => {
     const next = [nuevo, ...gastosYRefrendos];
     setGastosYRefrendos(next);
     const res = await saveGastoORefrendo(nuevo, next);
-    if (!res.ok && res.error) {
-      setSyncError(`Supabase (${res.error})`);
-    }
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
   const handleUpdateHorario = async (updated: HorarioSucursalDia) => {
@@ -172,9 +240,7 @@ export default function App() {
 
     setHorarios(next);
     const res = await saveHorarioDia(updated, next);
-    if (!res.ok && res.error) {
-      setSyncError(`Supabase (${res.error})`);
-    }
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
   const handleApplyWeekdays = async (
@@ -190,7 +256,7 @@ export default function App() {
       'jueves',
       'viernes',
     ];
-    let next = [...horarios];
+    const next = [...horarios];
     for (const d of weekdays) {
       const target: HorarioSucursalDia = {
         id: `hor-${sucursalId}-${d}`,
@@ -203,14 +269,62 @@ export default function App() {
       const idx = next.findIndex(
         (h) => h.sucursal_id === sucursalId && h.dia === d
       );
-      if (idx >= 0) {
-        next[idx] = target;
-      } else {
-        next.push(target);
-      }
+      if (idx >= 0) next[idx] = target;
+      else next.push(target);
       await saveHorarioDia(target, next);
     }
     setHorarios(next);
+  };
+
+  // --- Admin Total (Creador) Handlers ---
+  const handleSaveSucursal = async (suc: Sucursal) => {
+    const exists = sucursales.some((s) => s.id === suc.id);
+    const next = exists
+      ? sucursales.map((s) => (s.id === suc.id ? suc : s))
+      : [...sucursales, suc];
+    setSucursales(next);
+    const res = await saveSucursal(suc, next);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+  };
+
+  const handleDeleteSucursal = async (id: string) => {
+    const next = sucursales.filter((s) => s.id !== id);
+    setSucursales(next);
+    const res = await deleteSucursalRecord(id, next);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+  };
+
+  const handleSaveMeta = async (meta: MetaSucursal) => {
+    const exists = metas.some((m) => m.sucursal_id === meta.sucursal_id);
+    const next = exists
+      ? metas.map((m) => (m.sucursal_id === meta.sucursal_id ? meta : m))
+      : [...metas, meta];
+    setMetas(next);
+    const res = await saveMetaSucursal(meta, next);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+  };
+
+  const handleSaveCatalogos = async (nextCatalogos: CatalogosControlOps) => {
+    setCatalogos(nextCatalogos);
+    const res = await saveCatalogos(nextCatalogos);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+  };
+
+  const handleSaveUsuario = async (usr: UsuarioControlOps) => {
+    const exists = usuarios.some((u) => u.id === usr.id);
+    const next = exists
+      ? usuarios.map((u) => (u.id === usr.id ? usr : u))
+      : [...usuarios, usr];
+    setUsuarios(next);
+    const res = await saveUsuario(usr, next);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+  };
+
+  const handleDeleteUsuario = async (id: string) => {
+    const next = usuarios.filter((u) => u.id !== id);
+    setUsuarios(next);
+    const res = await deleteUsuarioRecord(id, next);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
   const handleQuickAction = (action: 'llamada' | 'evidencia' | 'gasto') => {
@@ -229,6 +343,9 @@ export default function App() {
   const handleResetDemo = () => {
     const reset = resetDemoLocalData();
     setSucursales(reset.sucursales);
+    setMetas(reset.metas);
+    setCatalogos(reset.catalogos);
+    setUsuarios(reset.usuarios);
     setLlamadas(reset.llamadas);
     setActividades(reset.actividades);
     setGastosYRefrendos(reset.gastosYRefrendos);
@@ -236,31 +353,65 @@ export default function App() {
     setSyncError(null);
   };
 
-  const activeHeader = SECTION_TITLES[activeSection];
+  if (!currentUser) {
+    return (
+      <>
+        <LoginScreen
+          onLogin={handleLogin}
+          onOpenSupabaseModal={() => setSupabaseModalOpen(true)}
+        />
+        <SupabaseSetupModal
+          open={supabaseModalOpen}
+          onClose={() => setSupabaseModalOpen(false)}
+          isConnected={
+            dataSource === 'supabase' && isSupabaseConfigured()
+          }
+          warningMessage={supabaseWarning}
+          onResetDemoData={handleResetDemo}
+        />
+      </>
+    );
+  }
+
+  // Guard protected routes
+  const safeSection: SectionId =
+    activeSection === 'admin' && currentUser.rol !== 'creador'
+      ? 'ranking'
+      : activeSection === 'ranking' && currentUser.rol === 'cajera'
+        ? 'llamadas'
+        : activeSection;
+
+  const activeHeader = SECTION_TITLES[safeSection];
   const selectedBranchName =
-    selectedSucursalId === 'todas'
+    effectiveSucursalId === 'todas'
       ? 'Todas las sucursales'
-      : sucursales.find((s) => s.id === selectedSucursalId)?.nombre ||
+      : sucursales.find((s) => s.id === effectiveSucursalId)?.nombre ||
         'Sucursal';
 
   return (
     <div className="min-h-screen flex bg-[#F8F6FB] text-[#1F172B]">
       <Sidebar
-        activeSection={activeSection}
+        activeSection={safeSection}
         onSelectSection={setActiveSection}
         sucursales={sucursales}
-        selectedSucursalId={selectedSucursalId}
-        onSelectSucursal={setSelectedSucursalId}
+        selectedSucursalId={effectiveSucursalId}
+        onSelectSucursal={(id) => {
+          if (currentUser.rol !== 'cajera') {
+            setSelectedSucursalId(id);
+          }
+        }}
         onQuickAction={handleQuickAction}
         supabaseConnected={dataSource === 'supabase' && isSupabaseConfigured()}
         onOpenSupabaseModal={() => setSupabaseModalOpen(true)}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
         branchAlerts={branchAlerts}
+        currentUser={currentUser}
+        onLogout={handleLogout}
       />
 
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Top Bar (3-zone contract) */}
+        {/* Top Bar */}
         <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-xs border-b border-[#EAE3F5] px-4 sm:px-6 lg:px-8 py-3.5">
           <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 min-w-0">
@@ -287,19 +438,27 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-2.5 shrink-0">
-              <select
-                aria-label="Sucursal activa"
-                value={selectedSucursalId}
-                onChange={(e) => setSelectedSucursalId(e.target.value)}
-                className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#4C1D95] focus:outline-none focus:border-[#7C3AED]"
-              >
-                <option value="todas">Todas las sucursales</option>
-                {sucursales.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.nombre}
-                  </option>
-                ))}
-              </select>
+              {currentUser.rol !== 'cajera' ? (
+                <select
+                  aria-label="Sucursal activa"
+                  value={effectiveSucursalId}
+                  onChange={(e) => setSelectedSucursalId(e.target.value)}
+                  className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#4C1D95] focus:outline-none focus:border-[#7C3AED]"
+                >
+                  <option value="todas">Todas las sucursales</option>
+                  {sucursales
+                    .filter((s) => s.activa)
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.nombre}
+                      </option>
+                    ))}
+                </select>
+              ) : (
+                <span className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#5B21B6]">
+                  {selectedBranchName}
+                </span>
+              )}
 
               <button
                 type="button"
@@ -322,8 +481,8 @@ export default function App() {
             {syncError && (
               <div className="rounded-xl px-4 py-3 bg-[#FFF1F2] border border-[#FECDD3] text-xs text-[#BE123C] flex items-center justify-between">
                 <span>
-                  Error al sincronizar con {syncError}. Verifica tus políticas
-                  RLS o estructura de tabla.
+                  Error al sincronizar con {syncError}. Verifica que las tablas
+                  estén creadas en Supabase sin bloqueo RLS.
                 </span>
                 <button
                   type="button"
@@ -349,20 +508,23 @@ export default function App() {
               </div>
             ) : (
               <>
-                {activeSection === 'ranking' && (
-                  <RankingView
-                    summaries={branchSummaries}
-                    selectedSucursalId={selectedSucursalId}
-                    onSelectSucursal={setSelectedSucursalId}
-                    onNavigateSection={setActiveSection}
-                  />
-                )}
+                {safeSection === 'ranking' &&
+                  currentUser.rol !== 'cajera' && (
+                    <RankingView
+                      summaries={branchSummaries}
+                      selectedSucursalId={effectiveSucursalId}
+                      onSelectSucursal={setSelectedSucursalId}
+                      onNavigateSection={setActiveSection}
+                    />
+                  )}
 
-                {activeSection === 'llamadas' && (
+                {safeSection === 'llamadas' && (
                   <LlamadasView
                     llamadas={llamadas}
                     sucursales={sucursales}
-                    selectedSucursalId={selectedSucursalId}
+                    selectedSucursalId={effectiveSucursalId}
+                    userRole={currentUser.rol}
+                    opcionesReporte={catalogos.opciones_llamada}
                     onUpdateLlamada={handleUpdateLlamada}
                     onCreateLlamada={handleCreateLlamada}
                     openCreateModalExternal={quickModal === 'llamada'}
@@ -370,13 +532,15 @@ export default function App() {
                   />
                 )}
 
-                {activeSection === 'actividades' && (
+                {safeSection === 'actividades' && (
                   <ActividadesView
                     actividades={actividades}
                     sucursales={sucursales}
                     horarios={horarios}
-                    selectedSucursalId={selectedSucursalId}
+                    selectedSucursalId={effectiveSucursalId}
                     diaActivo={diaActivo}
+                    userRole={currentUser.rol}
+                    tareasCatalogo={catalogos.tareas_obligatorias}
                     onChangeDiaActivo={setDiaActivo}
                     onUpdateActividad={handleUpdateActividad}
                     onCreateActividad={handleCreateActividad}
@@ -386,25 +550,43 @@ export default function App() {
                   />
                 )}
 
-                {activeSection === 'gastos' && (
+                {safeSection === 'gastos' && (
                   <GastosRefrendosView
                     registros={gastosYRefrendos}
                     summaries={branchSummaries}
                     sucursales={sucursales}
-                    selectedSucursalId={selectedSucursalId}
+                    selectedSucursalId={effectiveSucursalId}
+                    userRole={currentUser.rol}
                     onCreateRegistro={handleCreateGastoORefrendo}
                     openCreateModalExternal={quickModal === 'gasto'}
                     onCloseCreateModalExternal={() => setQuickModal(null)}
                   />
                 )}
 
-                {activeSection === 'horarios' && (
+                {safeSection === 'horarios' && (
                   <HorariosView
                     sucursales={sucursales}
                     horarios={horarios}
-                    selectedSucursalId={selectedSucursalId}
+                    selectedSucursalId={effectiveSucursalId}
+                    canEdit={currentUser.rol === 'creador'}
                     onUpdateHorario={handleUpdateHorario}
                     onApplyWeekdays={handleApplyWeekdays}
+                  />
+                )}
+
+                {safeSection === 'admin' && currentUser.rol === 'creador' && (
+                  <AdminCatalogosView
+                    sucursales={sucursales}
+                    metas={metas}
+                    catalogos={catalogos}
+                    usuarios={usuarios}
+                    currentUserId={currentUser.id}
+                    onSaveSucursal={handleSaveSucursal}
+                    onDeleteSucursal={handleDeleteSucursal}
+                    onSaveMeta={handleSaveMeta}
+                    onSaveCatalogos={handleSaveCatalogos}
+                    onSaveUsuario={handleSaveUsuario}
+                    onDeleteUsuario={handleDeleteUsuario}
                   />
                 )}
               </>

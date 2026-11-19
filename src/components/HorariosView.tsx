@@ -7,6 +7,7 @@ interface HorariosViewProps {
   sucursales: Sucursal[];
   horarios: HorarioSucursalDia[];
   selectedSucursalId: string;
+  canEdit: boolean;
   onUpdateHorario: (horario: HorarioSucursalDia) => Promise<void>;
   onApplyWeekdays: (
     sucursalId: string,
@@ -20,6 +21,7 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
   sucursales,
   horarios,
   selectedSucursalId,
+  canEdit,
   onUpdateHorario,
   onApplyWeekdays,
 }) => {
@@ -109,8 +111,9 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
               Configuración de horarios por día y sucursal
             </h2>
             <p className="text-xs text-[#7A6B93] mt-0.5">
-              Define los horarios límite de vencimiento de actividades o activa
-              &ldquo;Sin horario límite&rdquo; para evitar vencimientos por hora.
+              {canEdit
+                ? 'Define los horarios límite de vencimiento de actividades o activa "Sin horario límite" para evitar vencimientos por hora.'
+                : 'Vista de consulta: solo el Administrador Total (Creador) puede modificar horarios globales.'}
             </p>
           </div>
           {savedFeedback && (
@@ -127,8 +130,11 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
             <label className="block text-xs font-semibold text-[#55476E] mb-2">
               1. Seleccionar sucursal
             </label>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {sucursales.map((suc) => {
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
+              {(selectedSucursalId !== 'todas' && !canEdit
+                ? sucursales.filter((s) => s.id === selectedSucursalId)
+                : sucursales.filter((s) => s.activa)
+              ).map((suc) => {
                 const isSelected = activeSucursalId === suc.id;
                 return (
                   <button
@@ -195,9 +201,12 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
                 <button
                   type="button"
                   role="switch"
+                  disabled={!canEdit}
                   aria-checked={currentHorario.sin_horario_limite}
                   onClick={handleToggleSinLimite}
-                  className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                  className={`relative inline-flex h-7 w-12 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed ${
+                    canEdit ? 'cursor-pointer' : ''
+                  } ${
                     currentHorario.sin_horario_limite
                       ? 'bg-[#DB2777]'
                       : 'bg-[#DDD4EE]'
@@ -224,7 +233,7 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
                   </label>
                   <input
                     type="time"
-                    disabled={currentHorario.sin_horario_limite}
+                    disabled={!canEdit || currentHorario.sin_horario_limite}
                     value={currentHorario.hora_limite_actividad}
                     onChange={(e) =>
                       handleTimeChange('hora_limite_actividad', e.target.value)
@@ -239,7 +248,7 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
                   </label>
                   <input
                     type="time"
-                    disabled={currentHorario.sin_horario_limite}
+                    disabled={!canEdit || currentHorario.sin_horario_limite}
                     value={currentHorario.hora_limite_corte}
                     onChange={(e) =>
                       handleTimeChange('hora_limite_corte', e.target.value)
@@ -249,25 +258,27 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
                 </div>
               </div>
 
-              <div className="flex justify-end pt-1">
-                <button
-                  type="button"
-                  onClick={async () => {
-                    await onApplyWeekdays(
-                      activeSucursalId,
-                      currentHorario.hora_limite_actividad,
-                      currentHorario.hora_limite_corte,
-                      currentHorario.sin_horario_limite
-                    );
-                    notifySaved(
-                      `Configuración aplicada de Lunes a Viernes para ${activeBranchObj?.nombre}.`
-                    );
-                  }}
-                  className="text-xs font-semibold text-[#6D28D9] hover:text-[#DB2777] transition-colors"
-                >
-                  Aplicar este mismo horario de Lunes a Viernes
-                </button>
-              </div>
+              {canEdit && (
+                <div className="flex justify-end pt-1">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await onApplyWeekdays(
+                        activeSucursalId,
+                        currentHorario.hora_limite_actividad,
+                        currentHorario.hora_limite_corte,
+                        currentHorario.sin_horario_limite
+                      );
+                      notifySaved(
+                        `Configuración aplicada de Lunes a Viernes para ${activeBranchObj?.nombre}.`
+                      );
+                    }}
+                    className="text-xs font-semibold text-[#6D28D9] hover:text-[#DB2777] transition-colors"
+                  >
+                    Aplicar este mismo horario de Lunes a Viernes
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

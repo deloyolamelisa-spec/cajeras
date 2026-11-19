@@ -16,7 +16,51 @@ interface SupabaseSetupModalProps {
 }
 
 const SQL_SCHEMA = `-- Ejecuta este SQL en el SQL Editor de tu proyecto Supabase
--- 1. Tabla de llamadas por sucursal
+-- 1. Tabla de usuarios y roles (Cajera, Supervisor, Creador)
+create table if not exists public.${SUPABASE_TABLES.USUARIOS} (
+  id text primary key,
+  nombre text not null,
+  correo text unique not null,
+  password text not null,
+  rol text not null check (rol in ('cajera', 'supervisor', 'creador')),
+  sucursal_id text not null default 'todas',
+  sucursales_asignadas jsonb default '[]'::jsonb,
+  activo boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+-- 2. Tabla de sucursales configuradas (17 sucursales)
+create table if not exists public.${SUPABASE_TABLES.SUCURSALES} (
+  id text primary key,
+  nombre text not null,
+  codigo text not null,
+  ciudad text not null default '',
+  responsable_caja text not null default '',
+  meta_llamadas_diarias integer not null default 30,
+  meta_actividades_diarias integer not null default 5,
+  meta_refrendos_mensual integer not null default 40,
+  techo_gasto_mensual numeric not null default 4500,
+  activa boolean not null default true
+);
+
+-- 3. Tabla de metas y techos máximos de gasto por sucursal
+create table if not exists public.${SUPABASE_TABLES.METAS} (
+  id text primary key,
+  sucursal_id text not null,
+  meta_llamadas_diarias integer not null default 30,
+  meta_actividades_diarias integer not null default 5,
+  meta_refrendos_mensual integer not null default 40,
+  techo_gasto_mensual numeric not null default 4500
+);
+
+-- 4. Catálogo global de tareas obligatorias y opciones de llamada
+create table if not exists public.${SUPABASE_TABLES.CATALOGOS} (
+  id text primary key,
+  tareas_obligatorias jsonb not null default '[]'::jsonb,
+  opciones_llamada jsonb not null default '[]'::jsonb
+);
+
+-- 5. Tabla de llamadas por sucursal
 create table if not exists public.${SUPABASE_TABLES.LLAMADAS} (
   id text primary key,
   sucursal_id text not null,
@@ -35,7 +79,7 @@ create table if not exists public.${SUPABASE_TABLES.LLAMADAS} (
   fecha_registro timestamptz not null default now()
 );
 
--- 2. Tabla de actividades diarias
+-- 6. Tabla de actividades diarias
 create table if not exists public.${SUPABASE_TABLES.ACTIVIDADES} (
   id text primary key,
   sucursal_id text not null,
@@ -50,7 +94,7 @@ create table if not exists public.${SUPABASE_TABLES.ACTIVIDADES} (
   observaciones text not null default ''
 );
 
--- 3. Tabla de gastos y refrendos
+-- 7. Tabla de gastos y refrendos
 create table if not exists public.${SUPABASE_TABLES.GASTOS_REFRENDOS} (
   id text primary key,
   sucursal_id text not null,
@@ -68,7 +112,7 @@ create table if not exists public.${SUPABASE_TABLES.GASTOS_REFRENDOS} (
   notas text not null default ''
 );
 
--- 4. Tabla de configuración de horarios por día y sucursal
+-- 8. Tabla de configuración de horarios por día y sucursal
 create table if not exists public.${SUPABASE_TABLES.HORARIOS} (
   id text primary key,
   sucursal_id text not null,
@@ -78,16 +122,35 @@ create table if not exists public.${SUPABASE_TABLES.HORARIOS} (
   sin_horario_limite boolean not null default false
 );
 
--- 5. Bucket de almacenamiento para fotografías de evidencia
+-- Desactivar bloqueo RLS para lectura/escritura directa desde el panel
+alter table public.${SUPABASE_TABLES.USUARIOS} disable row level security;
+alter table public.${SUPABASE_TABLES.SUCURSALES} disable row level security;
+alter table public.${SUPABASE_TABLES.METAS} disable row level security;
+alter table public.${SUPABASE_TABLES.CATALOGOS} disable row level security;
+alter table public.${SUPABASE_TABLES.LLAMADAS} disable row level security;
+alter table public.${SUPABASE_TABLES.ACTIVIDADES} disable row level security;
+alter table public.${SUPABASE_TABLES.GASTOS_REFRENDOS} disable row level security;
+alter table public.${SUPABASE_TABLES.HORARIOS} disable row level security;
+
+-- Usuario inicial de Creador (Administrador Total), Supervisor y Cajera
+insert into public.${SUPABASE_TABLES.USUARIOS} (id, nombre, correo, password, rol, sucursal_id, activo)
+values
+  ('usr-creador-01', 'Melisa Bautista (Creador)', 'admin@controlops.mx', 'Control2026!', 'creador', 'todas', true),
+  ('usr-sup-01', 'Carlos Mejía (Supervisor)', 'supervisor@controlops.mx', 'Super2026!', 'supervisor', 'todas', true),
+  ('usr-caj-centro', 'Valeria Mendoza', 'valeria@controlops.mx', 'Caja2026!', 'cajera', 'suc-centro', true)
+on conflict (id) do nothing;
+
+-- 9. Bucket de almacenamiento para fotografías de evidencia
 insert into storage.buckets (id, name, public)
 values ('${SUPABASE_BUCKETS.EVIDENCIAS}', '${SUPABASE_BUCKETS.EVIDENCIAS}', true)
 on conflict (id) do nothing;
 
--- Políticas públicas de lectura/escritura (ajústalas según tu auth en producción)
+drop policy if exists "Permitir lectura publica evidencias" on storage.objects;
 create policy "Permitir lectura publica evidencias"
 on storage.objects for select
 using ( bucket_id = '${SUPABASE_BUCKETS.EVIDENCIAS}' );
 
+drop policy if exists "Permitir subida evidencias" on storage.objects;
 create policy "Permitir subida evidencias"
 on storage.objects for insert
 with check ( bucket_id = '${SUPABASE_BUCKETS.EVIDENCIAS}' );`;

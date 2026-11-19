@@ -3,7 +3,22 @@ export type SectionId =
   | 'llamadas'
   | 'actividades'
   | 'gastos'
-  | 'horarios';
+  | 'horarios'
+  | 'admin';
+
+export type RolUsuario = 'cajera' | 'supervisor' | 'creador';
+
+export interface UsuarioControlOps {
+  id: string;
+  nombre: string;
+  correo: string;
+  password: string;
+  rol: RolUsuario;
+  sucursal_id: string;
+  sucursales_asignadas?: string[];
+  activo: boolean;
+  created_at?: string;
+}
 
 export type DiaSemana =
   | 'lunes'
@@ -23,15 +38,33 @@ export interface Sucursal {
   meta_llamadas_diarias: number;
   meta_actividades_diarias: number;
   meta_refrendos_mensual: number;
+  techo_gasto_mensual: number;
   activa: boolean;
 }
 
-export type ReporteCajeraOpcion =
-  | 'Sin reporte'
-  | 'Promesa de pago'
-  | 'No contesta'
-  | 'Número equivocado'
-  | 'Irá a sucursal';
+export interface MetaSucursal {
+  id: string;
+  sucursal_id: string;
+  meta_llamadas_diarias: number;
+  meta_actividades_diarias: number;
+  meta_refrendos_mensual: number;
+  techo_gasto_mensual: number;
+}
+
+export interface TareaCatalogo {
+  id: string;
+  titulo: string;
+  categoria: 'Caja' | 'Auditoría' | 'Expedientes' | 'Corte';
+  activa: boolean;
+}
+
+export interface CatalogosControlOps {
+  id: string;
+  tareas_obligatorias: TareaCatalogo[];
+  opciones_llamada: string[];
+}
+
+export type ReporteCajeraOpcion = string;
 
 export type EstatusAuditoriaLlamada = 'Sin auditar' | 'Verificada' | 'Falsa';
 

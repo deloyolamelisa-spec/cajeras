@@ -14,7 +14,9 @@ import {
   DiaSemana,
   EstatusActividad,
   HorarioSucursalDia,
+  RolUsuario,
   Sucursal,
+  TareaCatalogo,
 } from '../types/controlops';
 import { DIAS_SEMANA } from '../data/mockData';
 import { evaluarVencimientoActividad } from '../utils/calculations';
@@ -26,6 +28,8 @@ interface ActividadesViewProps {
   horarios: HorarioSucursalDia[];
   selectedSucursalId: string;
   diaActivo: DiaSemana;
+  userRole: RolUsuario;
+  tareasCatalogo: TareaCatalogo[];
   onChangeDiaActivo: (dia: DiaSemana) => void;
   onUpdateActividad: (updated: ActividadDiaria) => Promise<void>;
   onCreateActividad: (nueva: ActividadDiaria) => Promise<void>;
@@ -40,6 +44,8 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   horarios,
   selectedSucursalId,
   diaActivo,
+  userRole,
+  tareasCatalogo,
   onChangeDiaActivo,
   onUpdateActividad,
   onCreateActividad,
@@ -179,8 +185,10 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
     if (!newForm.titulo.trim()) return;
     setCreating(true);
     try {
+      const targetSucId =
+        userRole === 'cajera' ? selectedSucursalId : newForm.sucursal_id;
       const suc =
-        sucursales.find((s) => s.id === newForm.sucursal_id) || sucursales[0];
+        sucursales.find((s) => s.id === targetSucId) || sucursales[0];
       let evidenciaUrl: string | null = null;
       if (newFile) {
         const res = await uploadEvidenciaFoto(newFile, 'actividades', suc.id);
@@ -565,17 +573,24 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                     Sucursal
                   </label>
                   <select
-                    value={newForm.sucursal_id}
+                    disabled={userRole === 'cajera'}
+                    value={
+                      userRole === 'cajera'
+                        ? selectedSucursalId
+                        : newForm.sucursal_id
+                    }
                     onChange={(e) =>
                       setNewForm({ ...newForm, sucursal_id: e.target.value })
                     }
-                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm"
+                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm disabled:opacity-60"
                   >
-                    {sucursales.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.nombre}
-                      </option>
-                    ))}
+                    {sucursales
+                      .filter((s) => s.activa)
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.nombre}
+                        </option>
+                      ))}
                   </select>
                 </div>
 
@@ -601,6 +616,41 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                   </select>
                 </div>
               </div>
+
+              {tareasCatalogo.filter((t) => t.activa).length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-[#55476E] mb-1">
+                    Elegir del catálogo de tareas obligatorias (opcional)
+                  </label>
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const found = tareasCatalogo.find(
+                        (t) => t.id === e.target.value
+                      );
+                      if (found) {
+                        setNewForm({
+                          ...newForm,
+                          titulo: found.titulo,
+                          categoria: found.categoria,
+                        });
+                      }
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs"
+                  >
+                    <option value="">
+                      -- Seleccionar tarea del catálogo --
+                    </option>
+                    {tareasCatalogo
+                      .filter((t) => t.activa)
+                      .map((t) => (
+                        <option key={t.id} value={t.id}>
+                          [{t.categoria}] {t.titulo}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-medium text-[#55476E] mb-1">

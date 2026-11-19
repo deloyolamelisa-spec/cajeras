@@ -5,6 +5,7 @@ import {
   GastoYRefrendo,
   HorarioSucursalDia,
   LlamadaSucursal,
+  MetaSucursal,
   Sucursal,
 } from '../types/controlops';
 
@@ -51,7 +52,12 @@ export function evaluarVencimientoActividad(
   horario: HorarioSucursalDia | undefined,
   horaActualReferencia = '11:30'
 ): {
-  etiqueta: 'Sin horario límite' | 'A tiempo' | 'Vencida' | 'Completada con retraso' | 'En tiempo';
+  etiqueta:
+    | 'Sin horario límite'
+    | 'A tiempo'
+    | 'Vencida'
+    | 'Completada con retraso'
+    | 'En tiempo';
   vencidaPorHora: boolean;
   horaLimite: string | null;
 } {
@@ -141,11 +147,18 @@ export function computeBranchSummaries(
   actividades: ActividadDiaria[],
   gastosYRefrendos: GastoYRefrendo[],
   horarios: HorarioSucursalDia[],
-  diaActivo: DiaSemana
+  diaActivo: DiaSemana,
+  metasSucursal: MetaSucursal[] = []
 ): BranchMetricSummary[] {
-  return sucursales.map((sucursal) => {
+  const activas = sucursales.filter((s) => s.activa);
+
+  return activas.map((sucursal) => {
+    const metaConfig = metasSucursal.find((m) => m.sucursal_id === sucursal.id);
+
     const llamadasSuc = llamadas.filter((l) => l.sucursal_id === sucursal.id);
-    const llamadasRegistradas = llamadasSuc.filter((l) => l.llamada_registrada).length;
+    const llamadasRegistradas = llamadasSuc.filter(
+      (l) => l.llamada_registrada
+    ).length;
     const llamadasVerificadas = llamadasSuc.filter(
       (l) => l.estatus_auditoria === 'Verificada'
     ).length;
@@ -155,10 +168,13 @@ export function computeBranchSummaries(
     const llamadasSinAuditar = llamadasSuc.filter(
       (l) => l.estatus_auditoria === 'Sin auditar'
     ).length;
-    const metaLlamadas = sucursal.meta_llamadas_diarias || 30;
+    const metaLlamadas =
+      metaConfig?.meta_llamadas_diarias || sucursal.meta_llamadas_diarias || 30;
     const pctLlamadas = Math.min(100, (llamadasRegistradas / metaLlamadas) * 100);
 
-    const actividadesSuc = actividades.filter((a) => a.sucursal_id === sucursal.id);
+    const actividadesSuc = actividades.filter(
+      (a) => a.sucursal_id === sucursal.id
+    );
     const horarioDia = horarios.find(
       (h) => h.sucursal_id === sucursal.id && h.dia === diaActivo
     );
@@ -176,10 +192,14 @@ export function computeBranchSummaries(
       (g) => g.sucursal_id === sucursal.id && g.tipo === 'Gasto'
     );
     const gastoRealTotal = gastosSuc.reduce((acc, g) => acc + g.monto_real, 0);
-    const gastoPresupuestoTotal = gastosSuc.reduce(
+    const sumaTechosGasto = gastosSuc.reduce(
       (acc, g) => acc + g.presupuesto_limite,
       0
     );
+    const gastoPresupuestoTotal =
+      metaConfig?.techo_gasto_mensual ||
+      sucursal.techo_gasto_mensual ||
+      sumaTechosGasto;
     const gastoCalc = calcularExcesoPresupuesto(
       gastoRealTotal,
       gastoPresupuestoTotal
@@ -193,14 +213,14 @@ export function computeBranchSummaries(
       0
     );
     const refrendosMeta =
+      metaConfig?.meta_refrendos_mensual ||
+      sucursal.meta_refrendos_mensual ||
       refrendosSuc.reduce((acc, r) => acc + (r.meta_refrendos || 0), 0) ||
-      sucursal.meta_refrendos_mensual;
+      40;
     const montoRefrendos = refrendosSuc.reduce((acc, r) => acc + r.monto_real, 0);
     const pctRefrendos =
       refrendosMeta > 0 ? (refrendosRealizados / refrendosMeta) * 100 : 0;
 
-    // Score compuesto ponderado (0 - 100):
-    // 30% Actividades, 25% Control de Gasto (penaliza sobrecosto), 25% Refrendos, 20% Llamadas
     const scoreGasto = gastoCalc.excedido
       ? Math.max(0, 100 - gastoCalc.excesoPorcentaje * 2)
       : 100;

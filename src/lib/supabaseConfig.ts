@@ -4,9 +4,6 @@
  * ============================================================================
  * Pega aquí directamente tu SUPABASE_URL y tu SUPABASE_ANON_KEY obtenidos desde
  * Project Settings > API en tu panel de Supabase.
- *
- * Mientras estos valores permanezcan vacíos, ControlOps funcionará con datos
- * de ejemplo realistas guardados localmente para que puedas probar toda la app.
  * ============================================================================
  */
 
@@ -23,6 +20,10 @@ export const SUPABASE_TABLES = {
   ACTIVIDADES: 'actividades_diarias',
   GASTOS_REFRENDOS: 'gastos_y_refrendos',
   HORARIOS: 'horarios_sucursal',
+  USUARIOS: 'usuarios_controlops',
+  SUCURSALES: 'sucursales_config',
+  METAS: 'metas_sucursal',
+  CATALOGOS: 'catalogos_controlops',
 } as const;
 
 export const SUPABASE_BUCKETS = {

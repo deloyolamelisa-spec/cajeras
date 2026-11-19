@@ -10,6 +10,7 @@ import {
 import {
   BranchMetricSummary,
   GastoYRefrendo,
+  RolUsuario,
   Sucursal,
 } from '../types/controlops';
 import { formatMXN, formatPercent } from '../utils/calculations';
@@ -20,6 +21,7 @@ interface GastosRefrendosViewProps {
   summaries: BranchMetricSummary[];
   sucursales: Sucursal[];
   selectedSucursalId: string;
+  userRole: RolUsuario;
   onCreateRegistro: (nuevo: GastoYRefrendo) => Promise<void>;
   openCreateModalExternal?: boolean;
   onCloseCreateModalExternal?: () => void;
@@ -30,6 +32,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
   summaries,
   sucursales,
   selectedSucursalId,
+  userRole,
   onCreateRegistro,
   openCreateModalExternal = false,
   onCloseCreateModalExternal,
@@ -92,8 +95,10 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
     if (!form.concepto.trim()) return;
     setSaving(true);
     try {
+      const targetSucId =
+        userRole === 'cajera' ? selectedSucursalId : form.sucursal_id;
       const suc =
-        sucursales.find((s) => s.id === form.sucursal_id) || sucursales[0];
+        sucursales.find((s) => s.id === targetSucId) || sucursales[0];
       let evidenciaUrl: string | null = null;
       if (receiptFile) {
         const res = await uploadEvidenciaFoto(receiptFile, 'gastos', suc.id);
@@ -587,17 +592,24 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                     Sucursal
                   </label>
                   <select
-                    value={form.sucursal_id}
+                    disabled={userRole === 'cajera'}
+                    value={
+                      userRole === 'cajera'
+                        ? selectedSucursalId
+                        : form.sucursal_id
+                    }
                     onChange={(e) =>
                       setForm({ ...form, sucursal_id: e.target.value })
                     }
-                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm"
+                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm disabled:opacity-60"
                   >
-                    {sucursales.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.nombre}
-                      </option>
-                    ))}
+                    {sucursales
+                      .filter((s) => s.activa)
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.nombre}
+                        </option>
+                      ))}
                   </select>
                 </div>
               </div>
