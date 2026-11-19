@@ -30,6 +30,7 @@ import {
   formatHora12h,
   getCurrentLocalHHMM,
   getDiaSemanaFromDate,
+  getLlamadaLocalDate,
   resolveDailyTasksForBranch,
 } from '../utils/calculations';
 import { uploadEvidenciaFoto } from '../services/controlOpsService';
@@ -264,13 +265,12 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     const registradasMes = branchLlamadas.filter(
       (l) =>
         l.llamada_registrada &&
-        (!l.fecha_registro || l.fecha_registro.startsWith(currentMonthPrefix))
+        getLlamadaLocalDate(l).startsWith(currentMonthPrefix)
     ).length;
 
     const hoy = branchLlamadas.filter(
       (l) =>
-        l.llamada_registrada &&
-        (!l.fecha_registro || l.fecha_registro.startsWith(todayStr))
+        l.llamada_registrada && getLlamadaLocalDate(l) === todayStr
     ).length;
 
     const pct =
@@ -322,10 +322,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         .replace('.', '');
 
       const llamadasCount = branchLlamadas.filter(
-        (l) =>
-          l.llamada_registrada &&
-          (l.fecha_registro?.startsWith(dateStr) ||
-            (!l.fecha_registro && dateStr === todayStr))
+        (l) => l.llamada_registrada && getLlamadaLocalDate(l) === dateStr
       ).length;
 
       const refrendosMonto =

@@ -2,12 +2,31 @@ import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowUpRight,
+  BellRing,
   CheckCircle2,
+  Filter,
   MinusCircle,
   Trophy,
 } from 'lucide-react';
-import { BranchMetricSummary, SectionId } from '../types/controlops';
-import { formatMXN, formatPercent } from '../utils/calculations';
+import {
+  ActividadDiaria,
+  BranchMetricSummary,
+  DiaSemana,
+  GastoYRefrendo,
+  HorarioSucursalDia,
+  LlamadaSucursal,
+  MetaSucursal,
+  RolUsuario,
+  SectionId,
+  Sucursal,
+  TareaCatalogo,
+  UsuarioControlOps,
+} from '../types/controlops';
+import {
+  computeBranchSummaries,
+  formatMXN,
+  formatPercent,
+} from '../utils/calculations';
 
 type RankingCriterion =
   | 'consolidado'
@@ -21,6 +40,16 @@ interface RankingViewProps {
   selectedSucursalId: string;
   onSelectSucursal: (id: string) => void;
   onNavigateSection: (section: SectionId) => void;
+  userRole?: RolUsuario;
+  sucursales?: Sucursal[];
+  llamadas?: LlamadaSucursal[];
+  actividades?: ActividadDiaria[];
+  gastosYRefrendos?: GastoYRefrendo[];
+  horarios?: HorarioSucursalDia[];
+  diaActivo?: DiaSemana;
+  metas?: MetaSucursal[];
+  tareasCatalogo?: TareaCatalogo[];
+  usuarios?: UsuarioControlOps[];
 }
 
 const CRITERIA_TABS: { id: RankingCriterion; label: string }[] = [
@@ -31,39 +60,139 @@ const CRITERIA_TABS: { id: RankingCriterion; label: string }[] = [
   { id: 'llamadas', label: 'Llamadas' },
 ];
 
+const MESES_OPTIONS = [
+  { value: 'todos', label: 'Todos los meses' },
+  { value: '01', label: 'Enero' },
+  { value: '02', label: 'Febrero' },
+  { value: '03', label: 'Marzo' },
+  { value: '04', label: 'Abril' },
+  { value: '05', label: 'Mayo' },
+  { value: '06', label: 'Junio' },
+  { value: '07', label: 'Julio' },
+  { value: '08', label: 'Agosto' },
+  { value: '09', label: 'Septiembre' },
+  { value: '10', label: 'Octubre' },
+  { value: '11', label: 'Noviembre' },
+  { value: '12', label: 'Diciembre' },
+];
+
 export const RankingView: React.FC<RankingViewProps> = ({
   summaries,
   selectedSucursalId,
   onSelectSucursal,
   onNavigateSection,
+  userRole = 'creador',
+  sucursales = [],
+  llamadas = [],
+  actividades = [],
+  gastosYRefrendos = [],
+  horarios = [],
+  diaActivo = 'lunes',
+  metas = [],
+  tareasCatalogo = [],
+  usuarios = [],
 }) => {
+  const isCreador = userRole === 'creador';
+  const now = useMemo(() => new Date(), []);
   const [criterion, setCriterion] = useState<RankingCriterion>('consolidado');
+  const [filterMes, setFilterMes] = useState<string>('todos');
+  const [filterAnio, setFilterAnio] = useState<string>(
+    String(now.getFullYear())
+  );
+  const [filterCajera, setFilterCajera] = useState<string>('todas');
+
+  const yearOptions = useMemo(() => {
+    const curr = now.getFullYear();
+    return ['todos', String(curr - 1), String(curr), String(curr + 1)];
+  }, [now]);
+
+  const cajeraOptions = useMemo(() => {
+    const names = new Set<string>();
+    sucursales.forEach((s) => {
+      if (s.activa && s.responsable_caja) names.add(s.responsable_caja);
+    });
+    usuarios.forEach((u) => {
+      if (u.rol === 'cajera' && u.activo && u.nombre) names.add(u.nombre);
+    });
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [sucursales, usuarios]);
+
+  const activeSummaries = useMemo(() => {
+    const hasCustomFilter =
+      filterMes !== 'todos' ||
+      filterAnio !== 'todos' ||
+      filterCajera !== 'todas';
+
+    const monthPrefix =
+      filterAnio !== 'todos' && filterMes !== 'todos'
+        ? `${filterAnio}-${filterMes}`
+        : filterAnio !== 'todos'
+          ? filterAnio
+          : 'todos';
+
+    const baseList =
+      hasCustomFilter && sucursales.length > 0
+        ? computeBranchSummaries(
+            sucursales,
+            llamadas,
+            actividades,
+            gastosYRefrendos,
+            horarios,
+            diaActivo,
+            metas,
+            tareasCatalogo,
+            {
+              monthPrefix,
+              cajeraNombre: filterCajera,
+            }
+          )
+        : summaries;
+
+    if (selectedSucursalId !== 'todas') {
+      return baseList.filter((s) => s.sucursal.id === selectedSucursalId);
+    }
+    return baseList;
+  }, [
+    filterMes,
+    filterAnio,
+    filterCajera,
+    sucursales,
+    llamadas,
+    actividades,
+    gastosYRefrendos,
+    horarios,
+    diaActivo,
+    metas,
+    tareasCatalogo,
+    summaries,
+    selectedSucursalId,
+  ]);
 
   const totals = useMemo(() => {
-    const totalLlamadas = summaries.reduce(
+    const totalLlamadas = activeSummaries.reduce(
       (acc, s) => acc + s.llamadasRegistradas,
       0
     );
-    const metaLlamadas = summaries.reduce((acc, s) => acc + s.metaLlamadas, 0);
-    const totalRefrendos = summaries.reduce(
+    const metaLlamadas = activeSummaries.reduce((acc, s) => acc + s.metaLlamadas, 0);
+    const totalRefrendos = activeSummaries.reduce(
       (acc, s) => acc + s.refrendosRealizados,
       0
     );
-    const metaRefrendos = summaries.reduce(
+    const metaRefrendos = activeSummaries.reduce(
       (acc, s) => acc + s.refrendosMeta,
       0
     );
-    const montoRefrendos = summaries.reduce(
+    const montoRefrendos = activeSummaries.reduce(
       (acc, s) => acc + s.montoRefrendos,
       0
     );
-    const excedidas = summaries.filter((s) => s.excedioPresupuesto).length;
-    const dentroLimite = summaries.length - excedidas;
-    const totalActividadesCompletadas = summaries.reduce(
+    const excedidas = activeSummaries.filter((s) => s.excedioPresupuesto).length;
+    const dentroLimite = activeSummaries.length - excedidas;
+    const totalActividadesCompletadas = activeSummaries.reduce(
       (acc, s) => acc + s.actividadesCompletadas,
       0
     );
-    const totalActividadesAsignadas = summaries.reduce(
+    const totalActividadesAsignadas = activeSummaries.reduce(
       (acc, s) => acc + s.actividadesTotal,
       0
     );
@@ -84,10 +213,76 @@ export const RankingView: React.FC<RankingViewProps> = ({
       totalActividadesAsignadas,
       promedioActividades,
     };
-  }, [summaries]);
+  }, [activeSummaries]);
+
+  const alertasRezago = useMemo(() => {
+    const alerts: {
+      id: string;
+      sucursalId: string;
+      sucursalNombre: string;
+      cajera: string;
+      tipo: string;
+      detalle: string;
+      severity: 'danger' | 'warn';
+      targetSection: SectionId;
+    }[] = [];
+
+    for (const item of activeSummaries) {
+      if (item.excedioPresupuesto) {
+        alerts.push({
+          id: `alert-gasto-${item.sucursal.id}`,
+          sucursalId: item.sucursal.id,
+          sucursalNombre: item.sucursal.nombre,
+          cajera: item.sucursal.responsable_caja,
+          tipo: 'Techo de gasto excedido',
+          detalle: `Exceso de ${formatMXN(item.excesoDinero)} (+${formatPercent(item.excesoPorcentaje)}) sobre límite`,
+          severity: 'danger',
+          targetSection: 'gastos',
+        });
+      }
+      if (item.actividadesVencidas > 0) {
+        alerts.push({
+          id: `alert-act-${item.sucursal.id}`,
+          sucursalId: item.sucursal.id,
+          sucursalNombre: item.sucursal.nombre,
+          cajera: item.sucursal.responsable_caja,
+          tipo: 'Actividades fuera de horario',
+          detalle: `${item.actividadesVencidas} actividad(es) vencida(s) hoy sin evidencia`,
+          severity: 'danger',
+          targetSection: 'actividades',
+        });
+      }
+      if (item.pctLlamadas < 50) {
+        alerts.push({
+          id: `alert-ll-${item.sucursal.id}`,
+          sucursalId: item.sucursal.id,
+          sucursalNombre: item.sucursal.nombre,
+          cajera: item.sucursal.responsable_caja,
+          tipo: 'Rezago en llamadas',
+          detalle: `${item.llamadasRegistradas}/${item.metaLlamadas} marcaciones (${formatPercent(item.pctLlamadas, 0)})`,
+          severity: 'warn',
+          targetSection: 'llamadas',
+        });
+      }
+      if (item.pctRefrendos < 50) {
+        alerts.push({
+          id: `alert-ref-${item.sucursal.id}`,
+          sucursalId: item.sucursal.id,
+          sucursalNombre: item.sucursal.nombre,
+          cajera: item.sucursal.responsable_caja,
+          tipo: 'Rezago en refrendos',
+          detalle: `${item.refrendosRealizados}/${item.refrendosMeta} (${formatPercent(item.pctRefrendos, 0)} de meta)`,
+          severity: 'warn',
+          targetSection: 'gastos',
+        });
+      }
+    }
+
+    return alerts;
+  }, [activeSummaries]);
 
   const sortedSummaries = useMemo(() => {
-    const copy = [...summaries];
+    const copy = [...activeSummaries];
     copy.sort((a, b) => {
       switch (criterion) {
         case 'actividades':
@@ -110,7 +305,7 @@ export const RankingView: React.FC<RankingViewProps> = ({
       }
     });
     return copy;
-  }, [summaries, criterion]);
+  }, [activeSummaries, criterion]);
 
   const getChartValue = (s: BranchMetricSummary) => {
     switch (criterion) {
@@ -156,7 +351,9 @@ export const RankingView: React.FC<RankingViewProps> = ({
       case 'llamadas':
         return {
           pct: s.pctLlamadas,
-          display: `${s.llamadasRegistradas}/${s.metaLlamadas} registradas · ${s.llamadasVerificadas} verif.`,
+          display: isCreador
+            ? `${s.llamadasRegistradas}/${s.metaLlamadas} registradas · ${s.llamadasVerificadas} verif.`
+            : `${s.llamadasRegistradas}/${s.metaLlamadas} registradas`,
           status: s.pctLlamadas >= 100 ? 'Meta alcanzada' : 'En progreso',
           tone: s.pctLlamadas >= 100 ? 'good' : 'warn',
         };
@@ -181,6 +378,72 @@ export const RankingView: React.FC<RankingViewProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Top Filters Bar (Mes / Año / Sucursal / Cajera) */}
+      <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs font-semibold text-[#5B21B6]">
+          <Filter className="h-4 w-4 text-[#DB2777]" />
+          <span>Filtros del Panel de control</span>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 flex-1 max-w-3xl">
+          <select
+            aria-label="Filtrar por mes"
+            value={filterMes}
+            onChange={(e) => setFilterMes(e.target.value)}
+            className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+          >
+            {MESES_OPTIONS.map((m) => (
+              <option key={m.value} value={m.value}>
+                Mes: {m.label}
+              </option>
+            ))}
+          </select>
+
+          <select
+            aria-label="Filtrar por año"
+            value={filterAnio}
+            onChange={(e) => setFilterAnio(e.target.value)}
+            className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+          >
+            {yearOptions.map((y) => (
+              <option key={y} value={y}>
+                {y === 'todos' ? 'Año: Todos' : `Año: ${y}`}
+              </option>
+            ))}
+          </select>
+
+          <select
+            aria-label="Filtrar por sucursal"
+            value={selectedSucursalId}
+            onChange={(e) => onSelectSucursal(e.target.value)}
+            className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#5B21B6] focus:outline-none focus:border-[#7C3AED]"
+          >
+            <option value="todas">Sucursal: Todas</option>
+            {sucursales
+              .filter((s) => s.activa)
+              .map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.nombre}
+                </option>
+              ))}
+          </select>
+
+          <select
+            aria-label="Filtrar por cajera"
+            value={filterCajera}
+            onChange={(e) => setFilterCajera(e.target.value)}
+            className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+          >
+            <option value="todas">Cajera: Todas</option>
+            {cajeraOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </div>
+      </section>
+
       {/* Top Executive KPI Strip */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <div className="bg-white rounded-2xl border border-[#EAE3F5] p-5">
@@ -204,7 +467,7 @@ export const RankingView: React.FC<RankingViewProps> = ({
           </p>
           <div className="mt-2 flex items-baseline justify-between">
             <span className="font-display text-2xl font-bold text-[#1F172B] tabular-nums">
-              {totals.dentroLimite}/{summaries.length}
+              {totals.dentroLimite}/{activeSummaries.length}
             </span>
             <span
               className={`text-xs font-medium ${
@@ -257,6 +520,72 @@ export const RankingView: React.FC<RankingViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Real-time Lag Alerts Block */}
+      <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 space-y-3.5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <BellRing className="h-4 w-4 text-[#DB2777]" />
+            <h2 className="font-display text-base font-bold text-[#1F172B]">
+              Alertas de rezago en tiempo real
+            </h2>
+          </div>
+          <span
+            className={`px-2.5 py-1 rounded-lg text-xs font-semibold ${
+              alertasRezago.length > 0
+                ? 'bg-[#FFF1F2] text-[#BE123C]'
+                : 'bg-[#F0FDF4] text-[#15803D]'
+            }`}
+          >
+            {alertasRezago.length > 0
+              ? `${alertasRezago.length} alerta(s) activa(s)`
+              : 'Sin rezagos críticos'}
+          </span>
+        </div>
+
+        {alertasRezago.length === 0 ? (
+          <p className="text-xs text-[#6E5F87]">
+            Todas las sucursales filtradas se encuentran dentro de sus rangos operativos esperados.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 max-h-64 overflow-y-auto pr-1">
+            {alertasRezago.slice(0, 12).map((alert) => (
+              <button
+                key={alert.id}
+                type="button"
+                onClick={() => {
+                  onSelectSucursal(alert.sucursalId);
+                  onNavigateSection(alert.targetSection);
+                }}
+                className={`text-left rounded-xl border p-3.5 transition-colors hover:shadow-xs ${
+                  alert.severity === 'danger'
+                    ? 'bg-[#FFF1F2]/70 border-[#FECDD3] hover:bg-[#FFF1F2]'
+                    : 'bg-[#FFFBEB]/80 border-[#FDE68A] hover:bg-[#FFFBEB]'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-[#1F172B] truncate">
+                    {alert.sucursalNombre}
+                  </span>
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-md shrink-0 ${
+                      alert.severity === 'danger'
+                        ? 'bg-white text-[#BE123C]'
+                        : 'bg-white text-[#B45309]'
+                    }`}
+                  >
+                    {alert.tipo}
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#55476E] mt-1">{alert.detalle}</p>
+                <p className="text-[11px] text-[#8B7CA5] mt-0.5 truncate">
+                  Cajera: {alert.cajera}
+                </p>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* Comparative Criterion Selector & Bar Comparison */}
       <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 md:p-6 space-y-5">
@@ -509,8 +838,9 @@ export const RankingView: React.FC<RankingViewProps> = ({
                         {item.llamadasRegistradas}/{item.metaLlamadas}
                       </div>
                       <div className="text-xs text-[#7A6B93]">
-                        {item.llamadasVerificadas} verif. · {item.llamadasFalsas}{' '}
-                        falsas
+                        {isCreador
+                          ? `${item.llamadasVerificadas} verif. · ${item.llamadasFalsas} falsas`
+                          : `${formatPercent(item.pctLlamadas, 0)} de meta`}
                       </div>
                     </td>
 

@@ -99,6 +99,182 @@ export function getTodayLocalYYYYMMDD(): string {
   return `${y}-${m}-${d}`;
 }
 
+export function toLocalYYYYMMDD(dateInput?: string | Date | null): string {
+  if (!dateInput) return getTodayLocalYYYYMMDD();
+  if (typeof dateInput === 'string') {
+    const trimmed = dateInput.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+    const parsed = new Date(trimmed);
+    if (!Number.isNaN(parsed.getTime())) {
+      const y = parsed.getFullYear();
+      const m = String(parsed.getMonth() + 1).padStart(2, '0');
+      const d = String(parsed.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+    if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10);
+  }
+  if (dateInput instanceof Date && !Number.isNaN(dateInput.getTime())) {
+    const y = dateInput.getFullYear();
+    const m = String(dateInput.getMonth() + 1).padStart(2, '0');
+    const d = String(dateInput.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return getTodayLocalYYYYMMDD();
+}
+
+export interface LlamadaBatchInfo {
+  loteNum: number | null;
+  fecha: string;
+  sucursalId: string;
+  batchKey: string;
+}
+
+export function extractLlamadaBatchInfo(
+  llamada: LlamadaSucursal
+): LlamadaBatchInfo | null {
+  const id = llamada.id || '';
+  const loteMatch = id.match(
+    /^ll-lote-(\d+)__(\d{4}-\d{2}-\d{2})__([^_]+(?:_[^_]+)*)__([^_-]+)/
+  );
+  if (loteMatch) {
+    const loteNum = Number(loteMatch[1]) || null;
+    const fecha = loteMatch[2];
+    const sucursalId = loteMatch[3];
+    const stamp = loteMatch[4];
+    return {
+      loteNum,
+      fecha,
+      sucursalId,
+      batchKey: `${fecha}__${sucursalId}__${loteMatch[1]}__${stamp}`,
+    };
+  }
+
+  // Fallback for legacy imported records: ll-imp-<timestamp>-<idx>-<rand>
+  const legacyMatch = id.match(/^ll-imp-(\d+)-/);
+  if (legacyMatch) {
+    const fecha = toLocalYYYYMMDD(llamada.fecha_registro);
+    return {
+      loteNum: null,
+      fecha,
+      sucursalId: llamada.sucursal_id,
+      batchKey: `${fecha}__${llamada.sucursal_id}__imp-${legacyMatch[1]}`,
+    };
+  }
+
+  return null;
+}
+
+export function getLlamadaLocalDate(llamada: LlamadaSucursal): string {
+  const batchInfo = extractLlamadaBatchInfo(llamada);
+  if (batchInfo?.fecha) return batchInfo.fecha;
+  return toLocalYYYYMMDD(llamada.fecha_registro);
+}
+
+export interface DailyBatchSlotSummary {
+  slot: number;
+  batchKey: string;
+  totalRegistros: number;
+  llamadasRealizadas: number;
+  loaded: boolean;
+}
+
+export interface DailyBatchSummary {
+  fecha: string;
+  sucursalId: string;
+  count: number;
+  maxBases: number;
+  nextLoteNum: number;
+  limitReached: boolean;
+  totalHoyClientes: number;
+  totalHoyRegistradas: number;
+  slots: DailyBatchSlotSummary[];
+}
+
+export function getDailyBatchSummaryForBranch(
+  llamadas: LlamadaSucursal[],
+  sucursalId: string,
+  fechaStr: string = getTodayLocalYYYYMMDD()
+): DailyBatchSummary {
+  const maxBases = 3;
+  const branchTodayCalls = llamadas.filter(
+    (l) => l.sucursal_id === sucursalId && getLlamadaLocalDate(l) === fechaStr
+  );
+
+  const grouped = new Map<
+    string,
+    {
+      loteNum: number | null;
+      totalRegistros: number;
+      llamadasRealizadas: number;
+      firstTs: string;
+    }
+  >();
+
+  for (const item of branchTodayCalls) {
+    const info = extractLlamadaBatchInfo(item);
+    if (!info) continue;
+    const existing = grouped.get(info.batchKey);
+    if (existing) {
+      existing.totalRegistros += 1;
+      if (item.llamada_registrada) existing.llamadasRealizadas += 1;
+    } else {
+      grouped.set(info.batchKey, {
+        loteNum: info.loteNum,
+        totalRegistros: 1,
+        llamadasRealizadas: item.llamada_registrada ? 1 : 0,
+        firstTs: item.fecha_registro || '',
+      });
+    }
+  }
+
+  const orderedBatches = Array.from(grouped.entries()).sort(([, a], [, b]) => {
+    if (a.loteNum !== null && b.loteNum !== null && a.loteNum !== b.loteNum) {
+      return a.loteNum - b.loteNum;
+    }
+    return a.firstTs.localeCompare(b.firstTs);
+  });
+
+  const slots: DailyBatchSlotSummary[] = [1, 2, 3].map((slotNum) => {
+    const matched =
+      orderedBatches.find(([, val]) => val.loteNum === slotNum) ||
+      orderedBatches[slotNum - 1];
+    if (matched) {
+      return {
+        slot: slotNum,
+        batchKey: matched[0],
+        totalRegistros: matched[1].totalRegistros,
+        llamadasRealizadas: matched[1].llamadasRealizadas,
+        loaded: true,
+      };
+    }
+    return {
+      slot: slotNum,
+      batchKey: '',
+      totalRegistros: 0,
+      llamadasRealizadas: 0,
+      loaded: false,
+    };
+  });
+
+  const count = orderedBatches.length;
+  const totalHoyClientes = branchTodayCalls.length;
+  const totalHoyRegistradas = branchTodayCalls.filter(
+    (l) => l.llamada_registrada
+  ).length;
+
+  return {
+    fecha: fechaStr,
+    sucursalId,
+    count,
+    maxBases,
+    nextLoteNum: Math.min(maxBases, count + 1),
+    limitReached: count >= maxBases,
+    totalHoyClientes,
+    totalHoyRegistradas,
+    slots,
+  };
+}
+
 export function buildCatalogActividadId(
   tareaId: string,
   sucursalId: string,
@@ -337,6 +513,11 @@ export function calcularExcesoPresupuesto(
   };
 }
 
+export interface BranchSummaryFilterOptions {
+  monthPrefix?: string; // 'YYYY-MM' or 'YYYY' or 'todos'
+  cajeraNombre?: string; // 'todas' or exact/partial name
+}
+
 export function computeBranchSummaries(
   sucursales: Sucursal[],
   llamadas: LlamadaSucursal[],
@@ -345,15 +526,49 @@ export function computeBranchSummaries(
   horarios: HorarioSucursalDia[],
   diaActivo: DiaSemana,
   metasSucursal: MetaSucursal[] = [],
-  tareasCatalogo: TareaCatalogo[] = []
+  tareasCatalogo: TareaCatalogo[] = [],
+  filterOptions?: BranchSummaryFilterOptions
 ): BranchMetricSummary[] {
   const activas = sucursales.filter((s) => s.activa);
   const todayStr = getTodayLocalYYYYMMDD();
+  const monthPrefix =
+    filterOptions?.monthPrefix && filterOptions.monthPrefix !== 'todos'
+      ? filterOptions.monthPrefix
+      : '';
+  const cajeraFilter =
+    filterOptions?.cajeraNombre && filterOptions.cajeraNombre !== 'todas'
+      ? filterOptions.cajeraNombre.trim().toLowerCase()
+      : '';
 
-  return activas.map((sucursal) => {
+  const filteredByCajeraSucursales = cajeraFilter
+    ? activas.filter(
+        (s) =>
+          s.responsable_caja.trim().toLowerCase() === cajeraFilter ||
+          llamadas.some(
+            (l) =>
+              l.sucursal_id === s.id &&
+              l.cajera_nombre.trim().toLowerCase() === cajeraFilter
+          )
+      )
+    : activas;
+
+  return filteredByCajeraSucursales.map((sucursal) => {
     const metaConfig = metasSucursal.find((m) => m.sucursal_id === sucursal.id);
 
-    const llamadasSuc = llamadas.filter((l) => l.sucursal_id === sucursal.id);
+    const llamadasSuc = llamadas.filter((l) => {
+      if (l.sucursal_id !== sucursal.id) return false;
+      if (monthPrefix && !getLlamadaLocalDate(l).startsWith(monthPrefix)) {
+        return false;
+      }
+      if (
+        cajeraFilter &&
+        l.cajera_nombre.trim().toLowerCase() !== cajeraFilter &&
+        sucursal.responsable_caja.trim().toLowerCase() !== cajeraFilter
+      ) {
+        return false;
+      }
+      return true;
+    });
     const llamadasRegistradas = llamadasSuc.filter(
       (l) => l.llamada_registrada
     ).length;
@@ -399,9 +614,18 @@ export function computeBranchSummaries(
     const pctActividades =
       actividadesTotal > 0 ? (actividadesCompletadas / actividadesTotal) * 100 : 0;
 
-    const gastosSuc = gastosYRefrendos.filter(
-      (g) => g.sucursal_id === sucursal.id && g.tipo === 'Gasto'
-    );
+    const gastosSuc = gastosYRefrendos.filter((g) => {
+      if (g.sucursal_id !== sucursal.id || g.tipo !== 'Gasto') return false;
+      if (monthPrefix && !(g.fecha || '').startsWith(monthPrefix)) return false;
+      if (
+        cajeraFilter &&
+        g.responsable.trim().toLowerCase() !== cajeraFilter &&
+        sucursal.responsable_caja.trim().toLowerCase() !== cajeraFilter
+      ) {
+        return false;
+      }
+      return true;
+    });
     const gastoRealTotal = gastosSuc.reduce((acc, g) => acc + g.monto_real, 0);
     const sumaTechosGasto = gastosSuc.reduce(
       (acc, g) => acc + g.presupuesto_limite,
@@ -416,9 +640,18 @@ export function computeBranchSummaries(
       gastoPresupuestoTotal
     );
 
-    const refrendosSuc = gastosYRefrendos.filter(
-      (g) => g.sucursal_id === sucursal.id && g.tipo === 'Refrendo'
-    );
+    const refrendosSuc = gastosYRefrendos.filter((g) => {
+      if (g.sucursal_id !== sucursal.id || g.tipo !== 'Refrendo') return false;
+      if (monthPrefix && !(g.fecha || '').startsWith(monthPrefix)) return false;
+      if (
+        cajeraFilter &&
+        g.responsable.trim().toLowerCase() !== cajeraFilter &&
+        sucursal.responsable_caja.trim().toLowerCase() !== cajeraFilter
+      ) {
+        return false;
+      }
+      return true;
+    });
     const refrendosRealizados = refrendosSuc.reduce(
       (acc, r) => acc + (r.cantidad_refrendos || 0),
       0

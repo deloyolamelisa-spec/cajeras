@@ -488,6 +488,26 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
   }
 }
 
+function buildLlamadaPayload(llamada: LlamadaSucursal) {
+  return {
+    id: llamada.id,
+    sucursal_id: llamada.sucursal_id,
+    sucursal_nombre: llamada.sucursal_nombre,
+    cliente_nombre: llamada.cliente_nombre,
+    contrato: llamada.contrato,
+    telefono: llamada.telefono,
+    monto_prestamo: Number(llamada.monto_prestamo) || 0,
+    estatus_vencimiento: llamada.estatus_vencimiento,
+    fecha_vencimiento: llamada.fecha_vencimiento || null,
+    reporte_cajera: llamada.reporte_cajera || 'Sin reporte',
+    estatus_auditoria: llamada.estatus_auditoria || 'Sin auditar',
+    observaciones_admin: llamada.observaciones_admin ?? '',
+    cajera_nombre: llamada.cajera_nombre ?? '',
+    llamada_registrada: Boolean(llamada.llamada_registrada),
+    fecha_registro: llamada.fecha_registro || new Date().toISOString(),
+  };
+}
+
 export async function saveLlamada(
   llamada: LlamadaSucursal,
   allLlamadas: LlamadaSucursal[]
@@ -496,9 +516,10 @@ export async function saveLlamada(
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
+    const payload = buildLlamadaPayload(llamada);
     const { data, error } = await conn.client
       .from(SUPABASE_TABLES.LLAMADAS)
-      .upsert(llamada, { onConflict: 'id' })
+      .upsert(payload, { onConflict: 'id' })
       .select();
     if (error) {
       return {
@@ -534,21 +555,25 @@ export async function saveLlamadasBatch(
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
-    const { data, error } = await conn.client
-      .from(SUPABASE_TABLES.LLAMADAS)
-      .upsert(nuevasLlamadas, { onConflict: 'id' })
-      .select();
-    if (error) {
-      return {
-        ok: false,
-        error: `Error al importar en ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(error)}`,
-      };
-    }
-    if (!data || data.length === 0) {
-      return {
-        ok: false,
-        error: `Supabase no confirmó la importación en ${SUPABASE_TABLES.LLAMADAS} (revisa RLS).`,
-      };
+    const chunkSize = 200;
+    for (let i = 0; i < nuevasLlamadas.length; i += chunkSize) {
+      const chunk = nuevasLlamadas.slice(i, i + chunkSize).map(buildLlamadaPayload);
+      const { data, error } = await conn.client
+        .from(SUPABASE_TABLES.LLAMADAS)
+        .upsert(chunk, { onConflict: 'id' })
+        .select();
+      if (error) {
+        return {
+          ok: false,
+          error: `Error al importar en ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(error)}`,
+        };
+      }
+      if (!data || data.length === 0) {
+        return {
+          ok: false,
+          error: `Supabase no confirmó la importación en ${SUPABASE_TABLES.LLAMADAS} (revisa RLS).`,
+        };
+      }
     }
     writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
     return { ok: true };

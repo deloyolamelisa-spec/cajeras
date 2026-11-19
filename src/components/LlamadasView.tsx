@@ -24,7 +24,15 @@ import {
   RolUsuario,
   Sucursal,
 } from '../types/controlops';
-import { formatMXN, sanitizePhoneForWhatsApp } from '../utils/calculations';
+import {
+  extractLlamadaBatchInfo,
+  formatMXN,
+  getDailyBatchSummaryForBranch,
+  getLlamadaLocalDate,
+  getTodayLocalYYYYMMDD,
+  sanitizePhoneForWhatsApp,
+} from '../utils/calculations';
+import { ServiceResult } from '../services/controlOpsService';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface LlamadasViewProps {
@@ -32,10 +40,11 @@ interface LlamadasViewProps {
   sucursales: Sucursal[];
   selectedSucursalId: string;
   userRole: RolUsuario;
+  currentUserName?: string;
   opcionesReporte: string[];
   onUpdateLlamada: (updated: LlamadaSucursal) => Promise<void>;
   onCreateLlamada: (nueva: LlamadaSucursal) => Promise<void>;
-  onImportLlamadas: (nuevas: LlamadaSucursal[]) => Promise<void>;
+  onImportLlamadas: (nuevas: LlamadaSucursal[]) => Promise<ServiceResult | void>;
   onDeleteLlamada: (id: string) => Promise<void>;
   onSelectSucursal?: (id: string) => void;
   openCreateModalExternal?: boolean;
@@ -83,6 +92,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   sucursales,
   selectedSucursalId,
   userRole,
+  currentUserName,
   opcionesReporte,
   onUpdateLlamada,
   onCreateLlamada,
@@ -94,7 +104,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 }) => {
   const isCajera = userRole === 'cajera';
   const isCreador = userRole === 'creador';
-  const canAudit = userRole === 'supervisor' || userRole === 'creador';
+  const canAuditCalls = isCreador;
+  const canImport = isCajera || isCreador;
+  const canFilterBranch = !isCajera;
   const dropdownOpciones: ReporteCajeraOpcion[] = [
     'Sin reporte',
     ...opcionesReporte,
@@ -119,6 +131,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     []
   );
   const [importWarnings, setImportWarnings] = useState<string[]>([]);
+  const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [importToast, setImportToast] = useState<string | null>(null);
 
@@ -145,13 +158,42 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     onCloseCreateModalExternal?.();
   };
 
+  const todayStr = getTodayLocalYYYYMMDD();
+
   const scopedLlamadas = useMemo(() => {
     if (selectedSucursalId === 'todas') return llamadas;
     return llamadas.filter((l) => l.sucursal_id === selectedSucursalId);
   }, [llamadas, selectedSucursalId]);
 
+  const activeBranchForBatch =
+    selectedSucursalId !== 'todas'
+      ? selectedSucursalId
+      : sucursales.find((s) => s.activa)?.id || sucursales[0]?.id || 'suc-centro';
+
+  const activeBranchObj = useMemo(
+    () => sucursales.find((s) => s.id === activeBranchForBatch) || sucursales[0],
+    [sucursales, activeBranchForBatch]
+  );
+
+  const dailyBatchSummary = useMemo(
+    () =>
+      getDailyBatchSummaryForBranch(llamadas, activeBranchForBatch, todayStr),
+    [llamadas, activeBranchForBatch, todayStr]
+  );
+
+  const todayAllBranchesStats = useMemo(() => {
+    const todayScoped = scopedLlamadas.filter(
+      (l) => getLlamadaLocalDate(l) === todayStr
+    );
+    return {
+      totalHoyClientes: todayScoped.length,
+      totalHoyRegistradas: todayScoped.filter((l) => l.llamada_registrada).length,
+    };
+  }, [scopedLlamadas, todayStr]);
+
   const metrics = useMemo(() => {
     const registradas = scopedLlamadas.filter((l) => l.llamada_registrada).length;
+    const pendientes = scopedLlamadas.filter((l) => !l.llamada_registrada).length;
     const verificadas = scopedLlamadas.filter(
       (l) => l.estatus_auditoria === 'Verificada'
     ).length;
@@ -168,9 +210,10 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
         : sucursales.find((s) => s.id === selectedSucursalId)
             ?.meta_llamadas_diarias || 30;
 
-    const pct = Math.min(100, (registradas / metaDiaria) * 100);
+    const pct = metaDiaria > 0 ? Math.min(100, (registradas / metaDiaria) * 100) : 0;
     return {
       registradas,
+      pendientes,
       verificadas,
       falsas,
       sinAuditar,
@@ -194,7 +237,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       if (filterAuditoria !== 'todos') {
         if (filterAuditoria === 'pendiente_marcar') {
           if (item.llamada_registrada) return false;
-        } else if (item.estatus_auditoria !== filterAuditoria) {
+        } else if (filterAuditoria === 'marcadas') {
+          if (!item.llamada_registrada) return false;
+        } else if (canAuditCalls && item.estatus_auditoria !== filterAuditoria) {
           return false;
         }
       }
@@ -271,8 +316,8 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       fecha_vencimiento: new Date().toISOString().slice(0, 10),
       reporte_cajera: newForm.reporte_cajera,
       estatus_auditoria: 'Sin auditar',
-      observaciones_admin: newForm.observaciones_admin.trim(),
-      cajera_nombre: suc.responsable_caja,
+      observaciones_admin: isCajera ? '' : newForm.observaciones_admin.trim(),
+      cajera_nombre: currentUserName || suc.responsable_caja,
       llamada_registrada: true,
       fecha_registro: new Date().toISOString(),
     };
@@ -293,9 +338,10 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
   const handleDownloadTemplateCSV = () => {
     const sampleBranches = sucursales.filter((s) => s.activa).slice(0, 3);
-    const b1 = sampleBranches[0]?.nombre || 'Sucursal Centro';
-    const b2 = sampleBranches[1]?.nombre || 'Sucursal Norte';
-    const b3 = sampleBranches[2]?.nombre || 'Sucursal Sur';
+    const ownName = activeBranchObj?.nombre || 'Sucursal Centro';
+    const b1 = isCajera ? ownName : sampleBranches[0]?.nombre || 'Sucursal Centro';
+    const b2 = isCajera ? ownName : sampleBranches[1]?.nombre || 'Sucursal Norte';
+    const b3 = isCajera ? ownName : sampleBranches[2]?.nombre || 'Sucursal Sur';
     const today = new Date();
     const fmt = (offsetDays: number) => {
       const d = new Date(today.getTime() + offsetDays * 86400000);
@@ -348,7 +394,15 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
     setImportFileName(file.name);
     setImportWarnings([]);
+    setImportError(null);
     setParsedImportRows([]);
+
+    if (isCajera && dailyBatchSummary.limitReached) {
+      setImportError(
+        'Has alcanzado el límite diario de 3 bases cargadas hoy (3 de 3). Ya no se permite una cuarta carga hoy.'
+      );
+      return;
+    }
 
     try {
       const buffer = await file.arrayBuffer();
@@ -369,6 +423,8 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       const warnings: string[] = [];
       const built: LlamadaSucursal[] = [];
       const nowIso = new Date().toISOString();
+      const batchStamp = Date.now().toString(36);
+      const branchBatchCache = new Map<string, number>();
 
       rawRows.forEach((raw, idx) => {
         const normalized: Record<string, unknown> = {};
@@ -410,17 +466,43 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
           return;
         }
 
-        const matchedSuc =
-          matchSucursalByInput(sucursalText) ||
-          (selectedSucursalId !== 'todas'
-            ? sucursales.find((s) => s.id === selectedSucursalId)
-            : undefined);
+        let matchedSuc: Sucursal | undefined;
+        if (isCajera) {
+          const ownSuc = activeBranchObj;
+          if (sucursalText) {
+            const explicitSuc = matchSucursalByInput(sucursalText);
+            if (explicitSuc && ownSuc && explicitSuc.id !== ownSuc.id) {
+              warnings.push(
+                `Fila ${idx + 2} (${cliente}): omitida porque pertenece a "${explicitSuc.nombre}" y tu perfil solo carga en "${ownSuc.nombre}".`
+              );
+              return;
+            }
+          }
+          matchedSuc = ownSuc;
+        } else {
+          matchedSuc =
+            matchSucursalByInput(sucursalText) ||
+            (selectedSucursalId !== 'todas'
+              ? sucursales.find((s) => s.id === selectedSucursalId)
+              : undefined);
+        }
 
         if (!matchedSuc) {
           warnings.push(
             `Fila ${idx + 2} (${cliente}): no se encontró la sucursal "${sucursalText || 'vacía'}".`
           );
           return;
+        }
+
+        let loteNum = branchBatchCache.get(matchedSuc.id);
+        if (!loteNum) {
+          const branchBatches = getDailyBatchSummaryForBranch(
+            llamadas,
+            matchedSuc.id,
+            todayStr
+          );
+          loteNum = branchBatches.count + 1;
+          branchBatchCache.set(matchedSuc.id, loteNum);
         }
 
         const estatusVenc: EstatusVencimiento =
@@ -433,7 +515,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                 : computeVencimientoFromDate(fechaVenc);
 
         built.push({
-          id: `ll-imp-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+          id: `ll-lote-${loteNum}__${todayStr}__${matchedSuc.id}__${batchStamp}-${idx}`,
           sucursal_id: matchedSuc.id,
           sucursal_nombre: matchedSuc.nombre,
           cliente_nombre: cliente,
@@ -447,7 +529,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
           reporte_cajera: 'Sin reporte',
           estatus_auditoria: 'Sin auditar',
           observaciones_admin: '',
-          cajera_nombre: matchedSuc.responsable_caja,
+          cajera_nombre: isCajera
+            ? currentUserName || matchedSuc.responsable_caja
+            : matchedSuc.responsable_caja,
           llamada_registrada: false,
           fecha_registro: nowIso,
         });
@@ -466,17 +550,33 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
   const handleConfirmImport = async () => {
     if (parsedImportRows.length === 0) return;
+    if (isCajera && dailyBatchSummary.limitReached) {
+      setImportError(
+        'Has alcanzado el límite diario de 3 bases cargadas hoy (3 de 3).'
+      );
+      return;
+    }
     setImporting(true);
+    setImportError(null);
     try {
-      await onImportLlamadas(parsedImportRows);
+      const res = await onImportLlamadas(parsedImportRows);
+      if (res && res.ok === false) {
+        setImportError(
+          res.error || 'No se pudo guardar la base en Supabase. Intenta de nuevo.'
+        );
+        return;
+      }
+      const loteLabel = isCajera
+        ? ` (Base ${dailyBatchSummary.nextLoteNum} de 3 del día)`
+        : '';
       setImportToast(
-        `${parsedImportRows.length} registro(s) importados y guardados en llamadas_sucursal.`
+        `${parsedImportRows.length} registro(s) sumados y guardados en llamadas_sucursal${loteLabel}.`
       );
       setShowImportModal(false);
       setParsedImportRows([]);
       setImportWarnings([]);
       setImportFileName('');
-      setTimeout(() => setImportToast(null), 4000);
+      setTimeout(() => setImportToast(null), 5000);
     } finally {
       setImporting(false);
     }
@@ -513,19 +613,29 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-            {canAudit && (
+            {canImport && (
               <button
                 type="button"
+                disabled={isCajera && dailyBatchSummary.limitReached}
                 onClick={() => {
                   setParsedImportRows([]);
                   setImportWarnings([]);
+                  setImportError(null);
                   setImportFileName('');
                   setShowImportModal(true);
                 }}
-                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#C4B5FD] transition-colors whitespace-nowrap"
+                className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold border transition-colors whitespace-nowrap ${
+                  isCajera && dailyBatchSummary.limitReached
+                    ? 'bg-[#F5F0FC] text-[#9D8FB5] border-[#E6DDF5] cursor-not-allowed'
+                    : 'bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border-[#C4B5FD]'
+                }`}
               >
                 <FileSpreadsheet className="h-4 w-4 text-[#DB2777]" />
-                Importar cartera (.csv / .xlsx)
+                {isCajera
+                  ? dailyBatchSummary.limitReached
+                    ? 'Límite diario alcanzado (3 de 3)'
+                    : `Subir base de llamadas (${dailyBatchSummary.nextLoteNum} de 3)`
+                  : 'Importar cartera (.csv / .xlsx)'}
               </button>
             )}
 
@@ -540,12 +650,79 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
               </button>
             ) : (
               <span className="px-3 py-1.5 rounded-xl text-xs font-medium bg-[#FAF7FE] text-[#6D28D9] border border-[#EAE3F5]">
-                {isCreador ? 'Modo Control y Auditoría' : 'Modo Auditoría'}
+                {isCreador ? 'Modo Control y Auditoría' : 'Modo Supervisión Operativa'}
               </span>
             )}
           </div>
         </div>
       </section>
+
+      {/* Cumulative Daily Batch Counter Banner (Cajera) */}
+      {isCajera && (
+        <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 md:p-5 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="font-display text-sm font-bold text-[#1F172B]">
+                Bases cargadas hoy: {dailyBatchSummary.count} de {dailyBatchSummary.maxBases}
+              </h3>
+              <p className="text-xs text-[#7A6B93]">
+                Cada carga del día se suma automáticamente en Supabase sin borrar ni sobrescribir las bases anteriores ni tu avance.
+              </p>
+            </div>
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#FAF7FE] border border-[#EAE3F5] text-xs font-semibold text-[#5B21B6] shrink-0">
+              <span>Total acumulado hoy:</span>
+              <span className="font-mono-num font-bold text-[#1F172B]">
+                {dailyBatchSummary.totalHoyClientes} cliente(s) · {dailyBatchSummary.totalHoyRegistradas} marcadas
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            {dailyBatchSummary.slots.map((slot) => (
+              <div
+                key={slot.slot}
+                className={`rounded-xl border px-3.5 py-2.5 flex items-center justify-between gap-2 ${
+                  slot.loaded
+                    ? 'bg-[#FAF5FF] border-[#DDD6FE]'
+                    : 'bg-[#FCFAFE] border-[#EFE9F8]'
+                }`}
+              >
+                <div>
+                  <p className="text-xs font-bold text-[#1F172B]">
+                    Base {slot.slot} de 3
+                  </p>
+                  <p className="text-[11px] text-[#7A6B93]">
+                    {slot.loaded
+                      ? `${slot.totalRegistros} clientes · ${slot.llamadasRealizadas} llamadas`
+                      : 'Disponible para subir hoy'}
+                  </p>
+                </div>
+                <span
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${
+                    slot.loaded
+                      ? 'bg-[#7C3AED] text-white'
+                      : 'bg-[#F3ECFC] text-[#8B7CA5]'
+                  }`}
+                >
+                  {slot.loaded ? 'Cargada' : 'Libre'}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {dailyBatchSummary.limitReached && (
+            <div
+              role="status"
+              className="rounded-xl px-4 py-2.5 bg-[#FFFBEB] border border-[#FDE68A] text-xs font-semibold text-[#92400E] flex items-center gap-2"
+            >
+              <AlertCircle className="h-4 w-4 shrink-0 text-[#D97706]" />
+              <span>
+                Límite diario alcanzado: ya cargaste 3 de 3 bases permitidas para hoy ({todayStr}). No se puede subir una cuarta base hoy; las cargas anteriores siguen acumuladas y listas para marcar.
+              </span>
+            </div>
+          )}
+        </section>
+      )}
 
       {importToast && (
         <div className="rounded-xl px-4 py-3 bg-[#F0FDF4] border border-[#BBF7D0] text-xs font-semibold text-[#15803D] flex items-center justify-between">
@@ -560,39 +737,74 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
         </div>
       )}
 
-      {/* 4 Metric Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
-          <p className="text-xs text-[#7A6B93]">Llamadas registradas</p>
-          <p className="font-display text-2xl font-bold text-[#1F172B] mt-1 tabular-nums">
-            {metrics.registradas}
-          </p>
+      {/* 4 Metric Cards (Audit cards hidden from Cajeras and Supervisors) */}
+      {canAuditCalls ? (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
+            <p className="text-xs text-[#7A6B93]">Llamadas registradas</p>
+            <p className="font-display text-2xl font-bold text-[#1F172B] mt-1 tabular-nums">
+              {metrics.registradas}
+            </p>
+          </div>
+          <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
+            <p className="text-xs text-[#15803D] font-medium">Verificadas</p>
+            <p className="font-display text-2xl font-bold text-[#15803D] mt-1 tabular-nums">
+              {metrics.verificadas}
+            </p>
+          </div>
+          <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
+            <p className="text-xs text-[#BE123C] font-medium">Falsas</p>
+            <p className="font-display text-2xl font-bold text-[#BE123C] mt-1 tabular-nums">
+              {metrics.falsas}
+            </p>
+          </div>
+          <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
+            <p className="text-xs text-[#B45309] font-medium">Sin auditar</p>
+            <p className="font-display text-2xl font-bold text-[#B45309] mt-1 tabular-nums">
+              {metrics.sinAuditar}
+            </p>
+          </div>
         </div>
-        <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
-          <p className="text-xs text-[#15803D] font-medium">Verificadas</p>
-          <p className="font-display text-2xl font-bold text-[#15803D] mt-1 tabular-nums">
-            {metrics.verificadas}
-          </p>
+      ) : (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
+            <p className="text-xs text-[#7A6B93]">
+              {isCajera ? 'Bases cargadas hoy' : 'Clientes cargados hoy'}
+            </p>
+            <p className="font-display text-2xl font-bold text-[#5B21B6] mt-1 tabular-nums">
+              {isCajera
+                ? `${dailyBatchSummary.count} / ${dailyBatchSummary.maxBases}`
+                : todayAllBranchesStats.totalHoyClientes}
+            </p>
+          </div>
+          <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
+            <p className="text-xs text-[#7A6B93]">Acumulado de hoy</p>
+            <p className="font-display text-2xl font-bold text-[#1F172B] mt-1 tabular-nums">
+              {isCajera
+                ? dailyBatchSummary.totalHoyClientes
+                : todayAllBranchesStats.totalHoyRegistradas}
+            </p>
+          </div>
+          <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
+            <p className="text-xs text-[#15803D] font-medium">Llamadas realizadas</p>
+            <p className="font-display text-2xl font-bold text-[#15803D] mt-1 tabular-nums">
+              {metrics.registradas}
+            </p>
+          </div>
+          <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
+            <p className="text-xs text-[#B45309] font-medium">Pendientes por marcar</p>
+            <p className="font-display text-2xl font-bold text-[#B45309] mt-1 tabular-nums">
+              {metrics.pendientes}
+            </p>
+          </div>
         </div>
-        <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
-          <p className="text-xs text-[#BE123C] font-medium">Falsas</p>
-          <p className="font-display text-2xl font-bold text-[#BE123C] mt-1 tabular-nums">
-            {metrics.falsas}
-          </p>
-        </div>
-        <div className="bg-white rounded-2xl border border-[#EAE3F5] p-4">
-          <p className="text-xs text-[#B45309] font-medium">Sin auditar</p>
-          <p className="font-display text-2xl font-bold text-[#B45309] mt-1 tabular-nums">
-            {metrics.sinAuditar}
-          </p>
-        </div>
-      </div>
+      )}
 
       {/* Search & Multi-Filters */}
       <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 md:p-5 space-y-3">
         <div
           className={`grid grid-cols-1 md:grid-cols-2 gap-3 ${
-            canAudit && onSelectSucursal ? 'xl:grid-cols-6' : 'xl:grid-cols-5'
+            canFilterBranch && onSelectSucursal ? 'xl:grid-cols-6' : 'xl:grid-cols-5'
           }`}
         >
           <div className="xl:col-span-2 relative">
@@ -606,7 +818,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
             />
           </div>
 
-          {canAudit && onSelectSucursal && (
+          {canFilterBranch && onSelectSucursal && (
             <select
               aria-label="Filtrar llamadas por sucursal"
               value={selectedSucursalId}
@@ -624,18 +836,31 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
             </select>
           )}
 
-          <select
-            aria-label="Filtrar por estatus de llamada"
-            value={filterAuditoria}
-            onChange={(e) => setFilterAuditoria(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#8B5CF6]"
-          >
-            <option value="todos">Estatus: Todos</option>
-            <option value="Verificada">Verificada</option>
-            <option value="Falsa">Falsa</option>
-            <option value="Sin auditar">Sin auditar</option>
-            <option value="pendiente_marcar">Pendiente de marcar</option>
-          </select>
+          {canAuditCalls ? (
+            <select
+              aria-label="Filtrar por estatus de llamada"
+              value={filterAuditoria}
+              onChange={(e) => setFilterAuditoria(e.target.value)}
+              className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#8B5CF6]"
+            >
+              <option value="todos">Estatus: Todos</option>
+              <option value="Verificada">Verificada</option>
+              <option value="Falsa">Falsa</option>
+              <option value="Sin auditar">Sin auditar</option>
+              <option value="pendiente_marcar">Pendiente de marcar</option>
+            </select>
+          ) : (
+            <select
+              aria-label="Filtrar por estado de marcación"
+              value={filterAuditoria}
+              onChange={(e) => setFilterAuditoria(e.target.value)}
+              className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#8B5CF6]"
+            >
+              <option value="todos">Marcación: Todas</option>
+              <option value="marcadas">Marcadas / Realizadas</option>
+              <option value="pendiente_marcar">Pendientes por marcar</option>
+            </select>
+          )}
 
           <select
             aria-label="Filtrar por vencimiento"
@@ -722,6 +947,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
               const obsModified =
                 draftObs[item.id] !== undefined &&
                 draftObs[item.id] !== item.observaciones_admin;
+              const batchInfo = extractLlamadaBatchInfo(item);
 
               return (
                 <div
@@ -729,9 +955,20 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                   className="p-4 md:p-5 hover:bg-[#FCFAFE] transition-colors grid grid-cols-1 xl:grid-cols-12 gap-4 items-start"
                 >
                   {/* Client Info */}
-                  <div className="xl:col-span-3 space-y-1">
-                    <div className="font-semibold text-sm text-[#1F172B]">
-                      {item.cliente_nombre}
+                  <div
+                    className={`${
+                      canAuditCalls ? 'xl:col-span-3' : 'xl:col-span-4'
+                    } space-y-1`}
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-sm text-[#1F172B]">
+                        {item.cliente_nombre}
+                      </span>
+                      {batchInfo?.loteNum && (
+                        <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-[#F3ECFC] text-[#5B21B6]">
+                          Base {batchInfo.loteNum}
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-[#6E5F87] font-mono-num">
                       {item.contrato} · {item.telefono}
@@ -762,8 +999,12 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Quick Call & WhatsApp Actions (Cajera) or Contact Info (Audit) */}
-                  <div className="xl:col-span-2 flex flex-wrap items-center gap-2">
+                  {/* Quick Call & WhatsApp Actions (Cajera) or Contact Info (Audit/Supervision) */}
+                  <div
+                    className={`${
+                      canAuditCalls ? 'xl:col-span-2' : 'xl:col-span-3'
+                    } flex flex-wrap items-center gap-2`}
+                  >
                     {isCajera ? (
                       <>
                         <a
@@ -814,10 +1055,27 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                   </div>
 
                   {/* Cashier Report Dropdown (Editable only by Cajera) */}
-                  <div className="xl:col-span-2">
-                    <label className="block text-[11px] font-medium text-[#7A6B93] mb-1">
-                      Reporte de cajera
-                    </label>
+                  <div
+                    className={
+                      canAuditCalls ? 'xl:col-span-2' : 'xl:col-span-3 space-y-1.5'
+                    }
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="block text-[11px] font-medium text-[#7A6B93]">
+                        Reporte de cajera
+                      </label>
+                      {!canAuditCalls && (
+                        <span
+                          className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${
+                            item.llamada_registrada
+                              ? 'bg-[#ECFDF5] text-[#15803D]'
+                              : 'bg-[#FEF9C3] text-[#A16207]'
+                          }`}
+                        >
+                          {item.llamada_registrada ? 'Marcada' : 'Pendiente'}
+                        </span>
+                      )}
+                    </div>
                     {isCajera ? (
                       <select
                         value={item.reporte_cajera}
@@ -847,13 +1105,13 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                     )}
                   </div>
 
-                  {/* Admin Audit & Observations */}
-                  <div className="xl:col-span-3 space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-medium text-[#7A6B93]">
-                        Auditoría administración
-                      </span>
-                      {canAudit ? (
+                  {/* Admin Audit & Observations (Strictly Creador / Administrador only) */}
+                  {canAuditCalls && (
+                    <div className="xl:col-span-3 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-medium text-[#7A6B93]">
+                          Auditoría administración
+                        </span>
                         <div className="flex items-center gap-1 bg-[#F5F0FC] p-0.5 rounded-lg">
                           {(
                             [
@@ -902,22 +1160,8 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                             );
                           })}
                         </div>
-                      ) : (
-                        <span
-                          className={`text-[11px] font-semibold ${
-                            item.estatus_auditoria === 'Verificada'
-                              ? 'text-[#15803D]'
-                              : item.estatus_auditoria === 'Falsa'
-                                ? 'text-[#BE123C]'
-                                : 'text-[#B45309]'
-                          }`}
-                        >
-                          {item.estatus_auditoria}
-                        </span>
-                      )}
-                    </div>
+                      </div>
 
-                    {canAudit ? (
                       <div className="flex items-center gap-1.5">
                         <input
                           type="text"
@@ -951,24 +1195,18 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                           <Save className="h-3.5 w-3.5" />
                           {savedToastId === item.id ? 'Listo' : 'Guardar'}
                         </button>
-                        {isCreador && (
-                          <button
-                            type="button"
-                            onClick={() => setDeleteTarget(item)}
-                            title="Eliminar registro de llamada"
-                            aria-label="Eliminar llamada"
-                            className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2] border border-transparent hover:border-[#FECDD3] transition-colors shrink-0"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => setDeleteTarget(item)}
+                          title="Eliminar registro de llamada"
+                          aria-label="Eliminar llamada"
+                          className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2] border border-transparent hover:border-[#FECDD3] transition-colors shrink-0"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
                       </div>
-                    ) : (
-                      <p className="text-xs text-[#6E5F87] bg-[#FAF8FC] rounded-lg px-3 py-1.5 border border-[#F1ECF9]">
-                        {item.observaciones_admin || 'Sin observaciones de supervisión'}
-                      </p>
-                    )}
-                  </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -1126,23 +1364,25 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                 </select>
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-[#55476E] mb-1">
-                  Observaciones
-                </label>
-                <input
-                  type="text"
-                  value={newForm.observaciones_admin}
-                  onChange={(e) =>
-                    setNewForm({
-                      ...newForm,
-                      observaciones_admin: e.target.value,
-                    })
-                  }
-                  placeholder="Acuerdo o nota para auditoría..."
-                  className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm"
-                />
-              </div>
+              {!isCajera && (
+                <div>
+                  <label className="block text-xs font-medium text-[#55476E] mb-1">
+                    Observaciones
+                  </label>
+                  <input
+                    type="text"
+                    value={newForm.observaciones_admin}
+                    onChange={(e) =>
+                      setNewForm({
+                        ...newForm,
+                        observaciones_admin: e.target.value,
+                      })
+                    }
+                    placeholder="Acuerdo o nota para auditoría..."
+                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm"
+                  />
+                </div>
+              )}
 
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
@@ -1164,7 +1404,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
         </div>
       )}
       {/* Import Cartera Modal (.csv / .xlsx) */}
-      {canAudit && showImportModal && (
+      {canImport && showImportModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/45 backdrop-blur-[2px]">
           <div className="w-full max-w-3xl max-h-[90vh] flex flex-col rounded-2xl bg-white border border-[#E6DDF5] shadow-xl overflow-hidden">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[#F1ECF9]">
@@ -1172,10 +1412,14 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                 <FileSpreadsheet className="h-5 w-5 text-[#7C3AED]" />
                 <div>
                   <h3 className="font-display text-base font-bold text-[#1F172B]">
-                    Importar base de llamadas (.csv o Excel .xlsx)
+                    {isCajera
+                      ? `Subir base de llamadas (${dailyBatchSummary.nextLoteNum} de 3 hoy)`
+                      : 'Importar base de llamadas (.csv o Excel .xlsx)'}
                   </h3>
                   <p className="text-xs text-[#7A6B93]">
-                    Los registros se asignarán automáticamente a su sucursal en Supabase.
+                    {isCajera
+                      ? `Se sumará a tus ${dailyBatchSummary.totalHoyClientes} registros acumulados hoy en ${activeBranchObj?.nombre || 'tu sucursal'} sin borrar cargas previas.`
+                      : 'Los registros se asignarán automáticamente a su sucursal en Supabase.'}
                   </p>
                 </div>
               </div>
@@ -1189,6 +1433,24 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
             </div>
 
             <div className="flex-1 overflow-y-auto p-6 space-y-5">
+              {importError && (
+                <div
+                  role="alert"
+                  className="rounded-xl px-4 py-3 bg-[#FFF1F2] border border-[#FECDD3] text-xs font-semibold text-[#BE123C]"
+                >
+                  {importError}
+                </div>
+              )}
+
+              {isCajera && dailyBatchSummary.limitReached && (
+                <div
+                  role="alert"
+                  className="rounded-xl px-4 py-3 bg-[#FFFBEB] border border-[#FDE68A] text-xs font-semibold text-[#92400E]"
+                >
+                  Ya alcanzaste el máximo de 3 bases de datos cargadas hoy ({todayStr}). Podrás subir una nueva base mañana.
+                </div>
+              )}
+
               {/* Visual Required Headers Guide */}
               <div className="rounded-xl border border-[#DDD6FE] bg-[#FAF7FE] p-4 space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -1197,7 +1459,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                       Guía de encabezados exactos requeridos
                     </h4>
                     <p className="text-[11px] text-[#6E5F87]">
-                      La primera fila de tu archivo debe incluir estas 6 columnas exactas (opcional: <code className="font-mono">estatus_vencimiento</code>).
+                      {isCajera
+                        ? `Incluye las columnas requeridas. Para tu sucursal (${activeBranchObj?.nombre || 'asignada'}), "sucursal" puede ir con tu sucursal o vacío.`
+                        : 'La primera fila de tu archivo debe incluir estas 6 columnas exactas (opcional: estatus_vencimiento).'}
                     </p>
                   </div>
                   <button
@@ -1212,7 +1476,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {[
-                    { col: 'sucursal', ex: 'Sucursal Centro o SUC-01' },
+                    { col: 'sucursal', ex: isCajera ? activeBranchObj?.nombre || 'Tu sucursal' : 'Sucursal Centro o SUC-01' },
                     { col: 'cliente', ex: 'María Fernanda López' },
                     { col: 'contrato', ex: 'CTR-2026-8801' },
                     { col: 'telefono', ex: '5512345678 (10 dígitos)' },
@@ -1235,7 +1499,13 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
               </div>
 
               {/* File Picker */}
-              <label className="flex flex-col items-center justify-center gap-2 px-6 py-6 rounded-xl border-2 border-dashed border-[#C4B5FD] bg-[#FCFAFE] hover:bg-[#F3ECFC]/60 cursor-pointer transition-colors text-center">
+              <label
+                className={`flex flex-col items-center justify-center gap-2 px-6 py-6 rounded-xl border-2 border-dashed transition-colors text-center ${
+                  isCajera && dailyBatchSummary.limitReached
+                    ? 'border-[#E6DDF5] bg-[#FAF8FC] opacity-60 cursor-not-allowed'
+                    : 'border-[#C4B5FD] bg-[#FCFAFE] hover:bg-[#F3ECFC]/60 cursor-pointer'
+                }`}
+              >
                 <Upload className="h-6 w-6 text-[#7C3AED]" />
                 <div className="text-xs font-semibold text-[#1F172B]">
                   {importFileName
@@ -1248,6 +1518,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                 <input
                   type="file"
                   accept=".csv,.xlsx,.xls"
+                  disabled={isCajera && dailyBatchSummary.limitReached}
                   className="hidden"
                   onChange={handleImportFileChange}
                 />

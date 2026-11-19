@@ -250,12 +250,18 @@ export default function App() {
     if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
-  const handleImportLlamadas = async (nuevas: LlamadaSucursal[]) => {
-    if (nuevas.length === 0) return;
+  const handleImportLlamadas = async (
+    nuevas: LlamadaSucursal[]
+  ): Promise<ServiceResult> => {
+    if (nuevas.length === 0) return { ok: true };
     const next = [...nuevas, ...llamadas];
-    setLlamadas(next);
     const res = await saveLlamadasBatch(nuevas, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    if (!res.ok) {
+      if (res.error) setSyncError(`Supabase (${res.error})`);
+      return res;
+    }
+    setLlamadas(next);
+    return { ok: true };
   };
 
   const handleDeleteLlamada = async (id: string) => {
@@ -767,7 +773,9 @@ export default function App() {
                     </span>
                   </div>
                   <h1 className="font-display text-lg sm:text-xl font-bold text-[#1F172B] truncate">
-                    {activeHeader.title}
+                    {safeSection === 'llamadas' && currentUser.rol !== 'creador'
+                      ? 'Módulo de Llamadas'
+                      : activeHeader.title}
                   </h1>
                 </div>
               </div>
@@ -871,6 +879,16 @@ export default function App() {
                       selectedSucursalId={effectiveSucursalId}
                       onSelectSucursal={setSelectedSucursalId}
                       onNavigateSection={setActiveSection}
+                      userRole={currentUser.rol}
+                      sucursales={sucursales}
+                      llamadas={llamadas}
+                      actividades={actividades}
+                      gastosYRefrendos={gastosYRefrendos}
+                      horarios={horarios}
+                      diaActivo={diaActivo}
+                      metas={metas}
+                      tareasCatalogo={catalogos.tareas_obligatorias}
+                      usuarios={usuarios}
                     />
                   )}
 
@@ -880,6 +898,7 @@ export default function App() {
                     sucursales={sucursales}
                     selectedSucursalId={effectiveSucursalId}
                     userRole={currentUser.rol}
+                    currentUserName={currentUser.nombre}
                     opcionesReporte={catalogos.opciones_llamada}
                     onUpdateLlamada={handleUpdateLlamada}
                     onCreateLlamada={handleCreateLlamada}
