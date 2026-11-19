@@ -11,9 +11,14 @@ import {
   Power,
   KeyRound,
   Database,
+  Pencil,
+  Clock,
+  X,
 } from 'lucide-react';
 import {
+  ActividadDiaria,
   CatalogosControlOps,
+  DiaSemana,
   MetaSucursal,
   RolUsuario,
   Sucursal,
@@ -21,12 +26,14 @@ import {
   UsuarioControlOps,
 } from '../types/controlops';
 import { formatMXN } from '../utils/calculations';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface AdminCatalogosViewProps {
   sucursales: Sucursal[];
   metas: MetaSucursal[];
   catalogos: CatalogosControlOps;
   usuarios: UsuarioControlOps[];
+  actividades: ActividadDiaria[];
   currentUserId: string;
   supabaseConnected: boolean;
   onOpenSupabaseModal: () => void;
@@ -36,7 +43,30 @@ interface AdminCatalogosViewProps {
   onSaveCatalogos: (catalogos: CatalogosControlOps) => Promise<void>;
   onSaveUsuario: (usr: UsuarioControlOps) => Promise<void>;
   onDeleteUsuario: (id: string) => Promise<void>;
+  onCreateActividadesBatch: (nuevas: ActividadDiaria[]) => Promise<void>;
+  onUpdateActividad: (updated: ActividadDiaria) => Promise<void>;
+  onDeleteActividad: (actividad: ActividadDiaria) => Promise<void>;
 }
+
+const ALL_DIAS: DiaSemana[] = [
+  'lunes',
+  'martes',
+  'miercoles',
+  'jueves',
+  'viernes',
+  'sabado',
+  'domingo',
+];
+
+const DIA_SHORT: Record<DiaSemana, string> = {
+  lunes: 'Lun',
+  martes: 'Mar',
+  miercoles: 'Mié',
+  jueves: 'Jue',
+  viernes: 'Vie',
+  sabado: 'Sáb',
+  domingo: 'Dom',
+};
 
 type AdminTab = 'sucursales' | 'metas' | 'catalogos' | 'usuarios';
 
@@ -45,6 +75,7 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   metas,
   catalogos,
   usuarios,
+  actividades,
   currentUserId,
   supabaseConnected,
   onOpenSupabaseModal,
@@ -54,6 +85,9 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   onSaveCatalogos,
   onSaveUsuario,
   onDeleteUsuario,
+  onCreateActividadesBatch,
+  onUpdateActividad,
+  onDeleteActividad,
 }) => {
   const [tab, setTab] = useState<AdminTab>('sucursales');
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -84,6 +118,22 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   const [newTaskCat, setNewTaskCat] =
     useState<TareaCatalogo['categoria']>('Caja');
   const [newCallOption, setNewCallOption] = useState('');
+
+  // --- Actividades Asignadas State ---
+  const [actBranchFilter, setActBranchFilter] = useState<string>('todas');
+  const [editingAct, setEditingAct] = useState<ActividadDiaria | null>(null);
+  const [actForm, setActForm] = useState({
+    sucursal_id: 'todas',
+    titulo: '',
+    descripcion: '',
+    categoria: 'Caja' as ActividadDiaria['categoria'],
+    dias_semana: ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'] as DiaSemana[],
+    hora_limite: '09:30',
+    sin_horario_limite: false,
+  });
+  const [deleteActTarget, setDeleteActTarget] =
+    useState<ActividadDiaria | null>(null);
+  const [deletingAct, setDeletingAct] = useState(false);
 
   // --- Usuarios State ---
   const [newUser, setNewUser] = useState({
@@ -232,6 +282,85 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
     };
     await onSaveCatalogos(nextCatalogos);
     notify(`Opción "${opt}" eliminada.`);
+  };
+
+  const toggleActDia = (dia: DiaSemana) => {
+    setActForm((prev) => {
+      const exists = prev.dias_semana.includes(dia);
+      return {
+        ...prev,
+        dias_semana: exists
+          ? prev.dias_semana.filter((d) => d !== dia)
+          : [...prev.dias_semana, dia],
+      };
+    });
+  };
+
+  const handleSaveAssignedActivity = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!actForm.titulo.trim()) return;
+    const dias =
+      actForm.dias_semana.length > 0 ? actForm.dias_semana : [...ALL_DIAS];
+
+    if (editingAct) {
+      const targetSuc =
+        sucursales.find((s) => s.id === actForm.sucursal_id) || sucursales[0];
+      await onUpdateActividad({
+        ...editingAct,
+        sucursal_id: targetSuc.id,
+        sucursal_nombre: targetSuc.nombre,
+        responsable: targetSuc.responsable_caja,
+        titulo: actForm.titulo.trim(),
+        descripcion: actForm.descripcion.trim(),
+        categoria: actForm.categoria,
+        dias_semana: dias,
+        hora_limite: actForm.sin_horario_limite
+          ? null
+          : actForm.hora_limite || '09:30',
+        sin_horario_limite: actForm.sin_horario_limite,
+      });
+      notify(`Actividad "${actForm.titulo.trim()}" actualizada.`);
+      setEditingAct(null);
+    } else {
+      const targets =
+        actForm.sucursal_id === 'todas'
+          ? sucursales.filter((s) => s.activa)
+          : sucursales.filter((s) => s.id === actForm.sucursal_id);
+      const today = new Date().toISOString().slice(0, 10);
+      const batch: ActividadDiaria[] = targets.map((suc, idx) => ({
+        id: `act-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+        sucursal_id: suc.id,
+        sucursal_nombre: suc.nombre,
+        titulo: actForm.titulo.trim(),
+        descripcion: actForm.descripcion.trim(),
+        categoria: actForm.categoria,
+        responsable: suc.responsable_caja,
+        fecha: today,
+        hora_completada: null,
+        estatus: 'Pendiente',
+        evidencia_url: null,
+        observaciones: '',
+        dias_semana: dias,
+        hora_limite: actForm.sin_horario_limite
+          ? null
+          : actForm.hora_limite || '09:30',
+        sin_horario_limite: actForm.sin_horario_limite,
+      }));
+      await onCreateActividadesBatch(batch);
+      notify(
+        `Actividad asignada a ${batch.length} sucursal(es) en actividades_diarias.`
+      );
+    }
+
+    setActForm({
+      sucursal_id: 'todas',
+      titulo: '',
+      descripcion: '',
+      categoria: 'Caja',
+      dias_semana: ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'],
+      hora_limite: '09:30',
+      sin_horario_limite: false,
+    });
   };
 
   const handleAddUser = async (e: React.FormEvent) => {
@@ -668,7 +797,268 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
 
       {/* TAB 3: CATÁLOGO DE ACTIVIDADES Y OPCIONES DE LLAMADA */}
       {tab === 'catalogos' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="space-y-6">
+          {/* Assigned Activities Management (actividades_diarias) */}
+          <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h2 className="font-display text-sm font-bold text-[#1F172B]">
+                  Asignar, editar o eliminar actividades en sucursales (actividades_diarias)
+                </h2>
+                <p className="text-xs text-[#7A6B93]">
+                  Las actividades creadas aquí aparecen automáticamente en la lista diaria de las cajeras asignadas.
+                </p>
+              </div>
+              {editingAct && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingAct(null);
+                    setActForm({
+                      sucursal_id: 'todas',
+                      titulo: '',
+                      descripcion: '',
+                      categoria: 'Caja',
+                      dias_semana: ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'],
+                      hora_limite: '09:30',
+                      sin_horario_limite: false,
+                    });
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#FAF8FC] text-[#6E5F87] border border-[#EAE3F5]"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Cancelar edición
+                </button>
+              )}
+            </div>
+
+            <form
+              onSubmit={handleSaveAssignedActivity}
+              className="rounded-xl border border-[#EAE3F5] bg-[#FAF8FC] p-4 space-y-3"
+            >
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <input
+                  type="text"
+                  required
+                  value={actForm.titulo}
+                  onChange={(e) =>
+                    setActForm({ ...actForm, titulo: e.target.value })
+                  }
+                  placeholder="Título de actividad *"
+                  className="md:col-span-2 px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs"
+                />
+                <select
+                  value={actForm.sucursal_id}
+                  onChange={(e) =>
+                    setActForm({ ...actForm, sucursal_id: e.target.value })
+                  }
+                  className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs"
+                >
+                  {!editingAct && (
+                    <option value="todas">
+                      Todas las sucursales activas ({sucursales.filter((s) => s.activa).length})
+                    </option>
+                  )}
+                  {sucursales
+                    .filter((s) => s.activa)
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.nombre}
+                      </option>
+                    ))}
+                </select>
+                <select
+                  value={actForm.categoria}
+                  onChange={(e) =>
+                    setActForm({
+                      ...actForm,
+                      categoria: e.target.value as ActividadDiaria['categoria'],
+                    })
+                  }
+                  className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs"
+                >
+                  <option value="Caja">Caja</option>
+                  <option value="Corte">Corte</option>
+                  <option value="Expedientes">Expedientes</option>
+                  <option value="Auditoría">Auditoría</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center">
+                <input
+                  type="text"
+                  value={actForm.descripcion}
+                  onChange={(e) =>
+                    setActForm({ ...actForm, descripcion: e.target.value })
+                  }
+                  placeholder="Descripción o instrucciones para la cajera..."
+                  className="lg:col-span-5 px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs"
+                />
+
+                <div className="lg:col-span-4 flex flex-wrap gap-1">
+                  {ALL_DIAS.map((d) => {
+                    const active = actForm.dias_semana.includes(d);
+                    return (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => toggleActDia(d)}
+                        className={`px-2 py-1 rounded-lg text-[11px] font-semibold border ${
+                          active
+                            ? 'bg-[#F3ECFC] border-[#C4B5FD] text-[#5B21B6]'
+                            : 'bg-white border-[#EAE3F5] text-[#8B7CA5]'
+                        }`}
+                      >
+                        {DIA_SHORT[d]}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="lg:col-span-3 flex items-center gap-2">
+                  <input
+                    type="time"
+                    disabled={actForm.sin_horario_limite}
+                    value={actForm.hora_limite}
+                    onChange={(e) =>
+                      setActForm({ ...actForm, hora_limite: e.target.value })
+                    }
+                    className="px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-white text-xs font-mono-num disabled:opacity-50"
+                  />
+                  <label className="flex items-center gap-1.5 text-[11px] font-semibold text-[#5B21B6] whitespace-nowrap cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={actForm.sin_horario_limite}
+                      onChange={(e) =>
+                        setActForm({
+                          ...actForm,
+                          sin_horario_limite: e.target.checked,
+                        })
+                      }
+                    />
+                    Sin límite
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white"
+                >
+                  {editingAct ? (
+                    <>
+                      <Save className="h-3.5 w-3.5" />
+                      Guardar cambios en actividad
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="h-3.5 w-3.5" />
+                      Crear y asignar actividad
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-[#55476E]">
+                Actividades asignadas ({actividades.filter((a) => actBranchFilter === 'todas' || a.sucursal_id === actBranchFilter).length})
+              </span>
+              <select
+                aria-label="Filtrar actividades asignadas por sucursal"
+                value={actBranchFilter}
+                onChange={(e) => setActBranchFilter(e.target.value)}
+                className="px-3 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs"
+              >
+                <option value="todas">Todas las sucursales</option>
+                {sucursales.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.nombre}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="max-h-72 overflow-y-auto divide-y divide-[#F1ECF9] border border-[#EAE3F5] rounded-xl">
+              {actividades
+                .filter(
+                  (a) =>
+                    actBranchFilter === 'todas' ||
+                    a.sucursal_id === actBranchFilter
+                )
+                .map((act) => (
+                  <div
+                    key={act.id}
+                    className="px-4 py-3 flex items-center justify-between gap-3 bg-white hover:bg-[#FCFAFE]"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-[#1F172B] truncate">
+                        {act.titulo}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#7A6B93] mt-0.5">
+                        <span>{act.sucursal_nombre}</span>
+                        <span>·</span>
+                        <span>{act.categoria}</span>
+                        <span>·</span>
+                        <span className="inline-flex items-center gap-1">
+                          <Clock className="h-3 w-3" />
+                          {act.sin_horario_limite
+                            ? 'Sin horario límite'
+                            : act.hora_limite
+                              ? `Límite ${act.hora_limite}`
+                              : 'Horario sucursal'}
+                        </span>
+                        {act.dias_semana && act.dias_semana.length > 0 && (
+                          <span>
+                            ({act.dias_semana.map((d) => DIA_SHORT[d]).join(', ')})
+                          </span>
+                        )}
+                      </div>
+                      {act.descripcion && (
+                        <p className="text-[11px] text-[#55476E] truncate mt-0.5">
+                          {act.descripcion}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingAct(act);
+                          setActForm({
+                            sucursal_id: act.sucursal_id,
+                            titulo: act.titulo,
+                            descripcion: act.descripcion || '',
+                            categoria: act.categoria,
+                            dias_semana:
+                              act.dias_semana && act.dias_semana.length > 0
+                                ? act.dias_semana
+                                : [...ALL_DIAS],
+                            hora_limite: act.hora_limite || '09:30',
+                            sin_horario_limite: Boolean(act.sin_horario_limite),
+                          });
+                        }}
+                        title="Editar actividad"
+                        className="p-1.5 rounded-lg text-[#5B21B6] hover:bg-[#F3ECFC]"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteActTarget(act)}
+                        title="Eliminar actividad"
+                        className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </section>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Mandatory Tasks */}
           <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 space-y-4">
             <div>
@@ -803,6 +1193,7 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
               ))}
             </div>
           </section>
+          </div>
         </div>
       )}
 
@@ -1060,6 +1451,28 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
           </section>
         </div>
       )}
+      <ConfirmDeleteModal
+        open={Boolean(deleteActTarget)}
+        title="¿Seguro que deseas eliminar este registro?"
+        detail={
+          deleteActTarget
+            ? `Se eliminará la actividad "${deleteActTarget.titulo}" (${deleteActTarget.sucursal_nombre}) de actividades_diarias y su evidencia adjunta si existe.`
+            : undefined
+        }
+        loading={deletingAct}
+        onCancel={() => setDeleteActTarget(null)}
+        onConfirm={async () => {
+          if (!deleteActTarget) return;
+          setDeletingAct(true);
+          try {
+            await onDeleteActividad(deleteActTarget);
+            notify(`Actividad "${deleteActTarget.titulo}" eliminada.`);
+            setDeleteActTarget(null);
+          } finally {
+            setDeletingAct(false);
+          }
+        }}
+      />
     </div>
   );
 };

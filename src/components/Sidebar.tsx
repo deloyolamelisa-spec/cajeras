@@ -299,47 +299,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        {/* Quick Cashier Actions */}
-        <div className="pt-2 border-t border-[#F1ECF9]">
-          <p className="px-2.5 pb-2 text-[11px] font-medium text-[#8B7CA5]">
-            Opciones rápidas de caja
-          </p>
-          <div className="space-y-1.5">
-            <button
-              type="button"
-              onClick={() => {
-                onQuickAction('llamada');
-                onCloseMobile();
-              }}
-              className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#EAE3F5] transition-colors"
-            >
-              <Plus className="h-3.5 w-3.5 text-[#DB2777]" />
-              Registrar llamada
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onQuickAction('evidencia');
-                onCloseMobile();
-              }}
-              className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#EAE3F5] transition-colors"
-            >
-              <Plus className="h-3.5 w-3.5 text-[#DB2777]" />
-              Subir evidencia diaria
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onQuickAction('gasto');
-                onCloseMobile();
-              }}
-              className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#EAE3F5] transition-colors"
-            >
-              <Plus className="h-3.5 w-3.5 text-[#DB2777]" />
-              Registrar gasto o refrendo
-            </button>
+        {/* Quick Cashier Actions (Strictly for Cajera role) */}
+        {currentUser.rol === 'cajera' && (
+          <div className="pt-2 border-t border-[#F1ECF9]">
+            <p className="px-2.5 pb-2 text-[11px] font-medium text-[#8B7CA5]">
+              Opciones rápidas de caja
+            </p>
+            <div className="space-y-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  onQuickAction('llamada');
+                  onCloseMobile();
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#EAE3F5] transition-colors"
+              >
+                <Plus className="h-3.5 w-3.5 text-[#DB2777]" />
+                Registrar llamada
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onQuickAction('evidencia');
+                  onCloseMobile();
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#EAE3F5] transition-colors"
+              >
+                <Plus className="h-3.5 w-3.5 text-[#DB2777]" />
+                Subir evidencia diaria
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onQuickAction('gasto');
+                  onCloseMobile();
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#EAE3F5] transition-colors"
+              >
+                <Plus className="h-3.5 w-3.5 text-[#DB2777]" />
+                Registrar gasto o refrendo
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Supabase Connection Footer (Creador & Supervisor) */}

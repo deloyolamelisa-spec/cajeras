@@ -6,6 +6,8 @@ import {
   TrendingUp,
   Upload,
   X,
+  Trash2,
+  Image as ImageIcon,
 } from 'lucide-react';
 import {
   BranchMetricSummary,
@@ -15,6 +17,7 @@ import {
 } from '../types/controlops';
 import { formatMXN, formatPercent } from '../utils/calculations';
 import { uploadEvidenciaFoto } from '../services/controlOpsService';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface GastosRefrendosViewProps {
   registros: GastoYRefrendo[];
@@ -23,6 +26,8 @@ interface GastosRefrendosViewProps {
   selectedSucursalId: string;
   userRole: RolUsuario;
   onCreateRegistro: (nuevo: GastoYRefrendo) => Promise<void>;
+  onDeleteRegistro: (registro: GastoYRefrendo) => Promise<void>;
+  onDeleteEvidenciaRegistro: (registro: GastoYRefrendo) => Promise<void>;
   openCreateModalExternal?: boolean;
   onCloseCreateModalExternal?: () => void;
 }
@@ -34,15 +39,28 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
   selectedSucursalId,
   userRole,
   onCreateRegistro,
+  onDeleteRegistro,
+  onDeleteEvidenciaRegistro,
   openCreateModalExternal = false,
   onCloseCreateModalExternal,
 }) => {
+  const isCajera = userRole === 'cajera';
+  const isCreador = userRole === 'creador';
   const [subTab, setSubTab] = useState<'gastos' | 'refrendos' | 'bitacora'>(
     'gastos'
   );
   const [showNewModal, setShowNewModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
+  const [previewReceipt, setPreviewReceipt] = useState<{
+    url: string;
+    title: string;
+  } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    mode: 'record' | 'photo';
+    registro: GastoYRefrendo;
+  } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const defaultSucursal =
     selectedSucursalId === 'todas'
@@ -61,7 +79,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
     notas: '',
   });
 
-  const isModalOpen = showNewModal || openCreateModalExternal;
+  const isModalOpen = isCajera && (showNewModal || openCreateModalExternal);
   const closeModal = () => {
     setShowNewModal(false);
     onCloseCreateModalExternal?.();
@@ -177,14 +195,20 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
           </button>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setShowNewModal(true)}
-          className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap"
-        >
-          <Plus className="h-4 w-4" />
-          Registrar gasto o refrendo
-        </button>
+        {isCajera ? (
+          <button
+            type="button"
+            onClick={() => setShowNewModal(true)}
+            className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap"
+          >
+            <Plus className="h-4 w-4" />
+            Registrar gasto o refrendo
+          </button>
+        ) : (
+          <span className="px-3 py-1.5 rounded-xl text-xs font-medium bg-[#FAF7FE] text-[#6D28D9] border border-[#EAE3F5] w-fit">
+            {isCreador ? 'Control y Depuración de Registros' : 'Modo Auditoría'}
+          </span>
+        )}
       </div>
 
       {subTab === 'gastos' && (
@@ -404,6 +428,119 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
               </table>
             </div>
           </section>
+
+          {/* Expense Movements & Receipts List */}
+          <section className="bg-white rounded-2xl border border-[#EAE3F5] overflow-hidden">
+            <div className="px-6 py-4 border-b border-[#F1ECF9] flex items-center justify-between">
+              <div>
+                <h3 className="font-display text-sm font-bold text-[#1F172B]">
+                  Movimientos de gasto capturados (
+                  {scopedRegistros.filter((r) => r.tipo === 'Gasto').length})
+                </h3>
+                <p className="text-xs text-[#7A6B93]">
+                  Revisión de comprobantes en evidencias_controlops y control de
+                  capturas.
+                </p>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-[#F1ECF9] bg-[#FAF8FC] text-[12px] font-semibold text-[#6E5F87]">
+                    <th className="py-3 px-4">Sucursal / Fecha</th>
+                    <th className="py-3 px-4">Concepto</th>
+                    <th className="py-3 px-4 text-right">Monto Real</th>
+                    <th className="py-3 px-4">Comprobante</th>
+                    {isCreador && (
+                      <th className="py-3 px-4 text-right">Eliminar</th>
+                    )}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#F3EEF9] text-sm">
+                  {scopedRegistros
+                    .filter((r) => r.tipo === 'Gasto')
+                    .map((r) => (
+                      <tr key={r.id} className="hover:bg-[#FCFAFE]">
+                        <td className="py-3 px-4">
+                          <div className="font-semibold text-[#1F172B]">
+                            {r.sucursal_nombre}
+                          </div>
+                          <div className="text-xs text-[#8B7CA5] font-mono-num">
+                            {r.fecha} · {r.responsable}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="font-medium text-[#1F172B]">
+                            {r.concepto}
+                          </div>
+                          <div className="text-xs text-[#8B7CA5]">
+                            {r.notas || r.categoria}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono-num font-bold text-[#1F172B]">
+                          {formatMXN(r.monto_real)}
+                        </td>
+                        <td className="py-3 px-4">
+                          {r.evidencia_url ? (
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setPreviewReceipt({
+                                    url: r.evidencia_url!,
+                                    title: `${r.sucursal_nombre} — ${r.concepto}`,
+                                  })
+                                }
+                                className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#5B21B6] hover:text-[#DB2777]"
+                              >
+                                <ImageIcon className="h-3.5 w-3.5" />
+                                Ver ticket
+                              </button>
+                              {isCreador && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setDeleteTarget({
+                                      mode: 'photo',
+                                      registro: r,
+                                    })
+                                  }
+                                  className="text-[11px] font-medium text-[#BE123C] hover:underline"
+                                >
+                                  Borrar foto
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-[#9D8FB5]">
+                              Sin archivo
+                            </span>
+                          )}
+                        </td>
+                        {isCreador && (
+                          <td className="py-3 px-4 text-right">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDeleteTarget({
+                                  mode: 'record',
+                                  registro: r,
+                                })
+                              }
+                              title="Eliminar registro de gasto"
+                              aria-label="Eliminar registro"
+                              className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
         </div>
       )}
 
@@ -499,7 +636,11 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                   <th className="py-3 px-4">Concepto</th>
                   <th className="py-3 px-4 text-right">Monto Real</th>
                   <th className="py-3 px-4 text-right">Techo / Meta</th>
+                  <th className="py-3 px-4">Evidencia</th>
                   <th className="py-3 px-4">Notas</th>
+                  {isCreador && (
+                    <th className="py-3 px-4 text-right">Eliminar</th>
+                  )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#F3EEF9] text-sm">
@@ -538,9 +679,62 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                         ? `Techo ${formatMXN(r.presupuesto_limite)}`
                         : `${r.cantidad_refrendos}/${r.meta_refrendos} ref.`}
                     </td>
+                    <td className="py-3 px-4">
+                      {r.evidencia_url ? (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPreviewReceipt({
+                                url: r.evidencia_url!,
+                                title: `${r.sucursal_nombre} — ${r.concepto}`,
+                              })
+                            }
+                            className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#5B21B6] hover:text-[#DB2777] whitespace-nowrap"
+                          >
+                            <ImageIcon className="h-3.5 w-3.5" />
+                            Ver foto
+                          </button>
+                          {isCreador && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDeleteTarget({
+                                  mode: 'photo',
+                                  registro: r,
+                                })
+                              }
+                              className="text-[11px] font-medium text-[#BE123C] hover:underline whitespace-nowrap"
+                            >
+                              Borrar foto
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-[#9D8FB5]">—</span>
+                      )}
+                    </td>
                     <td className="py-3 px-4 text-xs text-[#55476E] max-w-xs truncate">
                       {r.notas || '—'}
                     </td>
+                    {isCreador && (
+                      <td className="py-3 px-4 text-right">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDeleteTarget({
+                              mode: 'record',
+                              registro: r,
+                            })
+                          }
+                          title="Eliminar registro"
+                          aria-label="Eliminar registro"
+                          className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -741,6 +935,68 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
           </div>
         </div>
       )}
+      {/* Receipt Lightbox */}
+      {previewReceipt && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/65 backdrop-blur-[2px]"
+          onClick={() => setPreviewReceipt(null)}
+        >
+          <div
+            className="max-w-2xl w-full bg-white rounded-2xl overflow-hidden shadow-2xl border border-[#E6DDF5]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#F1ECF9]">
+              <p className="text-sm font-semibold text-[#1F172B] truncate">
+                {previewReceipt.title}
+              </p>
+              <button
+                type="button"
+                onClick={() => setPreviewReceipt(null)}
+                className="p-1.5 rounded-lg text-[#6E5F87] hover:bg-[#F5F0FC]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="p-4 bg-[#FAF8FC] flex items-center justify-center">
+              <img
+                src={previewReceipt.url}
+                alt={previewReceipt.title}
+                referrerPolicy="no-referrer"
+                className="max-h-[70vh] rounded-xl object-contain"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Delete Modal (Creador only) */}
+      <ConfirmDeleteModal
+        open={Boolean(deleteTarget)}
+        title="¿Seguro que deseas eliminar este registro?"
+        detail={
+          deleteTarget?.mode === 'photo'
+            ? `Se eliminará la fotografía de comprobante de "${deleteTarget.registro.concepto}" del bucket evidencias_controlops.`
+            : deleteTarget
+              ? `Se eliminará el ${deleteTarget.registro.tipo.toLowerCase()} "${deleteTarget.registro.concepto}" (${deleteTarget.registro.sucursal_nombre}) y su archivo adjunto si existe.`
+              : undefined
+        }
+        loading={deleting}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          if (!deleteTarget) return;
+          setDeleting(true);
+          try {
+            if (deleteTarget.mode === 'photo') {
+              await onDeleteEvidenciaRegistro(deleteTarget.registro);
+            } else {
+              await onDeleteRegistro(deleteTarget.registro);
+            }
+            setDeleteTarget(null);
+          } finally {
+            setDeleting(false);
+          }
+        }}
+      />
     </div>
   );
 };

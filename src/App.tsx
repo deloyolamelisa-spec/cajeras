@@ -23,6 +23,10 @@ import {
 } from './types/controlops';
 import {
   authenticateUsuario,
+  deleteActividadRecord,
+  deleteEvidenciaFoto,
+  deleteGastoORefrendoRecord,
+  deleteLlamadaRecord,
   deleteSucursalRecord,
   deleteUsuarioRecord,
   getSavedSessionUser,
@@ -205,6 +209,13 @@ export default function App() {
     if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
+  const handleDeleteLlamada = async (id: string) => {
+    const next = llamadas.filter((l) => l.id !== id);
+    setLlamadas(next);
+    const res = await deleteLlamadaRecord(id, next);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+  };
+
   const handleUpdateActividad = async (updated: ActividadDiaria) => {
     const next = actividades.map((a) => (a.id === updated.id ? updated : a));
     setActividades(next);
@@ -219,10 +230,85 @@ export default function App() {
     if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
+  const handleCreateActividadesBatch = async (nuevas: ActividadDiaria[]) => {
+    if (nuevas.length === 0) return;
+    let next = [...nuevas, ...actividades];
+    setActividades(next);
+    for (const act of nuevas) {
+      const res = await saveActividad(act, next);
+      if (!res.ok && res.error) {
+        setSyncError(`Supabase (${res.error})`);
+      }
+    }
+  };
+
+  const handleDeleteActividad = async (actividad: ActividadDiaria) => {
+    const next = actividades.filter((a) => a.id !== actividad.id);
+    setActividades(next);
+    const res = await deleteActividadRecord(actividad, next);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+  };
+
+  const handleDeleteEvidenciaActividad = async (actividad: ActividadDiaria) => {
+    if (actividad.evidencia_url) {
+      const storageRes = await deleteEvidenciaFoto(actividad.evidencia_url);
+      if (!storageRes.ok && storageRes.error) {
+        setSyncError(`Storage (${storageRes.error})`);
+      }
+    }
+    const updated: ActividadDiaria = {
+      ...actividad,
+      evidencia_url: null,
+    };
+    await handleUpdateActividad(updated);
+  };
+
+  const handleResetActividadPendiente = async (actividad: ActividadDiaria) => {
+    if (actividad.evidencia_url) {
+      const storageRes = await deleteEvidenciaFoto(actividad.evidencia_url);
+      if (!storageRes.ok && storageRes.error) {
+        setSyncError(`Storage (${storageRes.error})`);
+      }
+    }
+    const updated: ActividadDiaria = {
+      ...actividad,
+      estatus: 'Pendiente',
+      hora_completada: null,
+      evidencia_url: null,
+    };
+    await handleUpdateActividad(updated);
+  };
+
   const handleCreateGastoORefrendo = async (nuevo: GastoYRefrendo) => {
     const next = [nuevo, ...gastosYRefrendos];
     setGastosYRefrendos(next);
     const res = await saveGastoORefrendo(nuevo, next);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+  };
+
+  const handleDeleteGastoORefrendo = async (registro: GastoYRefrendo) => {
+    const next = gastosYRefrendos.filter((r) => r.id !== registro.id);
+    setGastosYRefrendos(next);
+    const res = await deleteGastoORefrendoRecord(registro, next);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+  };
+
+  const handleDeleteEvidenciaRegistro = async (registro: GastoYRefrendo) => {
+    if (registro.evidencia_url) {
+      const storageRes = await deleteEvidenciaFoto(registro.evidencia_url);
+      if (!storageRes.ok && storageRes.error) {
+        setSyncError(`Storage (${storageRes.error})`);
+      }
+    }
+    const updated: GastoYRefrendo = {
+      ...registro,
+      evidencia_url: null,
+    };
+    const next = gastosYRefrendos.map((r) =>
+      r.id === updated.id ? updated : r
+    );
+    setGastosYRefrendos(next);
+    const res = await saveGastoORefrendo(updated, next);
     if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
@@ -332,6 +418,7 @@ export default function App() {
   };
 
   const handleQuickAction = (action: 'llamada' | 'evidencia' | 'gasto') => {
+    if (currentUser?.rol !== 'cajera') return;
     if (action === 'llamada') {
       setActiveSection('llamadas');
       setQuickModal('llamada');
@@ -515,6 +602,7 @@ export default function App() {
                     opcionesReporte={catalogos.opciones_llamada}
                     onUpdateLlamada={handleUpdateLlamada}
                     onCreateLlamada={handleCreateLlamada}
+                    onDeleteLlamada={handleDeleteLlamada}
                     openCreateModalExternal={quickModal === 'llamada'}
                     onCloseCreateModalExternal={() => setQuickModal(null)}
                   />
@@ -532,6 +620,10 @@ export default function App() {
                     onChangeDiaActivo={setDiaActivo}
                     onUpdateActividad={handleUpdateActividad}
                     onCreateActividad={handleCreateActividad}
+                    onCreateActividadesBatch={handleCreateActividadesBatch}
+                    onDeleteActividad={handleDeleteActividad}
+                    onDeleteEvidenciaActividad={handleDeleteEvidenciaActividad}
+                    onResetActividadPendiente={handleResetActividadPendiente}
                     onGoToHorarios={() => setActiveSection('horarios')}
                     openCreateModalExternal={quickModal === 'evidencia'}
                     onCloseCreateModalExternal={() => setQuickModal(null)}
@@ -546,6 +638,8 @@ export default function App() {
                     selectedSucursalId={effectiveSucursalId}
                     userRole={currentUser.rol}
                     onCreateRegistro={handleCreateGastoORefrendo}
+                    onDeleteRegistro={handleDeleteGastoORefrendo}
+                    onDeleteEvidenciaRegistro={handleDeleteEvidenciaRegistro}
                     openCreateModalExternal={quickModal === 'gasto'}
                     onCloseCreateModalExternal={() => setQuickModal(null)}
                   />
@@ -568,6 +662,7 @@ export default function App() {
                     metas={metas}
                     catalogos={catalogos}
                     usuarios={usuarios}
+                    actividades={actividades}
                     currentUserId={currentUser.id}
                     supabaseConnected={
                       dataSource === 'supabase' && isSupabaseConfigured()
@@ -579,6 +674,9 @@ export default function App() {
                     onSaveCatalogos={handleSaveCatalogos}
                     onSaveUsuario={handleSaveUsuario}
                     onDeleteUsuario={handleDeleteUsuario}
+                    onCreateActividadesBatch={handleCreateActividadesBatch}
+                    onUpdateActividad={handleUpdateActividad}
+                    onDeleteActividad={handleDeleteActividad}
                   />
                 )}
               </>

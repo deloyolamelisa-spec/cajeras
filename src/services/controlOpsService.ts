@@ -303,6 +303,47 @@ export async function saveLlamada(
   return { ok: true };
 }
 
+export async function deleteLlamadaRecord(
+  id: string,
+  allLlamadas: LlamadaSucursal[]
+): Promise<{ ok: boolean; error?: string }> {
+  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
+  const supabase = getSupabaseClient();
+  if (!supabase) return { ok: true };
+
+  const { error } = await supabase
+    .from(SUPABASE_TABLES.LLAMADAS)
+    .delete()
+    .eq('id', id);
+
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+export async function deleteEvidenciaFoto(
+  evidenciaUrl: string | null | undefined
+): Promise<{ ok: boolean; error?: string }> {
+  if (!evidenciaUrl) return { ok: true };
+  const supabase = getSupabaseClient();
+  if (!supabase || !isSupabaseConfigured()) return { ok: true };
+
+  const marker = `/storage/v1/object/public/${SUPABASE_BUCKETS.EVIDENCIAS}/`;
+  const idx = evidenciaUrl.indexOf(marker);
+  if (idx === -1) return { ok: true };
+
+  const objectPath = decodeURIComponent(
+    evidenciaUrl.slice(idx + marker.length).split('?')[0]
+  );
+  if (!objectPath) return { ok: true };
+
+  const { error } = await supabase.storage
+    .from(SUPABASE_BUCKETS.EVIDENCIAS)
+    .remove([objectPath]);
+
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
 export async function saveActividad(
   actividad: ActividadDiaria,
   allActividades: ActividadDiaria[]
@@ -319,6 +360,26 @@ export async function saveActividad(
   return { ok: true };
 }
 
+export async function deleteActividadRecord(
+  actividad: ActividadDiaria,
+  allActividades: ActividadDiaria[]
+): Promise<{ ok: boolean; error?: string }> {
+  writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
+  if (actividad.evidencia_url) {
+    await deleteEvidenciaFoto(actividad.evidencia_url);
+  }
+  const supabase = getSupabaseClient();
+  if (!supabase) return { ok: true };
+
+  const { error } = await supabase
+    .from(SUPABASE_TABLES.ACTIVIDADES)
+    .delete()
+    .eq('id', actividad.id);
+
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
 export async function saveGastoORefrendo(
   registro: GastoYRefrendo,
   allRegistros: GastoYRefrendo[]
@@ -330,6 +391,26 @@ export async function saveGastoORefrendo(
   const { error } = await supabase
     .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
     .upsert(registro, { onConflict: 'id' });
+
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+export async function deleteGastoORefrendoRecord(
+  registro: GastoYRefrendo,
+  allRegistros: GastoYRefrendo[]
+): Promise<{ ok: boolean; error?: string }> {
+  writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, allRegistros);
+  if (registro.evidencia_url) {
+    await deleteEvidenciaFoto(registro.evidencia_url);
+  }
+  const supabase = getSupabaseClient();
+  if (!supabase) return { ok: true };
+
+  const { error } = await supabase
+    .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
+    .delete()
+    .eq('id', registro.id);
 
   if (error) return { ok: false, error: error.message };
   return { ok: true };

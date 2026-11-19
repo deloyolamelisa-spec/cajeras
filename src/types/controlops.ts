@@ -95,9 +95,13 @@ export interface ActividadDiaria {
   sucursal_id: string;
   sucursal_nombre: string;
   titulo: string;
+  descripcion?: string;
   categoria: 'Caja' | 'Auditoría' | 'Expedientes' | 'Corte';
   responsable: string;
   fecha: string;
+  dias_semana?: DiaSemana[];
+  hora_limite?: string | null;
+  sin_horario_limite?: boolean;
   hora_completada: string | null;
   estatus: EstatusActividad;
   evidencia_url: string | null;

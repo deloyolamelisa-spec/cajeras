@@ -85,9 +85,13 @@ create table if not exists public.${SUPABASE_TABLES.ACTIVIDADES} (
   sucursal_id text not null,
   sucursal_nombre text not null,
   titulo text not null,
+  descripcion text default '',
   categoria text not null default 'Caja',
   responsable text not null default '',
   fecha text not null,
+  dias_semana jsonb default '[]'::jsonb,
+  hora_limite text,
+  sin_horario_limite boolean default false,
   hora_completada text,
   estatus text not null default 'Pendiente',
   evidencia_url text,
@@ -153,7 +157,12 @@ using ( bucket_id = '${SUPABASE_BUCKETS.EVIDENCIAS}' );
 drop policy if exists "Permitir subida evidencias" on storage.objects;
 create policy "Permitir subida evidencias"
 on storage.objects for insert
-with check ( bucket_id = '${SUPABASE_BUCKETS.EVIDENCIAS}' );`;
+with check ( bucket_id = '${SUPABASE_BUCKETS.EVIDENCIAS}' );
+
+drop policy if exists "Permitir borrar evidencias" on storage.objects;
+create policy "Permitir borrar evidencias"
+on storage.objects for delete
+using ( bucket_id = '${SUPABASE_BUCKETS.EVIDENCIAS}' );`;
 
 export const SupabaseSetupModal: React.FC<SupabaseSetupModalProps> = ({
   open,

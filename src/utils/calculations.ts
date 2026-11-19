@@ -61,7 +61,15 @@ export function evaluarVencimientoActividad(
   vencidaPorHora: boolean;
   horaLimite: string | null;
 } {
-  if (!horario || horario.sin_horario_limite) {
+  if (actividad.sin_horario_limite) {
+    return {
+      etiqueta: 'Sin horario límite',
+      vencidaPorHora: false,
+      horaLimite: null,
+    };
+  }
+
+  if (!actividad.hora_limite && (!horario || horario.sin_horario_limite)) {
     return {
       etiqueta: 'Sin horario límite',
       vencidaPorHora: false,
@@ -70,9 +78,10 @@ export function evaluarVencimientoActividad(
   }
 
   const horaLimite =
-    actividad.categoria === 'Corte'
-      ? horario.hora_limite_corte
-      : horario.hora_limite_actividad;
+    actividad.hora_limite ||
+    (actividad.categoria === 'Corte'
+      ? horario?.hora_limite_corte || '18:30'
+      : horario?.hora_limite_actividad || '09:00');
 
   if (actividad.estatus === 'Completada') {
     if (actividad.hora_completada && actividad.hora_completada > horaLimite) {

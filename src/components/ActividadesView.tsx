@@ -8,6 +8,9 @@ import {
   Image as ImageIcon,
   X,
   Upload,
+  Trash2,
+  Pencil,
+  RotateCcw,
 } from 'lucide-react';
 import {
   ActividadDiaria,
@@ -21,6 +24,7 @@ import {
 import { DIAS_SEMANA } from '../data/mockData';
 import { evaluarVencimientoActividad } from '../utils/calculations';
 import { uploadEvidenciaFoto } from '../services/controlOpsService';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface ActividadesViewProps {
   actividades: ActividadDiaria[];
@@ -33,10 +37,34 @@ interface ActividadesViewProps {
   onChangeDiaActivo: (dia: DiaSemana) => void;
   onUpdateActividad: (updated: ActividadDiaria) => Promise<void>;
   onCreateActividad: (nueva: ActividadDiaria) => Promise<void>;
+  onCreateActividadesBatch: (nuevas: ActividadDiaria[]) => Promise<void>;
+  onDeleteActividad: (actividad: ActividadDiaria) => Promise<void>;
+  onDeleteEvidenciaActividad: (actividad: ActividadDiaria) => Promise<void>;
+  onResetActividadPendiente: (actividad: ActividadDiaria) => Promise<void>;
   onGoToHorarios: () => void;
   openCreateModalExternal?: boolean;
   onCloseCreateModalExternal?: () => void;
 }
+
+const ALL_DIAS: DiaSemana[] = [
+  'lunes',
+  'martes',
+  'miercoles',
+  'jueves',
+  'viernes',
+  'sabado',
+  'domingo',
+];
+
+const DIA_SHORT: Record<DiaSemana, string> = {
+  lunes: 'Lun',
+  martes: 'Mar',
+  miercoles: 'Mié',
+  jueves: 'Jue',
+  viernes: 'Vie',
+  sabado: 'Sáb',
+  domingo: 'Dom',
+};
 
 export const ActividadesView: React.FC<ActividadesViewProps> = ({
   actividades,
@@ -49,10 +77,18 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   onChangeDiaActivo,
   onUpdateActividad,
   onCreateActividad,
+  onCreateActividadesBatch,
+  onDeleteActividad,
+  onDeleteEvidenciaActividad,
+  onResetActividadPendiente,
   onGoToHorarios,
   openCreateModalExternal = false,
   onCloseCreateModalExternal,
 }) => {
+  const isCajera = userRole === 'cajera';
+  const isCreador = userRole === 'creador';
+  const isSupervisor = userRole === 'supervisor';
+
   const [filterEstatus, setFilterEstatus] = useState<string>('todas');
   const [uploadingId, setUploadingId] = useState<string | null>(null);
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
@@ -60,14 +96,28 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
     url: string;
     title: string;
   } | null>(null);
-  const [showNewModal, setShowNewModal] = useState(false);
+
+  // Cashier create modal state
+  const [showCashierModal, setShowCashierModal] = useState(false);
+
+  // Creador create/edit assignment modal state
+  const [showCreadorModal, setShowCreadorModal] = useState(false);
+  const [editingActividad, setEditingActividad] =
+    useState<ActividadDiaria | null>(null);
+
+  // Confirm delete/reset modal state
+  const [confirmAction, setConfirmAction] = useState<{
+    mode: 'delete_activity' | 'delete_photo' | 'reset_pending';
+    actividad: ActividadDiaria;
+  } | null>(null);
+  const [confirming, setConfirming] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const targetActivityRef = useRef<ActividadDiaria | null>(null);
 
   const defaultSucursal =
     selectedSucursalId === 'todas'
-      ? sucursales[0]?.id || 'suc-centro'
+      ? sucursales.find((s) => s.activa)?.id || sucursales[0]?.id || 'suc-centro'
       : selectedSucursalId;
 
   const [newForm, setNewForm] = useState({
@@ -80,30 +130,78 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   const [newFile, setNewFile] = useState<File | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const isModalOpen = showNewModal || openCreateModalExternal;
-  const closeModal = () => {
-    setShowNewModal(false);
+  const [creadorForm, setCreadorForm] = useState({
+    sucursal_id: 'todas' as string,
+    titulo: '',
+    descripcion: '',
+    categoria: 'Caja' as ActividadDiaria['categoria'],
+    dias_semana: [...ALL_DIAS] as DiaSemana[],
+    hora_limite: '09:30',
+    sin_horario_limite: false,
+  });
+  const [savingCreador, setSavingCreador] = useState(false);
+
+  const isCashierModalOpen =
+    isCajera && (showCashierModal || openCreateModalExternal);
+  const closeCashierModal = () => {
+    setShowCashierModal(false);
     onCloseCreateModalExternal?.();
   };
 
-  const scopedActividades = useMemo(() => {
+  const openCreateCreadorModal = () => {
+    setEditingActividad(null);
+    setCreadorForm({
+      sucursal_id: selectedSucursalId === 'todas' ? 'todas' : selectedSucursalId,
+      titulo: '',
+      descripcion: '',
+      categoria: 'Caja',
+      dias_semana: ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'],
+      hora_limite: '09:30',
+      sin_horario_limite: false,
+    });
+    setShowCreadorModal(true);
+  };
+
+  const openEditCreadorModal = (act: ActividadDiaria) => {
+    setEditingActividad(act);
+    setCreadorForm({
+      sucursal_id: act.sucursal_id,
+      titulo: act.titulo,
+      descripcion: act.descripcion || act.observaciones || '',
+      categoria: act.categoria,
+      dias_semana:
+        act.dias_semana && act.dias_semana.length > 0
+          ? act.dias_semana
+          : [...ALL_DIAS],
+      hora_limite: act.hora_limite || '09:30',
+      sin_horario_limite: Boolean(act.sin_horario_limite),
+    });
+    setShowCreadorModal(true);
+  };
+
+  const dayScopedActividades = useMemo(() => {
     return actividades.filter((a) => {
       if (selectedSucursalId !== 'todas' && a.sucursal_id !== selectedSucursalId) {
         return false;
       }
+      if (a.dias_semana && a.dias_semana.length > 0) {
+        return a.dias_semana.includes(diaActivo);
+      }
+      return true;
+    });
+  }, [actividades, selectedSucursalId, diaActivo]);
+
+  const scopedActividades = useMemo(() => {
+    return dayScopedActividades.filter((a) => {
       if (filterEstatus !== 'todas' && a.estatus !== filterEstatus) {
         return false;
       }
       return true;
     });
-  }, [actividades, selectedSucursalId, filterEstatus]);
+  }, [dayScopedActividades, filterEstatus]);
 
   const stats = useMemo(() => {
-    const base =
-      selectedSucursalId === 'todas'
-        ? actividades
-        : actividades.filter((a) => a.sucursal_id === selectedSucursalId);
-
+    const base = dayScopedActividades;
     const completadas = base.filter((a) => a.estatus === 'Completada').length;
     const pendientes = base.filter((a) => a.estatus === 'Pendiente').length;
     const vencidas = base.filter((a) => {
@@ -121,7 +219,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
       vencidas,
       conEvidencia,
     };
-  }, [actividades, selectedSucursalId, horarios, diaActivo]);
+  }, [dayScopedActividades, horarios, diaActivo]);
 
   const activeHorarioBanner = useMemo(() => {
     if (selectedSucursalId === 'todas') {
@@ -143,6 +241,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   }, [horarios, selectedSucursalId, diaActivo]);
 
   const triggerPhotoUpload = (actividad: ActividadDiaria) => {
+    if (!isCajera) return;
     targetActivityRef.current = actividad;
     fileInputRef.current?.click();
   };
@@ -151,7 +250,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
     const file = e.target.files?.[0];
     const target = targetActivityRef.current;
     e.target.value = '';
-    if (!file || !target) return;
+    if (!file || !target || !isCajera) return;
 
     setUploadingId(target.id);
     setUploadNotice(null);
@@ -180,13 +279,12 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
     }
   };
 
-  const handleCreateSubmit = async (e: React.FormEvent) => {
+  const handleCreateCashierSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newForm.titulo.trim()) return;
+    if (!newForm.titulo.trim() || !isCajera) return;
     setCreating(true);
     try {
-      const targetSucId =
-        userRole === 'cajera' ? selectedSucursalId : newForm.sucursal_id;
+      const targetSucId = selectedSucursalId;
       const suc =
         sucursales.find((s) => s.id === targetSucId) || sucursales[0];
       let evidenciaUrl: string | null = null;
@@ -218,15 +316,96 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
         estatus: 'Completada',
       });
       setNewFile(null);
-      closeModal();
+      closeCashierModal();
     } finally {
       setCreating(false);
     }
   };
 
+  const handleSaveCreadorSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isCreador || !creadorForm.titulo.trim()) return;
+    setSavingCreador(true);
+    try {
+      const dias =
+        creadorForm.dias_semana.length > 0
+          ? creadorForm.dias_semana
+          : [...ALL_DIAS];
+
+      if (editingActividad) {
+        const targetSuc =
+          sucursales.find((s) => s.id === creadorForm.sucursal_id) ||
+          sucursales[0];
+        const updated: ActividadDiaria = {
+          ...editingActividad,
+          sucursal_id: targetSuc.id,
+          sucursal_nombre: targetSuc.nombre,
+          responsable: targetSuc.responsable_caja,
+          titulo: creadorForm.titulo.trim(),
+          descripcion: creadorForm.descripcion.trim(),
+          categoria: creadorForm.categoria,
+          dias_semana: dias,
+          hora_limite: creadorForm.sin_horario_limite
+            ? null
+            : creadorForm.hora_limite || '09:30',
+          sin_horario_limite: creadorForm.sin_horario_limite,
+        };
+        await onUpdateActividad(updated);
+        setUploadNotice(`Actividad "${updated.titulo}" actualizada correctamente.`);
+      } else {
+        const targetBranches =
+          creadorForm.sucursal_id === 'todas'
+            ? sucursales.filter((s) => s.activa)
+            : sucursales.filter((s) => s.id === creadorForm.sucursal_id);
+
+        const today = new Date().toISOString().slice(0, 10);
+        const batch: ActividadDiaria[] = targetBranches.map((suc, idx) => ({
+          id: `act-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+          sucursal_id: suc.id,
+          sucursal_nombre: suc.nombre,
+          titulo: creadorForm.titulo.trim(),
+          descripcion: creadorForm.descripcion.trim(),
+          categoria: creadorForm.categoria,
+          responsable: suc.responsable_caja,
+          fecha: today,
+          hora_completada: null,
+          estatus: 'Pendiente',
+          evidencia_url: null,
+          observaciones: '',
+          dias_semana: dias,
+          hora_limite: creadorForm.sin_horario_limite
+            ? null
+            : creadorForm.hora_limite || '09:30',
+          sin_horario_limite: creadorForm.sin_horario_limite,
+        }));
+
+        await onCreateActividadesBatch(batch);
+        setUploadNotice(
+          `Actividad "${creadorForm.titulo.trim()}" asignada a ${batch.length} sucursal(es).`
+        );
+      }
+      setShowCreadorModal(false);
+      setEditingActividad(null);
+    } finally {
+      setSavingCreador(false);
+    }
+  };
+
+  const toggleDiaCreador = (dia: DiaSemana) => {
+    setCreadorForm((prev) => {
+      const exists = prev.dias_semana.includes(dia);
+      return {
+        ...prev,
+        dias_semana: exists
+          ? prev.dias_semana.filter((d) => d !== dia)
+          : [...prev.dias_semana, dia],
+      };
+    });
+  };
+
   return (
     <div className="space-y-6">
-      {/* Hidden shared file input */}
+      {/* Hidden shared file input (Cajera only) */}
       <input
         ref={fileInputRef}
         type="file"
@@ -292,16 +471,30 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
             onClick={onGoToHorarios}
             className="px-3.5 py-2 rounded-xl text-xs font-medium bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#E6DDF5] transition-colors whitespace-nowrap"
           >
-            Ajustar horarios límite
+            {isCreador ? 'Ajustar horarios límite' : 'Ver horarios límite'}
           </button>
-          <button
-            type="button"
-            onClick={() => setShowNewModal(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap"
-          >
-            <Plus className="h-4 w-4" />
-            Nueva actividad
-          </button>
+
+          {isCreador && (
+            <button
+              type="button"
+              onClick={openCreateCreadorModal}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap"
+            >
+              <Plus className="h-4 w-4" />
+              Crear / Asignar actividad
+            </button>
+          )}
+
+          {isCajera && (
+            <button
+              type="button"
+              onClick={() => setShowCashierModal(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap"
+            >
+              <Plus className="h-4 w-4" />
+              Subir actividad del día
+            </button>
+          )}
         </div>
       </section>
 
@@ -374,146 +567,271 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
           )}
         </div>
         <span className="text-xs text-[#7A6B93]">
-          Bucket de almacenamiento: <code className="font-mono">evidencias_controlops</code>
+          Bucket de almacenamiento:{' '}
+          <code className="font-mono">evidencias_controlops</code>
         </span>
       </div>
 
       {/* Activities List */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {scopedActividades.map((act) => {
-          const horarioSuc = horarios.find(
-            (h) => h.sucursal_id === act.sucursal_id && h.dia === diaActivo
-          );
-          const evalHorario = evaluarVencimientoActividad(act, horarioSuc);
-          const isUploading = uploadingId === act.id;
+      {scopedActividades.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-[#EAE3F5] p-10 text-center space-y-2">
+          <p className="text-sm font-semibold text-[#1F172B]">
+            No hay actividades registradas para este filtro o día
+          </p>
+          <p className="text-xs text-[#7A6B93]">
+            {isCreador
+              ? 'Usa "Crear / Asignar actividad" para programar tareas a una o todas las sucursales.'
+              : 'Cambia el filtro de estatus o selecciona otro día evaluado.'}
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {scopedActividades.map((act) => {
+            const horarioSuc = horarios.find(
+              (h) => h.sucursal_id === act.sucursal_id && h.dia === diaActivo
+            );
+            const evalHorario = evaluarVencimientoActividad(act, horarioSuc);
+            const isUploading = uploadingId === act.id;
 
-          return (
-            <article
-              key={act.id}
-              className="bg-white rounded-2xl border border-[#EAE3F5] p-5 flex flex-col justify-between gap-4"
-            >
-              <div className="space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-xs text-[#7A6B93]">
-                      {act.sucursal_nombre} · {act.categoria} ·{' '}
-                      {act.responsable}
+            return (
+              <article
+                key={act.id}
+                className="bg-white rounded-2xl border border-[#EAE3F5] p-5 flex flex-col justify-between gap-4"
+              >
+                <div className="space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-xs text-[#7A6B93]">
+                        {act.sucursal_nombre} · {act.categoria} ·{' '}
+                        {act.responsable}
+                      </div>
+                      <h3 className="font-display text-sm font-bold text-[#1F172B] mt-1">
+                        {act.titulo}
+                      </h3>
+                      {act.descripcion && (
+                        <p className="text-xs text-[#55476E] mt-1">
+                          {act.descripcion}
+                        </p>
+                      )}
                     </div>
-                    <h3 className="font-display text-sm font-bold text-[#1F172B] mt-1">
-                      {act.titulo}
-                    </h3>
+
+                    {/* Status control: Cajera marks completion; Supervisor can mark Observada; Creador sees badge + management buttons */}
+                    {isCajera ? (
+                      <select
+                        aria-label="Estatus de actividad"
+                        value={act.estatus}
+                        onChange={(e) => {
+                          const nextStatus = e.target.value as EstatusActividad;
+                          onUpdateActividad({
+                            ...act,
+                            estatus: nextStatus,
+                            hora_completada:
+                              nextStatus === 'Completada'
+                                ? act.hora_completada ||
+                                  new Date().toTimeString().slice(0, 5)
+                                : null,
+                          });
+                        }}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border focus:outline-none shrink-0 ${
+                          act.estatus === 'Completada'
+                            ? 'bg-[#F0FDF4] border-[#BBF7D0] text-[#15803D]'
+                            : act.estatus === 'Observada'
+                              ? 'bg-[#FFF1F2] border-[#FECDD3] text-[#BE123C]'
+                              : 'bg-[#FFFBEB] border-[#FDE68A] text-[#B45309]'
+                        }`}
+                      >
+                        <option value="Pendiente">Pendiente</option>
+                        <option value="Completada">Completada</option>
+                      </select>
+                    ) : isSupervisor ? (
+                      <select
+                        aria-label="Revisión de supervisión"
+                        value={act.estatus}
+                        onChange={(e) => {
+                          const nextStatus = e.target.value as EstatusActividad;
+                          onUpdateActividad({
+                            ...act,
+                            estatus: nextStatus,
+                          });
+                        }}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border focus:outline-none shrink-0 ${
+                          act.estatus === 'Completada'
+                            ? 'bg-[#F0FDF4] border-[#BBF7D0] text-[#15803D]'
+                            : act.estatus === 'Observada'
+                              ? 'bg-[#FFF1F2] border-[#FECDD3] text-[#BE123C]'
+                              : 'bg-[#FFFBEB] border-[#FDE68A] text-[#B45309]'
+                        }`}
+                      >
+                        <option value="Pendiente">Pendiente</option>
+                        <option value="Completada">Completada</option>
+                        <option value="Observada">Observada</option>
+                      </select>
+                    ) : (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span
+                          className={`px-2.5 py-1 rounded-lg text-xs font-semibold border ${
+                            act.estatus === 'Completada'
+                              ? 'bg-[#F0FDF4] border-[#BBF7D0] text-[#15803D]'
+                              : act.estatus === 'Observada'
+                                ? 'bg-[#FFF1F2] border-[#FECDD3] text-[#BE123C]'
+                                : 'bg-[#FFFBEB] border-[#FDE68A] text-[#B45309]'
+                          }`}
+                        >
+                          {act.estatus}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => openEditCreadorModal(act)}
+                          title="Editar actividad"
+                          aria-label="Editar actividad"
+                          className="p-1.5 rounded-lg text-[#5B21B6] hover:bg-[#F3ECFC] transition-colors"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setConfirmAction({
+                              mode: 'delete_activity',
+                              actividad: act,
+                            })
+                          }
+                          title="Eliminar actividad"
+                          aria-label="Eliminar actividad"
+                          className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2] transition-colors"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    )}
                   </div>
 
-                  <select
-                    aria-label="Estatus de actividad"
-                    value={act.estatus}
-                    onChange={(e) => {
-                      const nextStatus = e.target.value as EstatusActividad;
-                      onUpdateActividad({
-                        ...act,
-                        estatus: nextStatus,
-                        hora_completada:
-                          nextStatus === 'Completada'
-                            ? act.hora_completada ||
-                              new Date().toTimeString().slice(0, 5)
-                            : act.hora_completada,
-                      });
-                    }}
-                    className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border focus:outline-none shrink-0 ${
-                      act.estatus === 'Completada'
-                        ? 'bg-[#F0FDF4] border-[#BBF7D0] text-[#15803D]'
-                        : act.estatus === 'Observada'
-                          ? 'bg-[#FFF1F2] border-[#FECDD3] text-[#BE123C]'
-                          : 'bg-[#FFFBEB] border-[#FDE68A] text-[#B45309]'
-                    }`}
-                  >
-                    <option value="Pendiente">Pendiente</option>
-                    <option value="Completada">Completada</option>
-                    <option value="Observada">Observada</option>
-                  </select>
-                </div>
+                  {/* Assigned days & deadline evaluation */}
+                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                    {evalHorario.etiqueta === 'Sin horario límite' ? (
+                      <span className="inline-flex items-center gap-1 text-[#6D28D9] font-medium">
+                        <Clock className="h-3.5 w-3.5" />
+                        Sin horario límite
+                      </span>
+                    ) : evalHorario.etiqueta === 'Vencida' ? (
+                      <span className="inline-flex items-center gap-1 text-[#BE123C] font-semibold">
+                        <AlertTriangle className="h-3.5 w-3.5" />
+                        Vencida (límite {evalHorario.horaLimite})
+                      </span>
+                    ) : evalHorario.etiqueta === 'Completada con retraso' ? (
+                      <span className="inline-flex items-center gap-1 text-[#B45309] font-medium">
+                        <Clock className="h-3.5 w-3.5" />
+                        Completada {act.hora_completada} (límite{' '}
+                        {evalHorario.horaLimite})
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[#15803D] font-medium">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        {act.hora_completada
+                          ? `Completada ${act.hora_completada} · Límite ${evalHorario.horaLimite}`
+                          : `En tiempo · Límite ${evalHorario.horaLimite}`}
+                      </span>
+                    )}
 
-                {/* Deadline evaluation */}
-                <div className="flex flex-wrap items-center gap-3 text-xs">
-                  {evalHorario.etiqueta === 'Sin horario límite' ? (
-                    <span className="inline-flex items-center gap-1 text-[#6D28D9] font-medium">
-                      <Clock className="h-3.5 w-3.5" />
-                      Sin horario límite hoy
-                    </span>
-                  ) : evalHorario.etiqueta === 'Vencida' ? (
-                    <span className="inline-flex items-center gap-1 text-[#BE123C] font-semibold">
-                      <AlertTriangle className="h-3.5 w-3.5" />
-                      Vencida (límite {evalHorario.horaLimite})
-                    </span>
-                  ) : evalHorario.etiqueta === 'Completada con retraso' ? (
-                    <span className="inline-flex items-center gap-1 text-[#B45309] font-medium">
-                      <Clock className="h-3.5 w-3.5" />
-                      Completada {act.hora_completada} (límite{' '}
-                      {evalHorario.horaLimite})
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 text-[#15803D] font-medium">
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      {act.hora_completada
-                        ? `Completada ${act.hora_completada} · Límite ${evalHorario.horaLimite}`
-                        : `En tiempo · Límite ${evalHorario.horaLimite}`}
-                    </span>
+                    {act.dias_semana && act.dias_semana.length > 0 && (
+                      <span className="text-[11px] text-[#7A6B93]">
+                        Días: {act.dias_semana.map((d) => DIA_SHORT[d]).join(', ')}
+                      </span>
+                    )}
+                  </div>
+
+                  {act.observaciones && (
+                    <p className="text-xs text-[#55476E] bg-[#FAF8FC] rounded-xl px-3 py-2 border border-[#F1ECF9]">
+                      {act.observaciones}
+                    </p>
                   )}
                 </div>
 
-                {act.observaciones && (
-                  <p className="text-xs text-[#55476E] bg-[#FAF8FC] rounded-xl px-3 py-2 border border-[#F1ECF9]">
-                    {act.observaciones}
-                  </p>
-                )}
-              </div>
+                {/* Evidence Photo Footer */}
+                <div className="pt-3 border-t border-[#F1ECF9] flex flex-wrap items-center justify-between gap-2.5">
+                  {act.evidencia_url ? (
+                    <div className="flex items-center gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewImage({
+                            url: act.evidencia_url!,
+                            title: `${act.sucursal_nombre} — ${act.titulo}`,
+                          })
+                        }
+                        className="inline-flex items-center gap-2 text-xs font-semibold text-[#5B21B6] hover:text-[#DB2777] transition-colors"
+                      >
+                        <img
+                          src={act.evidencia_url}
+                          alt={`Evidencia de ${act.titulo}`}
+                          referrerPolicy="no-referrer"
+                          className="h-8 w-8 rounded-lg object-cover border border-[#E6DDF5]"
+                        />
+                        <span>Ver fotografía adjunta</span>
+                      </button>
 
-              {/* Evidence Photo Footer */}
-              <div className="pt-3 border-t border-[#F1ECF9] flex items-center justify-between gap-3">
-                {act.evidencia_url ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setPreviewImage({
-                        url: act.evidencia_url!,
-                        title: `${act.sucursal_nombre} — ${act.titulo}`,
-                      })
-                    }
-                    className="inline-flex items-center gap-2 text-xs font-semibold text-[#5B21B6] hover:text-[#DB2777] transition-colors"
-                  >
-                    <img
-                      src={act.evidencia_url}
-                      alt={`Evidencia de ${act.titulo}`}
-                      referrerPolicy="no-referrer"
-                      className="h-8 w-8 rounded-lg object-cover border border-[#E6DDF5]"
-                    />
-                    <span>Ver fotografía adjunta</span>
-                  </button>
-                ) : (
-                  <span className="inline-flex items-center gap-1.5 text-xs text-[#8B7CA5]">
-                    <ImageIcon className="h-3.5 w-3.5" />
-                    Sin fotografía adjunta
-                  </span>
-                )}
+                      {isCreador && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setConfirmAction({
+                              mode: 'delete_photo',
+                              actividad: act,
+                            })
+                          }
+                          title="Eliminar fotografía de evidencia"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold text-[#BE123C] bg-[#FFF1F2] hover:bg-[#FFE4E6] transition-colors"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          Borrar foto
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-[#8B7CA5]">
+                      <ImageIcon className="h-3.5 w-3.5" />
+                      Sin fotografía adjunta
+                    </span>
+                  )}
 
-                <button
-                  type="button"
-                  disabled={isUploading}
-                  onClick={() => triggerPhotoUpload(act)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#FDF2F8] hover:bg-[#FCE7F3] text-[#BE185D] border border-[#FBCFE8] transition-colors disabled:opacity-50 whitespace-nowrap"
-                >
-                  <Camera className="h-3.5 w-3.5" />
-                  {isUploading
-                    ? 'Subiendo...'
-                    : act.evidencia_url
-                      ? 'Reemplazar foto'
-                      : 'Subir evidencia'}
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </div>
+                  {isCajera ? (
+                    <button
+                      type="button"
+                      disabled={isUploading}
+                      onClick={() => triggerPhotoUpload(act)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#FDF2F8] hover:bg-[#FCE7F3] text-[#BE185D] border border-[#FBCFE8] transition-colors disabled:opacity-50 whitespace-nowrap"
+                    >
+                      <Camera className="h-3.5 w-3.5" />
+                      {isUploading
+                        ? 'Subiendo...'
+                        : act.evidencia_url
+                          ? 'Reemplazar foto'
+                          : 'Subir evidencia'}
+                    </button>
+                  ) : (
+                    isCreador &&
+                    (act.estatus !== 'Pendiente' || act.evidencia_url) && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setConfirmAction({
+                            mode: 'reset_pending',
+                            actividad: act,
+                          })
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#E6DDF5] transition-colors whitespace-nowrap"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Reiniciar a pendiente
+                      </button>
+                    )
+                  )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
 
       {/* Preview Lightbox */}
       {previewImage && (
@@ -549,8 +867,8 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
         </div>
       )}
 
-      {/* Modal: New Activity + Photo Evidence */}
-      {isModalOpen && (
+      {/* Cashier Modal: Report Activity + Photo Evidence (Cajera only) */}
+      {isCashierModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/40 backdrop-blur-[2px]">
           <div className="w-full max-w-lg rounded-2xl bg-white border border-[#E6DDF5] shadow-xl overflow-hidden">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[#F1ECF9]">
@@ -559,39 +877,28 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
               </h3>
               <button
                 type="button"
-                onClick={closeModal}
+                onClick={closeCashierModal}
                 className="p-1.5 rounded-lg text-[#6E5F87] hover:bg-[#F5F0FC]"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <form onSubmit={handleCreateSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleCreateCashierSubmit} className="p-6 space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-medium text-[#55476E] mb-1">
                     Sucursal
                   </label>
-                  <select
-                    disabled={userRole === 'cajera'}
+                  <input
+                    type="text"
+                    disabled
                     value={
-                      userRole === 'cajera'
-                        ? selectedSucursalId
-                        : newForm.sucursal_id
+                      sucursales.find((s) => s.id === selectedSucursalId)
+                        ?.nombre || 'Sucursal asignada'
                     }
-                    onChange={(e) =>
-                      setNewForm({ ...newForm, sucursal_id: e.target.value })
-                    }
-                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm disabled:opacity-60"
-                  >
-                    {sucursales
-                      .filter((s) => s.activa)
-                      .map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.nombre}
-                        </option>
-                      ))}
-                  </select>
+                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm bg-[#FAF8FC] text-[#55476E]"
+                  />
                 </div>
 
                 <div>
@@ -706,7 +1013,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
                   type="button"
-                  onClick={closeModal}
+                  onClick={closeCashierModal}
                   className="px-4 py-2 rounded-xl text-xs font-medium text-[#6E5F87] hover:bg-[#FAF8FC]"
                 >
                   Cancelar
@@ -723,6 +1030,244 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Creador Modal: Create / Edit / Assign Activity */}
+      {isCreador && showCreadorModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/40 backdrop-blur-[2px]">
+          <div className="w-full max-w-lg rounded-2xl bg-white border border-[#E6DDF5] shadow-xl overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#F1ECF9]">
+              <h3 className="font-display text-base font-bold text-[#1F172B]">
+                {editingActividad
+                  ? 'Editar actividad asignada'
+                  : 'Crear y asignar nueva actividad'}
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreadorModal(false);
+                  setEditingActividad(null);
+                }}
+                className="p-1.5 rounded-lg text-[#6E5F87] hover:bg-[#F5F0FC]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveCreadorSubmit} className="p-6 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-[#55476E] mb-1">
+                    Sucursal destino
+                  </label>
+                  <select
+                    value={creadorForm.sucursal_id}
+                    onChange={(e) =>
+                      setCreadorForm({
+                        ...creadorForm,
+                        sucursal_id: e.target.value,
+                      })
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm"
+                  >
+                    {!editingActividad && (
+                      <option value="todas">
+                        Todas las sucursales activas (
+                        {sucursales.filter((s) => s.activa).length})
+                      </option>
+                    )}
+                    {sucursales
+                      .filter((s) => s.activa)
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.nombre}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-[#55476E] mb-1">
+                    Categoría
+                  </label>
+                  <select
+                    value={creadorForm.categoria}
+                    onChange={(e) =>
+                      setCreadorForm({
+                        ...creadorForm,
+                        categoria: e.target
+                          .value as ActividadDiaria['categoria'],
+                      })
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm"
+                  >
+                    <option value="Caja">Caja</option>
+                    <option value="Corte">Corte</option>
+                    <option value="Expedientes">Expedientes</option>
+                    <option value="Auditoría">Auditoría</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#55476E] mb-1">
+                  Título de la actividad *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={creadorForm.titulo}
+                  onChange={(e) =>
+                    setCreadorForm({ ...creadorForm, titulo: e.target.value })
+                  }
+                  placeholder="Ej. Arqueo matutino de caja y envío de foto"
+                  className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#55476E] mb-1">
+                  Descripción / Instrucciones para cajeras
+                </label>
+                <textarea
+                  rows={2}
+                  value={creadorForm.descripcion}
+                  onChange={(e) =>
+                    setCreadorForm({
+                      ...creadorForm,
+                      descripcion: e.target.value,
+                    })
+                  }
+                  placeholder="Detalla qué debe validar o fotografiar la cajera..."
+                  className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm resize-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#55476E] mb-1.5">
+                  Días de la semana aplicables
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {ALL_DIAS.map((d) => {
+                    const active = creadorForm.dias_semana.includes(d);
+                    return (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => toggleDiaCreador(d)}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
+                          active
+                            ? 'bg-[#F3ECFC] border-[#C4B5FD] text-[#5B21B6]'
+                            : 'bg-[#FAF8FC] border-[#EAE3F5] text-[#8B7CA5]'
+                        }`}
+                      >
+                        {DIA_SHORT[d]}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-end">
+                <div>
+                  <label className="block text-xs font-medium text-[#55476E] mb-1">
+                    Horario límite
+                  </label>
+                  <input
+                    type="time"
+                    disabled={creadorForm.sin_horario_limite}
+                    value={creadorForm.hora_limite}
+                    onChange={(e) =>
+                      setCreadorForm({
+                        ...creadorForm,
+                        hora_limite: e.target.value,
+                      })
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm font-mono-num disabled:opacity-50"
+                  />
+                </div>
+
+                <label className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-[#EAE3F5] bg-[#FAF8FC] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={creadorForm.sin_horario_limite}
+                    onChange={(e) =>
+                      setCreadorForm({
+                        ...creadorForm,
+                        sin_horario_limite: e.target.checked,
+                      })
+                    }
+                    className="rounded border-[#C4B5FD] text-[#7C3AED]"
+                  />
+                  <span className="text-xs font-semibold text-[#5B21B6]">
+                    Sin horario límite
+                  </span>
+                </label>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCreadorModal(false);
+                    setEditingActividad(null);
+                  }}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-[#6E5F87] hover:bg-[#FAF8FC]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingCreador}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
+                >
+                  {savingCreador
+                    ? 'Guardando...'
+                    : editingActividad
+                      ? 'Guardar cambios'
+                      : 'Asignar actividad'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Delete / Reset Modal (Creador only) */}
+      <ConfirmDeleteModal
+        open={Boolean(confirmAction)}
+        title={
+          confirmAction?.mode === 'reset_pending'
+            ? '¿Seguro que deseas reiniciar esta actividad a pendiente?'
+            : '¿Seguro que deseas eliminar este registro?'
+        }
+        detail={
+          confirmAction?.mode === 'delete_photo'
+            ? `Se eliminará la fotografía de evidencia de "${confirmAction.actividad.titulo}" en evidencias_controlops.`
+            : confirmAction?.mode === 'reset_pending'
+              ? `La actividad "${confirmAction.actividad.titulo}" (${confirmAction.actividad.sucursal_nombre}) volverá a estatus Pendiente y se eliminará su evidencia adjunta.`
+              : confirmAction
+                ? `Se eliminará la actividad "${confirmAction.actividad.titulo}" (${confirmAction.actividad.sucursal_nombre}) y su evidencia fotográfica si existe.`
+                : undefined
+        }
+        loading={confirming}
+        onCancel={() => setConfirmAction(null)}
+        onConfirm={async () => {
+          if (!confirmAction) return;
+          setConfirming(true);
+          try {
+            if (confirmAction.mode === 'delete_activity') {
+              await onDeleteActividad(confirmAction.actividad);
+            } else if (confirmAction.mode === 'delete_photo') {
+              await onDeleteEvidenciaActividad(confirmAction.actividad);
+            } else {
+              await onResetActividadPendiente(confirmAction.actividad);
+            }
+            setConfirmAction(null);
+          } finally {
+            setConfirming(false);
+          }
+        }}
+      />
     </div>
   );
 };

@@ -9,6 +9,7 @@ import {
   Clock,
   Save,
   X,
+  Trash2,
 } from 'lucide-react';
 import {
   EstatusAuditoriaLlamada,
@@ -19,6 +20,7 @@ import {
   Sucursal,
 } from '../types/controlops';
 import { formatMXN, sanitizePhoneForWhatsApp } from '../utils/calculations';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface LlamadasViewProps {
   llamadas: LlamadaSucursal[];
@@ -28,6 +30,7 @@ interface LlamadasViewProps {
   opcionesReporte: string[];
   onUpdateLlamada: (updated: LlamadaSucursal) => Promise<void>;
   onCreateLlamada: (nueva: LlamadaSucursal) => Promise<void>;
+  onDeleteLlamada: (id: string) => Promise<void>;
   openCreateModalExternal?: boolean;
   onCloseCreateModalExternal?: () => void;
 }
@@ -40,9 +43,12 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   opcionesReporte,
   onUpdateLlamada,
   onCreateLlamada,
+  onDeleteLlamada,
   openCreateModalExternal = false,
   onCloseCreateModalExternal,
 }) => {
+  const isCajera = userRole === 'cajera';
+  const isCreador = userRole === 'creador';
   const canAudit = userRole === 'supervisor' || userRole === 'creador';
   const dropdownOpciones: ReporteCajeraOpcion[] = [
     'Sin reporte',
@@ -56,6 +62,10 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   const [draftObs, setDraftObs] = useState<Record<string, string>>({});
   const [savedToastId, setSavedToastId] = useState<string | null>(null);
   const [showNewModal, setShowNewModal] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<LlamadaSucursal | null>(
+    null
+  );
+  const [deleting, setDeleting] = useState(false);
 
   // Form state for new call
   const defaultSucursal =
@@ -74,7 +84,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     observaciones_admin: '',
   });
 
-  const isModalOpen = showNewModal || openCreateModalExternal;
+  const isModalOpen = isCajera && (showNewModal || openCreateModalExternal);
   const closeModal = () => {
     setShowNewModal(false);
     onCloseCreateModalExternal?.();
@@ -256,14 +266,20 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setShowNewModal(true)}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap shrink-0"
-          >
-            <Plus className="h-4 w-4" />
-            Registrar llamada
-          </button>
+          {isCajera ? (
+            <button
+              type="button"
+              onClick={() => setShowNewModal(true)}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap shrink-0"
+            >
+              <Plus className="h-4 w-4" />
+              Registrar llamada
+            </button>
+          ) : (
+            <span className="px-3 py-1.5 rounded-xl text-xs font-medium bg-[#FAF7FE] text-[#6D28D9] border border-[#EAE3F5] shrink-0">
+              {isCreador ? 'Modo Control y Auditoría' : 'Modo Auditoría'}
+            </span>
+          )}
         </div>
       </section>
 
@@ -447,61 +463,89 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Quick Call & WhatsApp Actions */}
+                  {/* Quick Call & WhatsApp Actions (Cajera) or Contact Info (Audit) */}
                   <div className="xl:col-span-2 flex flex-wrap items-center gap-2">
-                    <a
-                      href={`tel:${item.telefono}`}
-                      onClick={() => {
-                        if (!item.llamada_registrada) {
-                          onUpdateLlamada({ ...item, llamada_registrada: true });
-                        }
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#F3ECFC] hover:bg-[#E7DAFA] text-[#5B21B6] transition-colors whitespace-nowrap"
-                    >
-                      <Phone className="h-3.5 w-3.5" />
-                      Llamar
-                    </a>
-                    <a
-                      href={`https://wa.me/${sanitizePhoneForWhatsApp(item.telefono)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={() => {
-                        if (!item.llamada_registrada) {
-                          onUpdateLlamada({ ...item, llamada_registrada: true });
-                        }
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#FDF2F8] hover:bg-[#FCE7F3] text-[#BE185D] border border-[#FBCFE8] transition-colors whitespace-nowrap"
-                    >
-                      <MessageCircle className="h-3.5 w-3.5" />
-                      WhatsApp
-                    </a>
+                    {isCajera ? (
+                      <>
+                        <a
+                          href={`tel:${item.telefono}`}
+                          onClick={() => {
+                            if (!item.llamada_registrada) {
+                              onUpdateLlamada({
+                                ...item,
+                                llamada_registrada: true,
+                              });
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#F3ECFC] hover:bg-[#E7DAFA] text-[#5B21B6] transition-colors whitespace-nowrap"
+                        >
+                          <Phone className="h-3.5 w-3.5" />
+                          Llamar
+                        </a>
+                        <a
+                          href={`https://wa.me/${sanitizePhoneForWhatsApp(item.telefono)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => {
+                            if (!item.llamada_registrada) {
+                              onUpdateLlamada({
+                                ...item,
+                                llamada_registrada: true,
+                              });
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#FDF2F8] hover:bg-[#FCE7F3] text-[#BE185D] border border-[#FBCFE8] transition-colors whitespace-nowrap"
+                        >
+                          <MessageCircle className="h-3.5 w-3.5" />
+                          WhatsApp
+                        </a>
+                      </>
+                    ) : (
+                      <div className="text-xs text-[#6E5F87] space-y-0.5">
+                        <div className="font-medium text-[#1F172B]">
+                          {item.llamada_registrada
+                            ? 'Marcación registrada'
+                            : 'Sin marcar'}
+                        </div>
+                        <div className="font-mono-num text-[11px]">
+                          Tel. {item.telefono}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
-                  {/* Cashier Report Dropdown */}
+                  {/* Cashier Report Dropdown (Editable only by Cajera) */}
                   <div className="xl:col-span-2">
                     <label className="block text-[11px] font-medium text-[#7A6B93] mb-1">
                       Reporte de cajera
                     </label>
-                    <select
-                      value={item.reporte_cajera}
-                      onChange={(e) =>
-                        onUpdateLlamada({
-                          ...item,
-                          reporte_cajera: e.target.value as ReporteCajeraOpcion,
-                          llamada_registrada:
-                            e.target.value !== 'Sin reporte'
-                              ? true
-                              : item.llamada_registrada,
-                        })
-                      }
-                      className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
-                    >
-                      {dropdownOpciones.map((op) => (
-                        <option key={op} value={op}>
-                          {op}
-                        </option>
-                      ))}
-                    </select>
+                    {isCajera ? (
+                      <select
+                        value={item.reporte_cajera}
+                        onChange={(e) =>
+                          onUpdateLlamada({
+                            ...item,
+                            reporte_cajera: e.target
+                              .value as ReporteCajeraOpcion,
+                            llamada_registrada:
+                              e.target.value !== 'Sin reporte'
+                                ? true
+                                : item.llamada_registrada,
+                          })
+                        }
+                        className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+                      >
+                        {dropdownOpciones.map((op) => (
+                          <option key={op} value={op}>
+                            {op}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="px-3 py-2 rounded-xl border border-[#F1ECF9] bg-[#FAF8FC] text-xs font-semibold text-[#1F172B]">
+                        {item.reporte_cajera}
+                      </div>
+                    )}
                   </div>
 
                   {/* Admin Audit & Observations */}
@@ -608,6 +652,17 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                           <Save className="h-3.5 w-3.5" />
                           {savedToastId === item.id ? 'Listo' : 'Guardar'}
                         </button>
+                        {isCreador && (
+                          <button
+                            type="button"
+                            onClick={() => setDeleteTarget(item)}
+                            title="Eliminar registro de llamada"
+                            aria-label="Eliminar llamada"
+                            className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2] border border-transparent hover:border-[#FECDD3] transition-colors shrink-0"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                       </div>
                     ) : (
                       <p className="text-xs text-[#6E5F87] bg-[#FAF8FC] rounded-lg px-3 py-1.5 border border-[#F1ECF9]">
@@ -809,6 +864,28 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
           </div>
         </div>
       )}
+      {/* Confirm Delete Modal (Creador only) */}
+      <ConfirmDeleteModal
+        open={Boolean(deleteTarget)}
+        title="¿Seguro que deseas eliminar este registro?"
+        detail={
+          deleteTarget
+            ? `Se eliminará la llamada de ${deleteTarget.cliente_nombre} (${deleteTarget.contrato} · ${deleteTarget.sucursal_nombre}) de llamadas_sucursal.`
+            : undefined
+        }
+        loading={deleting}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          if (!deleteTarget) return;
+          setDeleting(true);
+          try {
+            await onDeleteLlamada(deleteTarget.id);
+            setDeleteTarget(null);
+          } finally {
+            setDeleting(false);
+          }
+        }}
+      />
     </div>
   );
 };
