@@ -14,6 +14,7 @@ import {
   Pencil,
   Clock,
   X,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   ActividadDiaria,
@@ -25,6 +26,7 @@ import {
   TareaCatalogo,
   UsuarioControlOps,
 } from '../types/controlops';
+import { ServiceResult } from '../services/controlOpsService';
 import { formatMXN } from '../utils/calculations';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
@@ -37,15 +39,20 @@ interface AdminCatalogosViewProps {
   currentUserId: string;
   supabaseConnected: boolean;
   onOpenSupabaseModal: () => void;
-  onSaveSucursal: (suc: Sucursal) => Promise<void>;
-  onDeleteSucursal: (id: string) => Promise<void>;
-  onSaveMeta: (meta: MetaSucursal) => Promise<void>;
-  onSaveCatalogos: (catalogos: CatalogosControlOps) => Promise<void>;
-  onSaveUsuario: (usr: UsuarioControlOps) => Promise<void>;
-  onDeleteUsuario: (id: string) => Promise<void>;
-  onCreateActividadesBatch: (nuevas: ActividadDiaria[]) => Promise<void>;
-  onUpdateActividad: (updated: ActividadDiaria) => Promise<void>;
-  onDeleteActividad: (actividad: ActividadDiaria) => Promise<void>;
+  onSaveSucursal: (suc: Sucursal) => Promise<ServiceResult>;
+  onDeleteSucursal: (id: string) => Promise<ServiceResult>;
+  onSaveMeta: (meta: MetaSucursal) => Promise<ServiceResult>;
+  onSaveCatalogos: (catalogos: CatalogosControlOps) => Promise<ServiceResult>;
+  onSaveUsuario: (
+    usr: UsuarioControlOps,
+    isNew?: boolean
+  ) => Promise<ServiceResult>;
+  onDeleteUsuario: (id: string) => Promise<ServiceResult>;
+  onCreateActividadesBatch: (
+    nuevas: ActividadDiaria[]
+  ) => Promise<ServiceResult>;
+  onUpdateActividad: (updated: ActividadDiaria) => Promise<ServiceResult>;
+  onDeleteActividad: (actividad: ActividadDiaria) => Promise<ServiceResult>;
 }
 
 const ALL_DIAS: DiaSemana[] = [
@@ -91,10 +98,20 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
 }) => {
   const [tab, setTab] = useState<AdminTab>('sucursales');
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [errorAlert, setErrorAlert] = useState<string | null>(null);
+  const [savingUser, setSavingUser] = useState(false);
 
   const notify = (msg: string) => {
+    setErrorAlert(null);
     setFeedback(msg);
-    setTimeout(() => setFeedback(null), 2400);
+    setTimeout(() => setFeedback(null), 2600);
+  };
+
+  const fail = (errMsg?: string) => {
+    setFeedback(null);
+    setErrorAlert(
+      errMsg || 'Error al guardar cambios en Supabase. Verifica la tabla.'
+    );
   };
 
   // --- Sucursales State ---
@@ -150,6 +167,7 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   const handleAddBranch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newBranch.nombre.trim()) return;
+    setErrorAlert(null);
     const id = `suc-${Date.now()}`;
     const created: Sucursal = {
       id,
@@ -164,8 +182,12 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
       techo_gasto_mensual: 4500,
       activa: true,
     };
-    await onSaveSucursal(created);
-    await onSaveMeta({
+    const resSuc = await onSaveSucursal(created);
+    if (!resSuc.ok) {
+      fail(resSuc.error);
+      return;
+    }
+    const resMeta = await onSaveMeta({
       id: `meta-${id}`,
       sucursal_id: id,
       meta_llamadas_diarias: 30,
@@ -173,21 +195,33 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
       meta_refrendos_mensual: 40,
       techo_gasto_mensual: 4500,
     });
+    if (!resMeta.ok) {
+      fail(resMeta.error);
+      return;
+    }
     setNewBranch({ nombre: '', codigo: '', ciudad: '', responsable_caja: '' });
     notify(`Sucursal "${created.nombre}" agregada en sucursales_config.`);
   };
 
   const handleSaveBranchRow = async (suc: Sucursal) => {
     const merged = branchDrafts[suc.id] || suc;
-    await onSaveSucursal(merged);
+    const res = await onSaveSucursal(merged);
+    if (!res.ok) {
+      fail(res.error);
+      return;
+    }
     notify(`Cambios guardados para ${merged.nombre}.`);
   };
 
   const handleToggleBranchActive = async (suc: Sucursal) => {
     const base = branchDrafts[suc.id] || suc;
     const updated = { ...base, activa: !base.activa };
+    const res = await onSaveSucursal(updated);
+    if (!res.ok) {
+      fail(res.error);
+      return;
+    }
     setBranchDrafts((prev) => ({ ...prev, [suc.id]: updated }));
-    await onSaveSucursal(updated);
     notify(
       `${updated.nombre} ${updated.activa ? 'activada' : 'desactivada'}.`
     );
@@ -209,14 +243,22 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
 
   const handleSaveMetaRow = async (suc: Sucursal) => {
     const m = getEffectiveMeta(suc);
-    await onSaveMeta(m);
-    await onSaveSucursal({
+    const resMeta = await onSaveMeta(m);
+    if (!resMeta.ok) {
+      fail(resMeta.error);
+      return;
+    }
+    const resSuc = await onSaveSucursal({
       ...suc,
       meta_llamadas_diarias: m.meta_llamadas_diarias,
       meta_actividades_diarias: m.meta_actividades_diarias,
       meta_refrendos_mensual: m.meta_refrendos_mensual,
       techo_gasto_mensual: m.techo_gasto_mensual,
     });
+    if (!resSuc.ok) {
+      fail(resSuc.error);
+      return;
+    }
     notify(`Metas y techo máximo actualizados para ${suc.nombre}.`);
   };
 
@@ -235,7 +277,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
         },
       ],
     };
-    await onSaveCatalogos(nextCatalogos);
+    const res = await onSaveCatalogos(nextCatalogos);
+    if (!res.ok) {
+      fail(res.error);
+      return;
+    }
     setNewTaskTitle('');
     notify('Tarea agregada al catálogo operativo.');
   };
@@ -247,7 +293,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
         t.id === taskId ? { ...t, activa: !t.activa } : t
       ),
     };
-    await onSaveCatalogos(nextCatalogos);
+    const res = await onSaveCatalogos(nextCatalogos);
+    if (!res.ok) {
+      fail(res.error);
+      return;
+    }
     notify('Catálogo de actividades actualizado.');
   };
 
@@ -258,7 +308,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
         (t) => t.id !== taskId
       ),
     };
-    await onSaveCatalogos(nextCatalogos);
+    const res = await onSaveCatalogos(nextCatalogos);
+    if (!res.ok) {
+      fail(res.error);
+      return;
+    }
     notify('Tarea eliminada del catálogo.');
   };
 
@@ -270,7 +324,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
       ...catalogos,
       opciones_llamada: [...catalogos.opciones_llamada, trimmed],
     };
-    await onSaveCatalogos(nextCatalogos);
+    const res = await onSaveCatalogos(nextCatalogos);
+    if (!res.ok) {
+      fail(res.error);
+      return;
+    }
     setNewCallOption('');
     notify(`Opción "${trimmed}" agregada al selector de llamadas.`);
   };
@@ -280,7 +338,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
       ...catalogos,
       opciones_llamada: catalogos.opciones_llamada.filter((o) => o !== opt),
     };
-    await onSaveCatalogos(nextCatalogos);
+    const res = await onSaveCatalogos(nextCatalogos);
+    if (!res.ok) {
+      fail(res.error);
+      return;
+    }
     notify(`Opción "${opt}" eliminada.`);
   };
 
@@ -305,7 +367,7 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
     if (editingAct) {
       const targetSuc =
         sucursales.find((s) => s.id === actForm.sucursal_id) || sucursales[0];
-      await onUpdateActividad({
+      const res = await onUpdateActividad({
         ...editingAct,
         sucursal_id: targetSuc.id,
         sucursal_nombre: targetSuc.nombre,
@@ -319,6 +381,10 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
           : actForm.hora_limite || '09:30',
         sin_horario_limite: actForm.sin_horario_limite,
       });
+      if (!res.ok) {
+        fail(res.error);
+        return;
+      }
       notify(`Actividad "${actForm.titulo.trim()}" actualizada.`);
       setEditingAct(null);
     } else {
@@ -346,7 +412,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
           : actForm.hora_limite || '09:30',
         sin_horario_limite: actForm.sin_horario_limite,
       }));
-      await onCreateActividadesBatch(batch);
+      const res = await onCreateActividadesBatch(batch);
+      if (!res.ok) {
+        fail(res.error);
+        return;
+      }
       notify(
         `Actividad asignada a ${batch.length} sucursal(es) en actividades_diarias.`
       );
@@ -365,34 +435,46 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
 
   const handleAddUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newUser.nombre.trim() || !newUser.correo.trim() || !newUser.password)
+    if (!newUser.nombre.trim() || !newUser.correo.trim() || !newUser.password.trim())
       return;
-    const created: UsuarioControlOps = {
-      id: `usr-${Date.now()}`,
-      nombre: newUser.nombre.trim(),
-      correo: newUser.correo.trim().toLowerCase(),
-      password: newUser.password,
-      rol: newUser.rol,
-      sucursal_id: newUser.rol === 'cajera' ? newUser.sucursal_id : 'todas',
-      activo: true,
-    };
-    await onSaveUsuario(created);
-    setNewUser({
-      nombre: '',
-      correo: '',
-      password: '',
-      rol: 'cajera',
-      sucursal_id: sucursales[0]?.id || 'suc-centro',
-    });
-    notify(`Usuario ${created.nombre} creado en usuarios_controlops.`);
+    setSavingUser(true);
+    setErrorAlert(null);
+    try {
+      const created: UsuarioControlOps = {
+        id: `usr-${Date.now()}`,
+        nombre: newUser.nombre.trim(),
+        correo: newUser.correo.trim().toLowerCase(),
+        password: newUser.password.trim(),
+        rol: newUser.rol,
+        sucursal_id: newUser.rol === 'cajera' ? newUser.sucursal_id : 'todas',
+        activo: true,
+      };
+      const res = await onSaveUsuario(created, true);
+      if (!res.ok) {
+        fail(res.error);
+        return;
+      }
+      setNewUser({
+        nombre: '',
+        correo: '',
+        password: '',
+        rol: 'cajera',
+        sucursal_id: sucursales[0]?.id || 'suc-centro',
+      });
+      notify(`Usuario ${created.nombre} guardado en usuarios_controlops.`);
+    } finally {
+      setSavingUser(false);
+    }
   };
 
   const handleSaveUserRow = async (usr: UsuarioControlOps) => {
     const merged = userDrafts[usr.id] || usr;
+    setErrorAlert(null);
     const normalized: UsuarioControlOps = {
       ...merged,
       nombre: merged.nombre.trim(),
       correo: merged.correo.trim().toLowerCase(),
+      password: merged.password.trim(),
       sucursal_id:
         merged.rol === 'cajera'
           ? merged.sucursal_id === 'todas'
@@ -400,12 +482,46 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
             : merged.sucursal_id
           : 'todas',
     };
-    await onSaveUsuario(normalized);
-    notify(`Usuario ${normalized.nombre} guardado en usuarios_controlops.`);
+    const res = await onSaveUsuario(normalized, false);
+    if (!res.ok) {
+      fail(res.error);
+      return;
+    }
+    setUserDrafts((prev) => {
+      const copy = { ...prev };
+      delete copy[usr.id];
+      return copy;
+    });
+    notify(`Usuario ${normalized.nombre} actualizado en usuarios_controlops.`);
   };
 
   return (
     <div className="space-y-6">
+      {/* Error Alert Banner */}
+      {errorAlert && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3.5 flex items-start justify-between gap-3 text-xs text-[#BE123C]"
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-[#E11D48]" />
+            <div>
+              <p className="font-bold">
+                Error al guardar en Supabase (no se guardó en localStorage)
+              </p>
+              <p className="mt-0.5 font-mono-num break-all">{errorAlert}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorAlert(null)}
+            className="font-semibold underline shrink-0"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
       {/* Sub-navigation & Feedback */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-1 p-1 bg-white border border-[#EAE3F5] rounded-xl w-fit">
@@ -645,7 +761,14 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onDeleteSucursal(suc.id)}
+                            onClick={async () => {
+                              const res = await onDeleteSucursal(suc.id);
+                              if (!res.ok) {
+                                fail(res.error);
+                                return;
+                              }
+                              notify(`Sucursal "${suc.nombre}" eliminada.`);
+                            }}
                             className="inline-flex items-center p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
                             title="Eliminar sucursal"
                           >
@@ -1029,11 +1152,15 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                           disabled={Boolean(act.sin_horario_limite)}
                           value={act.hora_limite || '09:30'}
                           onChange={async (e) => {
-                            await onUpdateActividad({
+                            const res = await onUpdateActividad({
                               ...act,
                               hora_limite: e.target.value,
                               sin_horario_limite: false,
                             });
+                            if (!res.ok) {
+                              fail(res.error);
+                              return;
+                            }
                             notify(`Horario de "${act.titulo}" actualizado a ${e.target.value}.`);
                           }}
                           className="text-[11px] font-mono-num bg-transparent focus:outline-none disabled:opacity-45"
@@ -1044,11 +1171,15 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                             checked={Boolean(act.sin_horario_limite)}
                             onChange={async (e) => {
                               const sinLim = e.target.checked;
-                              await onUpdateActividad({
+                              const res = await onUpdateActividad({
                                 ...act,
                                 sin_horario_limite: sinLim,
                                 hora_limite: sinLim ? null : act.hora_limite || '09:30',
                               });
+                              if (!res.ok) {
+                                fail(res.error);
+                                return;
+                              }
                               notify(
                                 sinLim
                                   ? `"${act.titulo}" marcada sin horario límite.`
@@ -1307,10 +1438,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
               </select>
               <button
                 type="submit"
-                className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white"
+                disabled={savingUser}
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
               >
                 <Plus className="h-3.5 w-3.5" />
-                Crear usuario
+                {savingUser ? 'Guardando...' : 'Crear usuario'}
               </button>
             </form>
           </section>
@@ -1439,16 +1571,24 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                           <button
                             type="button"
                             disabled={isSelf}
-                            onClick={() => {
+                            onClick={async () => {
                               const nextUsr = {
                                 ...draft,
                                 activo: !draft.activo,
                               };
-                              setUserDrafts((p) => ({
-                                ...p,
-                                [usr.id]: nextUsr,
-                              }));
-                              onSaveUsuario(nextUsr);
+                              const res = await onSaveUsuario(nextUsr, false);
+                              if (!res.ok) {
+                                fail(res.error);
+                                return;
+                              }
+                              setUserDrafts((p) => {
+                                const copy = { ...p };
+                                delete copy[usr.id];
+                                return copy;
+                              });
+                              notify(
+                                `Cuenta de ${nextUsr.nombre} ${nextUsr.activo ? 'activada' : 'desactivada'} en Supabase.`
+                              );
                             }}
                             className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold disabled:opacity-50 ${
                               draft.activo
@@ -1471,7 +1611,14 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                           {!isSelf && (
                             <button
                               type="button"
-                              onClick={() => onDeleteUsuario(usr.id)}
+                              onClick={async () => {
+                                const res = await onDeleteUsuario(usr.id);
+                                if (!res.ok) {
+                                  fail(res.error);
+                                  return;
+                                }
+                                notify(`Usuario ${usr.nombre} eliminado de Supabase.`);
+                              }}
                               className="inline-flex items-center p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
                               title="Eliminar usuario"
                             >
@@ -1502,7 +1649,12 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
           if (!deleteActTarget) return;
           setDeletingAct(true);
           try {
-            await onDeleteActividad(deleteActTarget);
+            const res = await onDeleteActividad(deleteActTarget);
+            if (!res.ok) {
+              fail(res.error);
+              setDeleteActTarget(null);
+              return;
+            }
             notify(`Actividad "${deleteActTarget.titulo}" eliminada.`);
             setDeleteActTarget(null);
           } finally {

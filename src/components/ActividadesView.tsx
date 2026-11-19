@@ -38,10 +38,10 @@ interface ActividadesViewProps {
   tareasCatalogo: TareaCatalogo[];
   onChangeDiaActivo: (dia: DiaSemana) => void;
   onSelectSucursal?: (id: string) => void;
-  onUpdateActividad: (updated: ActividadDiaria) => Promise<void>;
-  onCreateActividad: (nueva: ActividadDiaria) => Promise<void>;
-  onCreateActividadesBatch: (nuevas: ActividadDiaria[]) => Promise<void>;
-  onDeleteActividad: (actividad: ActividadDiaria) => Promise<void>;
+  onUpdateActividad: (updated: ActividadDiaria) => Promise<unknown>;
+  onCreateActividad: (nueva: ActividadDiaria) => Promise<unknown>;
+  onCreateActividadesBatch: (nuevas: ActividadDiaria[]) => Promise<unknown>;
+  onDeleteActividad: (actividad: ActividadDiaria) => Promise<unknown>;
   onDeleteEvidenciaActividad: (actividad: ActividadDiaria) => Promise<void>;
   onResetActividadPendiente: (actividad: ActividadDiaria) => Promise<void>;
   onGoToHorarios: () => void;

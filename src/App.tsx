@@ -23,7 +23,9 @@ import {
   UsuarioControlOps,
 } from './types/controlops';
 import {
+  ServiceResult,
   authenticateUsuario,
+  createUsuario,
   deleteActividadRecord,
   deleteEvidenciaFoto,
   deleteGastoORefrendoRecord,
@@ -34,15 +36,17 @@ import {
   loadAllOperationalData,
   resetDemoLocalData,
   saveActividad,
+  saveActividadesBatch,
   saveCatalogos,
   saveGastoORefrendo,
   saveHorarioDia,
+  saveHorariosBatch,
   saveLlamada,
   saveLlamadasBatch,
   saveMetaSucursal,
   saveSessionUser,
   saveSucursal,
-  saveUsuario,
+  updateUsuario,
 } from './services/controlOpsService';
 import {
   computeBranchSummaries,
@@ -134,6 +138,25 @@ export default function App() {
     setHorarios(loaded.horarios);
     setDataSource(loaded.source);
     setSupabaseWarning(loaded.warning);
+    if (loaded.warning) {
+      setSyncError(loaded.warning);
+    }
+    const savedUser = getSavedSessionUser();
+    if (savedUser && loaded.source === 'supabase' && loaded.usuarios.length > 0) {
+      const freshUser = loaded.usuarios.find((u) => u.id === savedUser.id);
+      if (freshUser) {
+        if (!freshUser.activo) {
+          setCurrentUser(null);
+          saveSessionUser(null);
+        } else {
+          setCurrentUser(freshUser);
+          saveSessionUser(freshUser);
+          if (freshUser.rol === 'cajera') {
+            setSelectedSucursalId(freshUser.sucursal_id);
+          }
+        }
+      }
+    }
     setLoading(false);
   }, []);
 
@@ -234,37 +257,57 @@ export default function App() {
     if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
-  const handleUpdateActividad = async (updated: ActividadDiaria) => {
+  const handleUpdateActividad = async (
+    updated: ActividadDiaria
+  ): Promise<ServiceResult> => {
     const next = actividades.map((a) => (a.id === updated.id ? updated : a));
-    setActividades(next);
     const res = await saveActividad(updated, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
-  };
-
-  const handleCreateActividad = async (nueva: ActividadDiaria) => {
-    const next = [nueva, ...actividades];
-    setActividades(next);
-    const res = await saveActividad(nueva, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
-  };
-
-  const handleCreateActividadesBatch = async (nuevas: ActividadDiaria[]) => {
-    if (nuevas.length === 0) return;
-    let next = [...nuevas, ...actividades];
-    setActividades(next);
-    for (const act of nuevas) {
-      const res = await saveActividad(act, next);
-      if (!res.ok && res.error) {
-        setSyncError(`Supabase (${res.error})`);
-      }
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
     }
+    setActividades(next);
+    return res;
   };
 
-  const handleDeleteActividad = async (actividad: ActividadDiaria) => {
-    const next = actividades.filter((a) => a.id !== actividad.id);
+  const handleCreateActividad = async (
+    nueva: ActividadDiaria
+  ): Promise<ServiceResult> => {
+    const next = [nueva, ...actividades];
+    const res = await saveActividad(nueva, next);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
     setActividades(next);
+    return res;
+  };
+
+  const handleCreateActividadesBatch = async (
+    nuevas: ActividadDiaria[]
+  ): Promise<ServiceResult> => {
+    if (nuevas.length === 0) return { ok: true };
+    const next = [...nuevas, ...actividades];
+    const res = await saveActividadesBatch(nuevas, next);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
+    setActividades(next);
+    return res;
+  };
+
+  const handleDeleteActividad = async (
+    actividad: ActividadDiaria
+  ): Promise<ServiceResult> => {
+    const next = actividades.filter((a) => a.id !== actividad.id);
     const res = await deleteActividadRecord(actividad, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
+    setActividades(next);
+    return res;
   };
 
   const handleDeleteEvidenciaActividad = async (actividad: ActividadDiaria) => {
@@ -299,16 +342,22 @@ export default function App() {
 
   const handleCreateGastoORefrendo = async (nuevo: GastoYRefrendo) => {
     const next = [nuevo, ...gastosYRefrendos];
-    setGastosYRefrendos(next);
     const res = await saveGastoORefrendo(nuevo, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    if (!res.ok && res.error) {
+      setSyncError(res.error);
+      return;
+    }
+    setGastosYRefrendos(next);
   };
 
   const handleDeleteGastoORefrendo = async (registro: GastoYRefrendo) => {
     const next = gastosYRefrendos.filter((r) => r.id !== registro.id);
-    setGastosYRefrendos(next);
     const res = await deleteGastoORefrendoRecord(registro, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    if (!res.ok && res.error) {
+      setSyncError(res.error);
+      return;
+    }
+    setGastosYRefrendos(next);
   };
 
   const handleDeleteEvidenciaRegistro = async (registro: GastoYRefrendo) => {
@@ -325,12 +374,17 @@ export default function App() {
     const next = gastosYRefrendos.map((r) =>
       r.id === updated.id ? updated : r
     );
-    setGastosYRefrendos(next);
     const res = await saveGastoORefrendo(updated, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    if (!res.ok && res.error) {
+      setSyncError(res.error);
+      return;
+    }
+    setGastosYRefrendos(next);
   };
 
-  const handleUpdateHorario = async (updated: HorarioSucursalDia) => {
+  const handleUpdateHorario = async (
+    updated: HorarioSucursalDia
+  ): Promise<ServiceResult> => {
     const exists = horarios.some(
       (h) => h.sucursal_id === updated.sucursal_id && h.dia === updated.dia
     );
@@ -342,9 +396,13 @@ export default function App() {
         )
       : [...horarios, updated];
 
-    setHorarios(next);
     const res = await saveHorarioDia(updated, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
+    setHorarios(next);
+    return res;
   };
 
   const handleApplyWeekdays = async (
@@ -352,7 +410,7 @@ export default function App() {
     horaActividad: string,
     horaCorte: string,
     sinLimite: boolean
-  ) => {
+  ): Promise<ServiceResult> => {
     const weekdays: DiaSemana[] = [
       'lunes',
       'martes',
@@ -361,6 +419,7 @@ export default function App() {
       'viernes',
     ];
     const next = [...horarios];
+    const targets: HorarioSucursalDia[] = [];
     for (const d of weekdays) {
       const target: HorarioSucursalDia = {
         id: `hor-${sucursalId}-${d}`,
@@ -370,69 +429,117 @@ export default function App() {
         hora_limite_corte: horaCorte,
         sin_horario_limite: sinLimite,
       };
+      targets.push(target);
       const idx = next.findIndex(
         (h) => h.sucursal_id === sucursalId && h.dia === d
       );
       if (idx >= 0) next[idx] = target;
       else next.push(target);
-      await saveHorarioDia(target, next);
+    }
+    const res = await saveHorariosBatch(targets, next);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
     }
     setHorarios(next);
+    return res;
   };
 
   // --- Admin Total (Creador) Handlers ---
-  const handleSaveSucursal = async (suc: Sucursal) => {
+  const handleSaveSucursal = async (suc: Sucursal): Promise<ServiceResult> => {
     const exists = sucursales.some((s) => s.id === suc.id);
     const next = exists
       ? sucursales.map((s) => (s.id === suc.id ? suc : s))
       : [...sucursales, suc];
-    setSucursales(next);
     const res = await saveSucursal(suc, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
-  };
-
-  const handleDeleteSucursal = async (id: string) => {
-    const next = sucursales.filter((s) => s.id !== id);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
     setSucursales(next);
-    const res = await deleteSucursalRecord(id, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    return res;
   };
 
-  const handleSaveMeta = async (meta: MetaSucursal) => {
+  const handleDeleteSucursal = async (id: string): Promise<ServiceResult> => {
+    const next = sucursales.filter((s) => s.id !== id);
+    const res = await deleteSucursalRecord(id, next);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
+    setSucursales(next);
+    return res;
+  };
+
+  const handleSaveMeta = async (
+    meta: MetaSucursal
+  ): Promise<ServiceResult> => {
     const exists = metas.some((m) => m.sucursal_id === meta.sucursal_id);
     const next = exists
       ? metas.map((m) => (m.sucursal_id === meta.sucursal_id ? meta : m))
       : [...metas, meta];
-    setMetas(next);
     const res = await saveMetaSucursal(meta, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
+    setMetas(next);
+    return res;
   };
 
-  const handleSaveCatalogos = async (nextCatalogos: CatalogosControlOps) => {
-    setCatalogos(nextCatalogos);
+  const handleSaveCatalogos = async (
+    nextCatalogos: CatalogosControlOps
+  ): Promise<ServiceResult> => {
     const res = await saveCatalogos(nextCatalogos);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
+    setCatalogos(nextCatalogos);
+    return res;
   };
 
-  const handleSaveUsuario = async (usr: UsuarioControlOps) => {
+  const handleSaveUsuario = async (
+    usr: UsuarioControlOps,
+    isNew = false
+  ): Promise<ServiceResult> => {
     const exists = usuarios.some((u) => u.id === usr.id);
     const next = exists
       ? usuarios.map((u) => (u.id === usr.id ? usr : u))
       : [...usuarios, usr];
-    setUsuarios(next);
-    if (currentUser && usr.id === currentUser.id) {
-      setCurrentUser(usr);
-      saveSessionUser(usr);
+
+    const res =
+      isNew || !exists
+        ? await createUsuario(usr, next)
+        : await updateUsuario(usr, next);
+
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
     }
-    const res = await saveUsuario(usr, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+
+    const saved = res.data || usr;
+    const syncedNext = exists
+      ? usuarios.map((u) => (u.id === saved.id ? saved : u))
+      : [...usuarios, saved];
+    setUsuarios(syncedNext);
+
+    if (currentUser && saved.id === currentUser.id) {
+      setCurrentUser(saved);
+      saveSessionUser(saved);
+    }
+    return res;
   };
 
-  const handleDeleteUsuario = async (id: string) => {
+  const handleDeleteUsuario = async (id: string): Promise<ServiceResult> => {
     const next = usuarios.filter((u) => u.id !== id);
-    setUsuarios(next);
     const res = await deleteUsuarioRecord(id, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
+    setUsuarios(next);
+    return res;
   };
 
   const handleQuickAction = (action: 'llamada' | 'evidencia' | 'gasto') => {
@@ -625,15 +732,18 @@ export default function App() {
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6">
           <div className="max-w-7xl mx-auto space-y-5">
             {syncError && (
-              <div className="rounded-xl px-4 py-3 bg-[#FFF1F2] border border-[#FECDD3] text-xs text-[#BE123C] flex items-center justify-between">
-                <span>
-                  Error al sincronizar con {syncError}. Verifica que las tablas
-                  estén creadas en Supabase sin bloqueo RLS.
-                </span>
+              <div
+                role="alert"
+                className="rounded-xl px-4 py-3 bg-[#FFF1F2] border border-[#FECDD3] text-xs text-[#BE123C] flex items-center justify-between gap-3"
+              >
+                <div>
+                  <span className="font-bold">Error de Supabase: </span>
+                  <span>{syncError}</span>
+                </div>
                 <button
                   type="button"
                   onClick={() => setSyncError(null)}
-                  className="font-semibold underline ml-3"
+                  className="font-semibold underline shrink-0"
                 >
                   Cerrar
                 </button>

@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { Clock, Check, Calendar } from 'lucide-react';
+import { Clock, Check, Calendar, AlertTriangle } from 'lucide-react';
 import { DiaSemana, HorarioSucursalDia, Sucursal } from '../types/controlops';
+import { ServiceResult } from '../services/controlOpsService';
 import { DIAS_SEMANA } from '../data/mockData';
 
 interface HorariosViewProps {
@@ -8,13 +9,13 @@ interface HorariosViewProps {
   horarios: HorarioSucursalDia[];
   selectedSucursalId: string;
   canEdit: boolean;
-  onUpdateHorario: (horario: HorarioSucursalDia) => Promise<void>;
+  onUpdateHorario: (horario: HorarioSucursalDia) => Promise<ServiceResult>;
   onApplyWeekdays: (
     sucursalId: string,
     horaActividad: string,
     horaCorte: string,
     sinLimite: boolean
-  ) => Promise<void>;
+  ) => Promise<ServiceResult>;
 }
 
 export const HorariosView: React.FC<HorariosViewProps> = ({
@@ -32,6 +33,7 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
   );
   const [dia, setDia] = useState<DiaSemana>('lunes');
   const [savedFeedback, setSavedFeedback] = useState<string | null>(null);
+  const [errorAlert, setErrorAlert] = useState<string | null>(null);
 
   const activeSucursalId =
     selectedSucursalId !== 'todas' ? selectedSucursalId : sucursalId;
@@ -71,6 +73,7 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
   }, [horarios, activeSucursalId]);
 
   const notifySaved = (msg: string) => {
+    setErrorAlert(null);
     setSavedFeedback(msg);
     setTimeout(() => setSavedFeedback(null), 2200);
   };
@@ -80,7 +83,11 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
       ...currentHorario,
       sin_horario_limite: !currentHorario.sin_horario_limite,
     };
-    await onUpdateHorario(updated);
+    const res = await onUpdateHorario(updated);
+    if (!res.ok) {
+      setErrorAlert(res.error || 'No se pudo guardar en horarios_sucursal.');
+      return;
+    }
     notifySaved(
       updated.sin_horario_limite
         ? 'Interruptor "Sin horario límite" activado.'
@@ -92,17 +99,42 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
     field: 'hora_limite_actividad' | 'hora_limite_corte',
     value: string
   ) => {
-    await onUpdateHorario({
+    const res = await onUpdateHorario({
       ...currentHorario,
       [field]: value,
     });
-    notifySaved('Horario actualizado.');
+    if (!res.ok) {
+      setErrorAlert(res.error || 'No se pudo guardar en horarios_sucursal.');
+      return;
+    }
+    notifySaved('Horario actualizado en Supabase.');
   };
 
   const activeBranchObj = sucursales.find((s) => s.id === activeSucursalId);
 
   return (
     <div className="space-y-6">
+      {errorAlert && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3 text-xs text-[#BE123C] flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-[#E11D48]" />
+            <span>
+              <strong>Error en horarios_sucursal:</strong> {errorAlert}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorAlert(null)}
+            className="font-semibold underline shrink-0"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
       {/* Configuration Panel */}
       <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 md:p-6 space-y-6">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[#F1ECF9] pb-4">
@@ -263,12 +295,18 @@ export const HorariosView: React.FC<HorariosViewProps> = ({
                   <button
                     type="button"
                     onClick={async () => {
-                      await onApplyWeekdays(
+                      const res = await onApplyWeekdays(
                         activeSucursalId,
                         currentHorario.hora_limite_actividad,
                         currentHorario.hora_limite_corte,
                         currentHorario.sin_horario_limite
                       );
+                      if (!res.ok) {
+                        setErrorAlert(
+                          res.error || 'No se pudo guardar en horarios_sucursal.'
+                        );
+                        return;
+                      }
                       notifySaved(
                         `Configuración aplicada de Lunes a Viernes para ${activeBranchObj?.nombre}.`
                       );

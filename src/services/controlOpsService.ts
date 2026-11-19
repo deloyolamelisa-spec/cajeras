@@ -50,6 +50,26 @@ export interface LoadedOperationalData {
   warning?: string;
 }
 
+export interface ServiceResult<T = unknown> {
+  ok: boolean;
+  error?: string;
+  data?: T;
+}
+
+function formatSupabaseError(err: {
+  message?: string;
+  details?: string | null;
+  hint?: string | null;
+  code?: string;
+}): string {
+  const parts: string[] = [];
+  if (err.code) parts.push(`[${err.code}]`);
+  if (err.message) parts.push(err.message);
+  if (err.details) parts.push(`Detalle: ${err.details}`);
+  if (err.hint) parts.push(`Sugerencia: ${err.hint}`);
+  return parts.join(' · ') || 'Error desconocido en Supabase';
+}
+
 function readLocal<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
@@ -89,7 +109,7 @@ export async function authenticateUsuario(
   password: string
 ): Promise<{ user: UsuarioControlOps | null; error?: string }> {
   const input = correoOrNombre.trim().toLowerCase();
-  const pass = password;
+  const pass = password.trim();
 
   if (!input || !pass) {
     return { user: null, error: 'Ingresa tu usuario/correo y contraseña.' };
@@ -102,31 +122,51 @@ export async function authenticateUsuario(
         .from(SUPABASE_TABLES.USUARIOS)
         .select('*');
 
-      if (!error && data && data.length > 0) {
-        const users = data as UsuarioControlOps[];
-        writeLocal(STORAGE_KEYS.USUARIOS, users);
-        const matched = users.find(
-          (u) =>
-            (u.correo.toLowerCase() === input ||
-              u.nombre.toLowerCase() === input) &&
-            u.password === pass
-        );
-        if (!matched) {
-          return {
-            user: null,
-            error: 'Usuario o contraseña incorrectos en usuarios_controlops.',
-          };
-        }
-        if (!matched.activo) {
-          return {
-            user: null,
-            error: 'Esta cuenta se encuentra desactivada. Contacta al Creador.',
-          };
-        }
-        return { user: matched };
+      if (error) {
+        return {
+          user: null,
+          error: `Error al consultar ${SUPABASE_TABLES.USUARIOS} en Supabase: ${formatSupabaseError(error)}`,
+        };
       }
-    } catch {
-      // Fallback gracefully to local users if table isn't created yet
+
+      const users = (data || []) as UsuarioControlOps[];
+      if (users.length === 0) {
+        return {
+          user: null,
+          error: `La tabla ${SUPABASE_TABLES.USUARIOS} en Supabase no tiene usuarios registrados.`,
+        };
+      }
+
+      writeLocal(STORAGE_KEYS.USUARIOS, users);
+
+      const matched = users.find((u) => {
+        const uCorreo = (u.correo || '').trim().toLowerCase();
+        const uNombre = (u.nombre || '').trim().toLowerCase();
+        const uPass = (u.password || '').trim();
+        return (uCorreo === input || uNombre === input) && uPass === pass;
+      });
+
+      if (!matched) {
+        return {
+          user: null,
+          error: `Usuario o contraseña incorrectos en ${SUPABASE_TABLES.USUARIOS}.`,
+        };
+      }
+      if (!matched.activo) {
+        return {
+          user: null,
+          error: 'Esta cuenta se encuentra desactivada. Contacta al Creador.',
+        };
+      }
+      return { user: matched };
+    } catch (err) {
+      return {
+        user: null,
+        error:
+          err instanceof Error
+            ? `Error de red al conectar con Supabase: ${err.message}`
+            : 'No se pudo conectar con Supabase para validar acceso.',
+      };
     }
   }
 
@@ -134,11 +174,12 @@ export async function authenticateUsuario(
     STORAGE_KEYS.USUARIOS,
     INITIAL_USUARIOS
   );
-  const matchedLocal = localUsers.find(
-    (u) =>
-      (u.correo.toLowerCase() === input || u.nombre.toLowerCase() === input) &&
-      u.password === pass
-  );
+  const matchedLocal = localUsers.find((u) => {
+    const uCorreo = (u.correo || '').trim().toLowerCase();
+    const uNombre = (u.nombre || '').trim().toLowerCase();
+    const uPass = (u.password || '').trim();
+    return (uCorreo === input || uNombre === input) && uPass === pass;
+  });
 
   if (!matchedLocal) {
     return { user: null, error: 'Usuario o contraseña incorrectos.' };
@@ -211,59 +252,115 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
       supabase.from(SUPABASE_TABLES.CATALOGOS).select('*'),
     ]);
 
+    const tableWarnings: string[] = [];
+    if (usuariosRes.error) {
+      tableWarnings.push(
+        `${SUPABASE_TABLES.USUARIOS}: ${usuariosRes.error.message}`
+      );
+    }
+    if (sucursalesRes.error) {
+      tableWarnings.push(
+        `${SUPABASE_TABLES.SUCURSALES}: ${sucursalesRes.error.message}`
+      );
+    }
+    if (metasRes.error) {
+      tableWarnings.push(`${SUPABASE_TABLES.METAS}: ${metasRes.error.message}`);
+    }
+    if (catalogosRes.error) {
+      tableWarnings.push(
+        `${SUPABASE_TABLES.CATALOGOS}: ${catalogosRes.error.message}`
+      );
+    }
+    if (horariosRes.error) {
+      tableWarnings.push(
+        `${SUPABASE_TABLES.HORARIOS}: ${horariosRes.error.message}`
+      );
+    }
+    if (llamadasRes.error) {
+      tableWarnings.push(
+        `${SUPABASE_TABLES.LLAMADAS}: ${llamadasRes.error.message}`
+      );
+    }
+    if (actividadesRes.error) {
+      tableWarnings.push(
+        `${SUPABASE_TABLES.ACTIVIDADES}: ${actividadesRes.error.message}`
+      );
+    }
+    if (gastosRes.error) {
+      tableWarnings.push(
+        `${SUPABASE_TABLES.GASTOS_REFRENDOS}: ${gastosRes.error.message}`
+      );
+    }
+
     const sucursales =
       !sucursalesRes.error && sucursalesRes.data && sucursalesRes.data.length > 0
         ? (sucursalesRes.data as Sucursal[])
         : readLocal(STORAGE_KEYS.SUCURSALES, INITIAL_SUCURSALES);
+    if (!sucursalesRes.error && sucursalesRes.data && sucursalesRes.data.length > 0) {
+      writeLocal(STORAGE_KEYS.SUCURSALES, sucursales);
+    }
 
     const metas =
       !metasRes.error && metasRes.data && metasRes.data.length > 0
         ? (metasRes.data as MetaSucursal[])
         : readLocal(STORAGE_KEYS.METAS, INITIAL_METAS_SUCURSAL);
+    if (!metasRes.error && metasRes.data && metasRes.data.length > 0) {
+      writeLocal(STORAGE_KEYS.METAS, metas);
+    }
 
     const usuarios =
-      !usuariosRes.error && usuariosRes.data && usuariosRes.data.length > 0
+      !usuariosRes.error && usuariosRes.data
         ? (usuariosRes.data as UsuarioControlOps[])
         : readLocal(STORAGE_KEYS.USUARIOS, INITIAL_USUARIOS);
+    if (!usuariosRes.error && usuariosRes.data) {
+      writeLocal(STORAGE_KEYS.USUARIOS, usuarios);
+    }
 
     const catalogos =
       !catalogosRes.error && catalogosRes.data && catalogosRes.data.length > 0
         ? (catalogosRes.data[0] as CatalogosControlOps)
         : readLocal(STORAGE_KEYS.CATALOGOS, INITIAL_CATALOGOS);
-
-    if (llamadasRes.error || actividadesRes.error || gastosRes.error) {
-      const errorMsg =
-        llamadasRes.error?.message ||
-        actividadesRes.error?.message ||
-        gastosRes.error?.message ||
-        'Error al consultar tablas de Supabase';
-
-      return {
-        ...localFallback(),
-        sucursales,
-        metas,
-        usuarios,
-        catalogos,
-        warning: `Conexión Supabase activa, pero algunas tablas aún no existen (${errorMsg}). Ejecuta el Script SQL actualizado.`,
-      };
+    if (!catalogosRes.error && catalogosRes.data && catalogosRes.data.length > 0) {
+      writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
     }
 
     const llamadas =
-      llamadasRes.data && llamadasRes.data.length > 0
+      !llamadasRes.error && llamadasRes.data && llamadasRes.data.length > 0
         ? (llamadasRes.data as LlamadaSucursal[])
-        : readLocal(STORAGE_KEYS.LLAMADAS, INITIAL_LLAMADAS);
+        : !llamadasRes.error && llamadasRes.data
+          ? []
+          : readLocal(STORAGE_KEYS.LLAMADAS, INITIAL_LLAMADAS);
+    if (!llamadasRes.error && llamadasRes.data) {
+      writeLocal(STORAGE_KEYS.LLAMADAS, llamadas);
+    }
+
     const actividades =
-      actividadesRes.data && actividadesRes.data.length > 0
+      !actividadesRes.error && actividadesRes.data && actividadesRes.data.length > 0
         ? (actividadesRes.data as ActividadDiaria[])
-        : readLocal(STORAGE_KEYS.ACTIVIDADES, INITIAL_ACTIVIDADES);
+        : !actividadesRes.error && actividadesRes.data
+          ? []
+          : readLocal(STORAGE_KEYS.ACTIVIDADES, INITIAL_ACTIVIDADES);
+    if (!actividadesRes.error && actividadesRes.data) {
+      writeLocal(STORAGE_KEYS.ACTIVIDADES, actividades);
+    }
+
     const gastosYRefrendos =
-      gastosRes.data && gastosRes.data.length > 0
+      !gastosRes.error && gastosRes.data && gastosRes.data.length > 0
         ? (gastosRes.data as GastoYRefrendo[])
-        : readLocal(STORAGE_KEYS.GASTOS_REFRENDOS, INITIAL_GASTOS_REFRENDOS);
+        : !gastosRes.error && gastosRes.data
+          ? []
+          : readLocal(STORAGE_KEYS.GASTOS_REFRENDOS, INITIAL_GASTOS_REFRENDOS);
+    if (!gastosRes.error && gastosRes.data) {
+      writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, gastosYRefrendos);
+    }
+
     const horarios =
       !horariosRes.error && horariosRes.data && horariosRes.data.length > 0
         ? (horariosRes.data as HorarioSucursalDia[])
         : readLocal(STORAGE_KEYS.HORARIOS, buildInitialHorarios(sucursales));
+    if (!horariosRes.error && horariosRes.data && horariosRes.data.length > 0) {
+      writeLocal(STORAGE_KEYS.HORARIOS, horarios);
+    }
 
     return {
       sucursales,
@@ -275,6 +372,10 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
       gastosYRefrendos,
       horarios,
       source: 'supabase',
+      warning:
+        tableWarnings.length > 0
+          ? `Algunas tablas de Supabase reportaron error: ${tableWarnings.join(' | ')}`
+          : undefined,
     };
   } catch (err) {
     return {
@@ -290,56 +391,59 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
 export async function saveLlamada(
   llamada: LlamadaSucursal,
   allLlamadas: LlamadaSucursal[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
+): Promise<ServiceResult> {
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.LLAMADAS)
-    .upsert(llamada, { onConflict: 'id' });
-
-  if (error) return { ok: false, error: error.message };
+  if (supabase && isSupabaseConfigured()) {
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.LLAMADAS)
+      .upsert(llamada, { onConflict: 'id' });
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
   return { ok: true };
 }
 
 export async function saveLlamadasBatch(
   nuevasLlamadas: LlamadaSucursal[],
   allLlamadas: LlamadaSucursal[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
+): Promise<ServiceResult> {
   if (nuevasLlamadas.length === 0) return { ok: true };
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.LLAMADAS)
-    .upsert(nuevasLlamadas, { onConflict: 'id' });
-
-  if (error) return { ok: false, error: error.message };
+  if (supabase && isSupabaseConfigured()) {
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.LLAMADAS)
+      .upsert(nuevasLlamadas, { onConflict: 'id' });
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
   return { ok: true };
 }
 
 export async function deleteLlamadaRecord(
   id: string,
   allLlamadas: LlamadaSucursal[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
+): Promise<ServiceResult> {
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.LLAMADAS)
-    .delete()
-    .eq('id', id);
-
-  if (error) return { ok: false, error: error.message };
+  if (supabase && isSupabaseConfigured()) {
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.LLAMADAS)
+      .delete()
+      .eq('id', id);
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
   return { ok: true };
 }
 
 export async function deleteEvidenciaFoto(
   evidenciaUrl: string | null | undefined
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<ServiceResult> {
   if (!evidenciaUrl) return { ok: true };
   const supabase = getSupabaseClient();
   if (!supabase || !isSupabaseConfigured()) return { ok: true };
@@ -361,188 +465,392 @@ export async function deleteEvidenciaFoto(
   return { ok: true };
 }
 
+function buildActividadPayload(actividad: ActividadDiaria) {
+  return {
+    id: actividad.id,
+    sucursal_id: actividad.sucursal_id,
+    sucursal_nombre: actividad.sucursal_nombre,
+    titulo: actividad.titulo,
+    descripcion: actividad.descripcion ?? '',
+    categoria: actividad.categoria,
+    responsable: actividad.responsable ?? '',
+    fecha: actividad.fecha,
+    dias_semana: actividad.dias_semana ?? [],
+    hora_limite: actividad.hora_limite ?? null,
+    sin_horario_limite: Boolean(actividad.sin_horario_limite),
+    hora_completada: actividad.hora_completada ?? null,
+    estatus: actividad.estatus,
+    evidencia_url: actividad.evidencia_url ?? null,
+    observaciones: actividad.observaciones ?? '',
+  };
+}
+
 export async function saveActividad(
   actividad: ActividadDiaria,
   allActividades: ActividadDiaria[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
+): Promise<ServiceResult> {
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
+  if (supabase && isSupabaseConfigured()) {
+    const payload = buildActividadPayload(actividad);
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.ACTIVIDADES)
+      .upsert(payload, { onConflict: 'id' });
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
+  return { ok: true };
+}
 
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.ACTIVIDADES)
-    .upsert(actividad, { onConflict: 'id' });
-
-  if (error) return { ok: false, error: error.message };
+export async function saveActividadesBatch(
+  nuevas: ActividadDiaria[],
+  allActividades: ActividadDiaria[]
+): Promise<ServiceResult> {
+  if (nuevas.length === 0) return { ok: true };
+  const supabase = getSupabaseClient();
+  if (supabase && isSupabaseConfigured()) {
+    const payloads = nuevas.map(buildActividadPayload);
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.ACTIVIDADES)
+      .upsert(payloads, { onConflict: 'id' });
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
   return { ok: true };
 }
 
 export async function deleteActividadRecord(
   actividad: ActividadDiaria,
   allActividades: ActividadDiaria[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
+): Promise<ServiceResult> {
+  const supabase = getSupabaseClient();
+  if (supabase && isSupabaseConfigured()) {
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.ACTIVIDADES)
+      .delete()
+      .eq('id', actividad.id);
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
   if (actividad.evidencia_url) {
     await deleteEvidenciaFoto(actividad.evidencia_url);
   }
-  const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.ACTIVIDADES)
-    .delete()
-    .eq('id', actividad.id);
-
-  if (error) return { ok: false, error: error.message };
+  writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
   return { ok: true };
 }
 
 export async function saveGastoORefrendo(
   registro: GastoYRefrendo,
   allRegistros: GastoYRefrendo[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, allRegistros);
+): Promise<ServiceResult> {
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
-    .upsert(registro, { onConflict: 'id' });
-
-  if (error) return { ok: false, error: error.message };
+  if (supabase && isSupabaseConfigured()) {
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
+      .upsert(registro, { onConflict: 'id' });
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, allRegistros);
   return { ok: true };
 }
 
 export async function deleteGastoORefrendoRecord(
   registro: GastoYRefrendo,
   allRegistros: GastoYRefrendo[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, allRegistros);
+): Promise<ServiceResult> {
+  const supabase = getSupabaseClient();
+  if (supabase && isSupabaseConfigured()) {
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
+      .delete()
+      .eq('id', registro.id);
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
   if (registro.evidencia_url) {
     await deleteEvidenciaFoto(registro.evidencia_url);
   }
-  const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
-    .delete()
-    .eq('id', registro.id);
-
-  if (error) return { ok: false, error: error.message };
+  writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, allRegistros);
   return { ok: true };
 }
 
 export async function saveHorarioDia(
   horario: HorarioSucursalDia,
   allHorarios: HorarioSucursalDia[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.HORARIOS, allHorarios);
+): Promise<ServiceResult> {
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
+  if (supabase && isSupabaseConfigured()) {
+    const payload = {
+      id: horario.id,
+      sucursal_id: horario.sucursal_id,
+      dia: horario.dia,
+      hora_limite_actividad: horario.hora_limite_actividad,
+      hora_limite_corte: horario.hora_limite_corte,
+      sin_horario_limite: Boolean(horario.sin_horario_limite),
+    };
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.HORARIOS)
+      .upsert(payload, { onConflict: 'id' });
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.HORARIOS, allHorarios);
+  return { ok: true };
+}
 
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.HORARIOS)
-    .upsert(horario, { onConflict: 'id' });
-
-  if (error) return { ok: false, error: error.message };
+export async function saveHorariosBatch(
+  targets: HorarioSucursalDia[],
+  allHorarios: HorarioSucursalDia[]
+): Promise<ServiceResult> {
+  if (targets.length === 0) return { ok: true };
+  const supabase = getSupabaseClient();
+  if (supabase && isSupabaseConfigured()) {
+    const payloads = targets.map((h) => ({
+      id: h.id,
+      sucursal_id: h.sucursal_id,
+      dia: h.dia,
+      hora_limite_actividad: h.hora_limite_actividad,
+      hora_limite_corte: h.hora_limite_corte,
+      sin_horario_limite: Boolean(h.sin_horario_limite),
+    }));
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.HORARIOS)
+      .upsert(payloads, { onConflict: 'id' });
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.HORARIOS, allHorarios);
   return { ok: true };
 }
 
 export async function saveSucursal(
   sucursal: Sucursal,
   allSucursales: Sucursal[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.SUCURSALES, allSucursales);
+): Promise<ServiceResult> {
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.SUCURSALES)
-    .upsert(sucursal, { onConflict: 'id' });
-
-  if (error) return { ok: false, error: error.message };
+  if (supabase && isSupabaseConfigured()) {
+    const payload = {
+      id: sucursal.id,
+      nombre: sucursal.nombre,
+      codigo: sucursal.codigo,
+      ciudad: sucursal.ciudad ?? '',
+      responsable_caja: sucursal.responsable_caja ?? '',
+      meta_llamadas_diarias: Number(sucursal.meta_llamadas_diarias) || 30,
+      meta_actividades_diarias: Number(sucursal.meta_actividades_diarias) || 5,
+      meta_refrendos_mensual: Number(sucursal.meta_refrendos_mensual) || 40,
+      techo_gasto_mensual: Number(sucursal.techo_gasto_mensual) || 0,
+      activa: Boolean(sucursal.activa),
+    };
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.SUCURSALES)
+      .upsert(payload, { onConflict: 'id' });
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.SUCURSALES, allSucursales);
   return { ok: true };
 }
 
 export async function deleteSucursalRecord(
   id: string,
   allSucursales: Sucursal[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.SUCURSALES, allSucursales);
+): Promise<ServiceResult> {
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.SUCURSALES)
-    .delete()
-    .eq('id', id);
-
-  if (error) return { ok: false, error: error.message };
+  if (supabase && isSupabaseConfigured()) {
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.SUCURSALES)
+      .delete()
+      .eq('id', id);
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.SUCURSALES, allSucursales);
   return { ok: true };
 }
 
 export async function saveMetaSucursal(
   meta: MetaSucursal,
   allMetas: MetaSucursal[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.METAS, allMetas);
+): Promise<ServiceResult> {
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.METAS)
-    .upsert(meta, { onConflict: 'id' });
-
-  if (error) return { ok: false, error: error.message };
+  if (supabase && isSupabaseConfigured()) {
+    const payload = {
+      id: meta.id,
+      sucursal_id: meta.sucursal_id,
+      meta_llamadas_diarias: Number(meta.meta_llamadas_diarias) || 30,
+      meta_actividades_diarias: Number(meta.meta_actividades_diarias) || 5,
+      meta_refrendos_mensual: Number(meta.meta_refrendos_mensual) || 40,
+      techo_gasto_mensual: Number(meta.techo_gasto_mensual) || 0,
+    };
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.METAS)
+      .upsert(payload, { onConflict: 'id' });
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.METAS, allMetas);
   return { ok: true };
 }
 
-export async function saveUsuario(
+function buildUsuarioInsertPayload(usuario: UsuarioControlOps) {
+  return {
+    id: usuario.id,
+    nombre: usuario.nombre.trim(),
+    correo: usuario.correo.trim().toLowerCase(),
+    password: usuario.password.trim(),
+    rol: usuario.rol,
+    sucursal_id: usuario.sucursal_id,
+    activo: Boolean(usuario.activo),
+  };
+}
+
+export async function createUsuario(
   usuario: UsuarioControlOps,
   allUsuarios: UsuarioControlOps[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.USUARIOS, allUsuarios);
+): Promise<ServiceResult<UsuarioControlOps>> {
+  const payload = buildUsuarioInsertPayload(usuario);
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
 
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.USUARIOS)
-    .upsert(usuario, { onConflict: 'id' });
+  if (supabase && isSupabaseConfigured()) {
+    const { data, error } = await supabase
+      .from(SUPABASE_TABLES.USUARIOS)
+      .insert(payload)
+      .select()
+      .single();
 
-  if (error) return { ok: false, error: error.message };
-  return { ok: true };
+    if (error) {
+      return {
+        ok: false,
+        error: `Error al insertar en ${SUPABASE_TABLES.USUARIOS}: ${formatSupabaseError(error)}`,
+      };
+    }
+
+    const savedUser = (data as UsuarioControlOps) || {
+      ...usuario,
+      ...payload,
+    };
+    const nextList = allUsuarios.map((u) =>
+      u.id === savedUser.id ? savedUser : u
+    );
+    writeLocal(STORAGE_KEYS.USUARIOS, nextList);
+    return { ok: true, data: savedUser };
+  }
+
+  writeLocal(STORAGE_KEYS.USUARIOS, allUsuarios);
+  return { ok: true, data: { ...usuario, ...payload } };
+}
+
+export async function updateUsuario(
+  usuario: UsuarioControlOps,
+  allUsuarios: UsuarioControlOps[]
+): Promise<ServiceResult<UsuarioControlOps>> {
+  const payload = buildUsuarioInsertPayload(usuario);
+  const supabase = getSupabaseClient();
+
+  if (supabase && isSupabaseConfigured()) {
+    const { data, error } = await supabase
+      .from(SUPABASE_TABLES.USUARIOS)
+      .update({
+        nombre: payload.nombre,
+        correo: payload.correo,
+        password: payload.password,
+        rol: payload.rol,
+        sucursal_id: payload.sucursal_id,
+        activo: payload.activo,
+      })
+      .eq('id', usuario.id)
+      .select();
+
+    if (error) {
+      return {
+        ok: false,
+        error: `Error al actualizar en ${SUPABASE_TABLES.USUARIOS}: ${formatSupabaseError(error)}`,
+      };
+    }
+
+    let savedUser: UsuarioControlOps | undefined = data?.[0] as
+      | UsuarioControlOps
+      | undefined;
+
+    // Si la fila aún no existía en Supabase, insertarla directamente
+    if (!savedUser) {
+      const { data: inserted, error: insertError } = await supabase
+        .from(SUPABASE_TABLES.USUARIOS)
+        .insert(payload)
+        .select()
+        .single();
+
+      if (insertError) {
+        return {
+          ok: false,
+          error: `Error al registrar usuario en ${SUPABASE_TABLES.USUARIOS}: ${formatSupabaseError(insertError)}`,
+        };
+      }
+      savedUser = inserted as UsuarioControlOps;
+    }
+
+    const nextList = allUsuarios.map((u) =>
+      u.id === savedUser!.id ? savedUser! : u
+    );
+    writeLocal(STORAGE_KEYS.USUARIOS, nextList);
+    return { ok: true, data: savedUser };
+  }
+
+  writeLocal(STORAGE_KEYS.USUARIOS, allUsuarios);
+  return { ok: true, data: { ...usuario, ...payload } };
 }
 
 export async function deleteUsuarioRecord(
   id: string,
   allUsuarios: UsuarioControlOps[]
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.USUARIOS, allUsuarios);
+): Promise<ServiceResult> {
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.USUARIOS)
-    .delete()
-    .eq('id', id);
-
-  if (error) return { ok: false, error: error.message };
+  if (supabase && isSupabaseConfigured()) {
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.USUARIOS)
+      .delete()
+      .eq('id', id);
+    if (error) {
+      return {
+        ok: false,
+        error: `Error al eliminar en ${SUPABASE_TABLES.USUARIOS}: ${formatSupabaseError(error)}`,
+      };
+    }
+  }
+  writeLocal(STORAGE_KEYS.USUARIOS, allUsuarios);
   return { ok: true };
 }
 
 export async function saveCatalogos(
   catalogos: CatalogosControlOps
-): Promise<{ ok: boolean; error?: string }> {
-  writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
+): Promise<ServiceResult> {
   const supabase = getSupabaseClient();
-  if (!supabase) return { ok: true };
-
-  const { error } = await supabase
-    .from(SUPABASE_TABLES.CATALOGOS)
-    .upsert(catalogos, { onConflict: 'id' });
-
-  if (error) return { ok: false, error: error.message };
+  if (supabase && isSupabaseConfigured()) {
+    const payload = {
+      id: catalogos.id || 'cat-global',
+      tareas_obligatorias: catalogos.tareas_obligatorias ?? [],
+      opciones_llamada: catalogos.opciones_llamada ?? [],
+    };
+    const { error } = await supabase
+      .from(SUPABASE_TABLES.CATALOGOS)
+      .upsert(payload, { onConflict: 'id' });
+    if (error) {
+      return { ok: false, error: formatSupabaseError(error) };
+    }
+  }
+  writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
   return { ok: true };
 }
 

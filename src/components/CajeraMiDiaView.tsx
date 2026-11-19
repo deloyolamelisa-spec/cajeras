@@ -41,7 +41,7 @@ interface CajeraMiDiaViewProps {
   gastosYRefrendos: GastoYRefrendo[];
   horarios: HorarioSucursalDia[];
   diaActivo: DiaSemana;
-  onUpdateActividad: (updated: ActividadDiaria) => Promise<void>;
+  onUpdateActividad: (updated: ActividadDiaria) => Promise<unknown>;
 }
 
 export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
