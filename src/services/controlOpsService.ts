@@ -303,6 +303,23 @@ export async function saveLlamada(
   return { ok: true };
 }
 
+export async function saveLlamadasBatch(
+  nuevasLlamadas: LlamadaSucursal[],
+  allLlamadas: LlamadaSucursal[]
+): Promise<{ ok: boolean; error?: string }> {
+  writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
+  if (nuevasLlamadas.length === 0) return { ok: true };
+  const supabase = getSupabaseClient();
+  if (!supabase) return { ok: true };
+
+  const { error } = await supabase
+    .from(SUPABASE_TABLES.LLAMADAS)
+    .upsert(nuevasLlamadas, { onConflict: 'id' });
+
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
 export async function deleteLlamadaRecord(
   id: string,
   allLlamadas: LlamadaSucursal[]

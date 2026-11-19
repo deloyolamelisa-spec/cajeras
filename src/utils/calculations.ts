@@ -47,10 +47,17 @@ export function getTodayDiaSemana(): DiaSemana {
   return map[dayIndex] ?? 'lunes';
 }
 
+export function getCurrentLocalHHMM(): string {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
 export function evaluarVencimientoActividad(
   actividad: ActividadDiaria,
   horario: HorarioSucursalDia | undefined,
-  horaActualReferencia = '11:30'
+  horaActualReferencia = getCurrentLocalHHMM()
 ): {
   etiqueta:
     | 'Sin horario límite'
@@ -182,7 +189,11 @@ export function computeBranchSummaries(
     const pctLlamadas = Math.min(100, (llamadasRegistradas / metaLlamadas) * 100);
 
     const actividadesSuc = actividades.filter(
-      (a) => a.sucursal_id === sucursal.id
+      (a) =>
+        a.sucursal_id === sucursal.id &&
+        (!a.dias_semana ||
+          a.dias_semana.length === 0 ||
+          a.dias_semana.includes(diaActivo))
     );
     const horarioDia = horarios.find(
       (h) => h.sucursal_id === sucursal.id && h.dia === diaActivo

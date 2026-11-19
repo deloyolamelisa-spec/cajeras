@@ -59,10 +59,17 @@ export const RankingView: React.FC<RankingViewProps> = ({
     );
     const excedidas = summaries.filter((s) => s.excedioPresupuesto).length;
     const dentroLimite = summaries.length - excedidas;
+    const totalActividadesCompletadas = summaries.reduce(
+      (acc, s) => acc + s.actividadesCompletadas,
+      0
+    );
+    const totalActividadesAsignadas = summaries.reduce(
+      (acc, s) => acc + s.actividadesTotal,
+      0
+    );
     const promedioActividades =
-      summaries.length > 0
-        ? summaries.reduce((acc, s) => acc + s.pctActividades, 0) /
-          summaries.length
+      totalActividadesAsignadas > 0
+        ? (totalActividadesCompletadas / totalActividadesAsignadas) * 100
         : 0;
 
     return {
@@ -73,6 +80,8 @@ export const RankingView: React.FC<RankingViewProps> = ({
       montoRefrendos,
       excedidas,
       dentroLimite,
+      totalActividadesCompletadas,
+      totalActividadesAsignadas,
       promedioActividades,
     };
   }, [summaries]);
@@ -108,15 +117,25 @@ export const RankingView: React.FC<RankingViewProps> = ({
       case 'actividades':
         return {
           pct: s.pctActividades,
-          display: `${s.actividadesCompletadas}/${s.actividadesTotal} (${formatPercent(s.pctActividades, 0)})`,
+          display:
+            s.actividadesTotal > 0
+              ? `${s.actividadesCompletadas}/${s.actividadesTotal} hoy (${formatPercent(s.pctActividades, 1)})`
+              : '0/0 hoy (Sin asignadas)',
           status:
-            s.pctActividades >= 80 && s.actividadesVencidas === 0
-              ? 'En meta'
-              : 'Por debajo',
+            s.actividadesTotal === 0
+              ? 'Sin asignadas'
+              : s.pctActividades >= 100
+                ? '100% completado'
+                : s.pctActividades >= 80 && s.actividadesVencidas === 0
+                  ? 'En avance'
+                  : 'Pendiente',
           tone:
-            s.pctActividades >= 80 && s.actividadesVencidas === 0
-              ? 'good'
-              : 'warn',
+            s.actividadesTotal === 0
+              ? 'warn'
+              : s.pctActividades >= 100 ||
+                  (s.pctActividades >= 80 && s.actividadesVencidas === 0)
+                ? 'good'
+                : 'warn',
         };
       case 'gastos':
         return {
@@ -166,14 +185,15 @@ export const RankingView: React.FC<RankingViewProps> = ({
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <div className="bg-white rounded-2xl border border-[#EAE3F5] p-5">
           <p className="text-xs font-medium text-[#7A6B93]">
-            Cumplimiento de actividades
+            Cumplimiento real de actividades hoy
           </p>
           <div className="mt-2 flex items-baseline justify-between">
             <span className="font-display text-2xl font-bold text-[#1F172B] tabular-nums">
-              {formatPercent(totals.promedioActividades, 0)}
+              {formatPercent(totals.promedioActividades, 1)}
             </span>
-            <span className="text-xs text-[#6E5F87]">
-              {summaries.length} sucursales activas
+            <span className="font-mono-num text-xs text-[#6E5F87]">
+              {totals.totalActividadesCompletadas}/
+              {totals.totalActividadesAsignadas} hoy
             </span>
           </div>
         </div>
@@ -248,7 +268,9 @@ export const RankingView: React.FC<RankingViewProps> = ({
             <p className="text-xs text-[#7A6B93] mt-0.5">
               {criterion === 'gastos'
                 ? 'Ordenadas de mejor disciplina presupuestal (bajo techo máximo) a mayor sobrecosto.'
-                : 'Ordenadas de mayor a menor desempeño según el indicador seleccionado.'}
+                : criterion === 'actividades'
+                  ? 'Porcentaje real calculado dinámicamente: (Completadas hoy / Asignadas hoy) × 100.'
+                  : 'Ordenadas de mayor a menor desempeño según el indicador seleccionado.'}
             </p>
           </div>
 
@@ -352,7 +374,9 @@ export const RankingView: React.FC<RankingViewProps> = ({
                 <div className="h-2.5 w-full rounded-full bg-[#EFE9F8] overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all duration-300 ${barColor}`}
-                    style={{ width: `${Math.max(4, Math.min(100, metric.pct))}%` }}
+                    style={{
+                      width: `${metric.pct <= 0 ? 0 : Math.max(3, Math.min(100, metric.pct))}%`,
+                    }}
                   />
                 </div>
               </div>
@@ -417,22 +441,26 @@ export const RankingView: React.FC<RankingViewProps> = ({
                     <td className="py-3.5 px-4 text-right tabular-nums">
                       <div className="font-mono-num font-medium text-[#1F172B]">
                         {item.actividadesCompletadas}/{item.actividadesTotal} (
-                        {formatPercent(item.pctActividades, 0)})
+                        {formatPercent(item.pctActividades, 1)})
                       </div>
                       <div
                         className={`text-xs ${
-                          item.actividadesVencidas > 0
-                            ? 'text-[#BE123C]'
-                            : item.pctActividades >= 80
-                              ? 'text-[#15803D]'
-                              : 'text-[#B45309]'
+                          item.actividadesTotal === 0
+                            ? 'text-[#8B7CA5]'
+                            : item.actividadesVencidas > 0
+                              ? 'text-[#BE123C]'
+                              : item.pctActividades >= 100
+                                ? 'text-[#15803D]'
+                                : 'text-[#B45309]'
                         }`}
                       >
-                        {item.actividadesVencidas > 0
-                          ? `${item.actividadesVencidas} vencida(s)`
-                          : item.pctActividades >= 80
-                            ? 'En meta'
-                            : 'Por debajo'}
+                        {item.actividadesTotal === 0
+                          ? 'Sin actividades hoy'
+                          : item.actividadesVencidas > 0
+                            ? `${item.actividadesVencidas} fuera de horario`
+                            : item.pctActividades >= 100
+                              ? 'Completado 100%'
+                              : 'En progreso'}
                       </div>
                     </td>
 

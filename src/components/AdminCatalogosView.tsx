@@ -1021,7 +1021,44 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                         </p>
                       )}
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <div className="flex items-center gap-1.5 bg-[#FAF8FC] border border-[#EAE3F5] rounded-lg px-2 py-1">
+                        <input
+                          type="time"
+                          aria-label={`Hora límite de ${act.titulo}`}
+                          disabled={Boolean(act.sin_horario_limite)}
+                          value={act.hora_limite || '09:30'}
+                          onChange={async (e) => {
+                            await onUpdateActividad({
+                              ...act,
+                              hora_limite: e.target.value,
+                              sin_horario_limite: false,
+                            });
+                            notify(`Horario de "${act.titulo}" actualizado a ${e.target.value}.`);
+                          }}
+                          className="text-[11px] font-mono-num bg-transparent focus:outline-none disabled:opacity-45"
+                        />
+                        <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#5B21B6] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(act.sin_horario_limite)}
+                            onChange={async (e) => {
+                              const sinLim = e.target.checked;
+                              await onUpdateActividad({
+                                ...act,
+                                sin_horario_limite: sinLim,
+                                hora_limite: sinLim ? null : act.hora_limite || '09:30',
+                              });
+                              notify(
+                                sinLim
+                                  ? `"${act.titulo}" marcada sin horario límite.`
+                                  : `Horario límite reactivado en "${act.titulo}".`
+                              );
+                            }}
+                          />
+                          Sin límite
+                        </label>
+                      </div>
                       <button
                         type="button"
                         onClick={() => {

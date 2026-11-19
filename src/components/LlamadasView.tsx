@@ -10,7 +10,12 @@ import {
   Save,
   X,
   Trash2,
+  Upload,
+  Download,
+  FileSpreadsheet,
+  AlertCircle,
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import {
   EstatusAuditoriaLlamada,
   EstatusVencimiento,
@@ -30,9 +35,47 @@ interface LlamadasViewProps {
   opcionesReporte: string[];
   onUpdateLlamada: (updated: LlamadaSucursal) => Promise<void>;
   onCreateLlamada: (nueva: LlamadaSucursal) => Promise<void>;
+  onImportLlamadas: (nuevas: LlamadaSucursal[]) => Promise<void>;
   onDeleteLlamada: (id: string) => Promise<void>;
+  onSelectSucursal?: (id: string) => void;
   openCreateModalExternal?: boolean;
   onCloseCreateModalExternal?: () => void;
+}
+
+function normalizeText(val: string): string {
+  return val
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+function parseExcelOrStringDate(raw: unknown): string {
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
+    return raw.toISOString().slice(0, 10);
+  }
+  if (typeof raw === 'number' && raw > 20000 && raw < 80000) {
+    const utcDays = Math.floor(raw - 25569);
+    const d = new Date(utcDays * 86400 * 1000);
+    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
+  const str = String(raw || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(str)) return str.slice(0, 10);
+  const dmy = str.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+  if (dmy) {
+    return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+  }
+  return new Date().toISOString().slice(0, 10);
+}
+
+function computeVencimientoFromDate(fechaVenc: string): EstatusVencimiento {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (fechaVenc < todayStr) return 'Vencido';
+  const today = new Date(`${todayStr}T00:00:00`);
+  const due = new Date(`${fechaVenc}T00:00:00`);
+  const diffDays = (due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24);
+  if (diffDays <= 3) return 'Por vencer';
+  return 'Al corriente';
 }
 
 export const LlamadasView: React.FC<LlamadasViewProps> = ({
@@ -43,7 +86,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   opcionesReporte,
   onUpdateLlamada,
   onCreateLlamada,
+  onImportLlamadas,
   onDeleteLlamada,
+  onSelectSucursal,
   openCreateModalExternal = false,
   onCloseCreateModalExternal,
 }) => {
@@ -66,6 +111,16 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     null
   );
   const [deleting, setDeleting] = useState(false);
+
+  // Import cartera modal state
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importFileName, setImportFileName] = useState<string>('');
+  const [parsedImportRows, setParsedImportRows] = useState<LlamadaSucursal[]>(
+    []
+  );
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
+  const [importing, setImporting] = useState(false);
+  const [importToast, setImportToast] = useState<string | null>(null);
 
   // Form state for new call
   const defaultSucursal =
@@ -236,6 +291,197 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     closeModal();
   };
 
+  const handleDownloadTemplateCSV = () => {
+    const sampleBranches = sucursales.filter((s) => s.activa).slice(0, 3);
+    const b1 = sampleBranches[0]?.nombre || 'Sucursal Centro';
+    const b2 = sampleBranches[1]?.nombre || 'Sucursal Norte';
+    const b3 = sampleBranches[2]?.nombre || 'Sucursal Sur';
+    const today = new Date();
+    const fmt = (offsetDays: number) => {
+      const d = new Date(today.getTime() + offsetDays * 86400000);
+      return d.toISOString().slice(0, 10);
+    };
+    const rows = [
+      ['sucursal', 'cliente', 'contrato', 'telefono', 'monto_prestamo', 'fecha_vencimiento'],
+      [b1, 'María Fernanda López', 'CTR-2026-8801', '5512345678', '12500', fmt(-2)],
+      [b2, 'José Luis Hernández', 'NOR-2026-8802', '5587654321', '7400', fmt(1)],
+      [b3, 'Ana Karen Ramírez', 'SUR-2026-8803', '5544332211', '18900', fmt(6)],
+    ];
+    const csvContent =
+      '\uFEFF' +
+      rows
+        .map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+        .join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'plantilla_llamadas_controlops.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const matchSucursalByInput = (raw: string): Sucursal | undefined => {
+    const clean = normalizeText(raw);
+    if (!clean) return undefined;
+    const active = sucursales.filter((s) => s.activa);
+    return (
+      active.find((s) => normalizeText(s.id) === clean) ||
+      active.find((s) => normalizeText(s.codigo) === clean) ||
+      active.find((s) => normalizeText(s.nombre) === clean) ||
+      active.find((s) =>
+        normalizeText(s.nombre).replace(/^sucursal\s+/, '') ===
+        clean.replace(/^sucursal\s+/, '')
+      ) ||
+      active.find((s) => normalizeText(s.nombre).includes(clean))
+    );
+  };
+
+  const handleImportFileChange = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setImportFileName(file.name);
+    setImportWarnings([]);
+    setParsedImportRows([]);
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(
+        firstSheet,
+        { defval: '' }
+      );
+
+      if (rawRows.length === 0) {
+        setImportWarnings([
+          'El archivo no contiene filas de datos debajo de los encabezados.',
+        ]);
+        return;
+      }
+
+      const warnings: string[] = [];
+      const built: LlamadaSucursal[] = [];
+      const nowIso = new Date().toISOString();
+
+      rawRows.forEach((raw, idx) => {
+        const normalized: Record<string, unknown> = {};
+        Object.entries(raw).forEach(([k, v]) => {
+          normalized[normalizeText(k).replace(/\s+/g, '_')] = v;
+        });
+
+        const sucursalText = String(
+          normalized.sucursal ??
+            normalized.sucursal_nombre ??
+            normalized.sucursal_id ??
+            normalized.tienda ??
+            ''
+        ).trim();
+        const cliente = String(
+          normalized.cliente ??
+            normalized.cliente_nombre ??
+            normalized.nombre ??
+            ''
+        ).trim();
+        const contrato = String(normalized.contrato ?? '').trim();
+        const telefonoRaw = String(
+          normalized.telefono ?? normalized.celular ?? normalized.tel ?? ''
+        ).replace(/\D/g, '');
+        const montoRaw = String(
+          normalized.monto_prestamo ?? normalized.monto ?? '0'
+        ).replace(/[^0-9.]/g, '');
+        const fechaVenc = parseExcelOrStringDate(
+          normalized.fecha_vencimiento ?? normalized.vencimiento ?? ''
+        );
+        const estatusRaw = normalizeText(
+          String(normalized.estatus_vencimiento ?? '')
+        );
+
+        if (!cliente || !telefonoRaw) {
+          warnings.push(
+            `Fila ${idx + 2}: omitida porque falta "cliente" o "telefono".`
+          );
+          return;
+        }
+
+        const matchedSuc =
+          matchSucursalByInput(sucursalText) ||
+          (selectedSucursalId !== 'todas'
+            ? sucursales.find((s) => s.id === selectedSucursalId)
+            : undefined);
+
+        if (!matchedSuc) {
+          warnings.push(
+            `Fila ${idx + 2} (${cliente}): no se encontró la sucursal "${sucursalText || 'vacía'}".`
+          );
+          return;
+        }
+
+        const estatusVenc: EstatusVencimiento =
+          estatusRaw === 'vencido'
+            ? 'Vencido'
+            : estatusRaw === 'por vencer'
+              ? 'Por vencer'
+              : estatusRaw === 'al corriente'
+                ? 'Al corriente'
+                : computeVencimientoFromDate(fechaVenc);
+
+        built.push({
+          id: `ll-imp-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+          sucursal_id: matchedSuc.id,
+          sucursal_nombre: matchedSuc.nombre,
+          cliente_nombre: cliente,
+          contrato:
+            contrato ||
+            `${matchedSuc.codigo.split('-')[0]}-2026-${Math.floor(1000 + Math.random() * 9000)}`,
+          telefono: telefonoRaw,
+          monto_prestamo: Number(montoRaw) || 0,
+          estatus_vencimiento: estatusVenc,
+          fecha_vencimiento: fechaVenc,
+          reporte_cajera: 'Sin reporte',
+          estatus_auditoria: 'Sin auditar',
+          observaciones_admin: '',
+          cajera_nombre: matchedSuc.responsable_caja,
+          llamada_registrada: false,
+          fecha_registro: nowIso,
+        });
+      });
+
+      setParsedImportRows(built);
+      setImportWarnings(warnings);
+    } catch (err) {
+      setImportWarnings([
+        err instanceof Error
+          ? `No se pudo leer el archivo: ${err.message}`
+          : 'Formato de archivo inválido. Usa .csv o .xlsx.',
+      ]);
+    }
+  };
+
+  const handleConfirmImport = async () => {
+    if (parsedImportRows.length === 0) return;
+    setImporting(true);
+    try {
+      await onImportLlamadas(parsedImportRows);
+      setImportToast(
+        `${parsedImportRows.length} registro(s) importados y guardados en llamadas_sucursal.`
+      );
+      setShowImportModal(false);
+      setParsedImportRows([]);
+      setImportWarnings([]);
+      setImportFileName('');
+      setTimeout(() => setImportToast(null), 4000);
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Daily Goal Progress & Action Header */}
@@ -266,22 +512,53 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
             </p>
           </div>
 
-          {isCajera ? (
-            <button
-              type="button"
-              onClick={() => setShowNewModal(true)}
-              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap shrink-0"
-            >
-              <Plus className="h-4 w-4" />
-              Registrar llamada
-            </button>
-          ) : (
-            <span className="px-3 py-1.5 rounded-xl text-xs font-medium bg-[#FAF7FE] text-[#6D28D9] border border-[#EAE3F5] shrink-0">
-              {isCreador ? 'Modo Control y Auditoría' : 'Modo Auditoría'}
-            </span>
-          )}
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            {canAudit && (
+              <button
+                type="button"
+                onClick={() => {
+                  setParsedImportRows([]);
+                  setImportWarnings([]);
+                  setImportFileName('');
+                  setShowImportModal(true);
+                }}
+                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#C4B5FD] transition-colors whitespace-nowrap"
+              >
+                <FileSpreadsheet className="h-4 w-4 text-[#DB2777]" />
+                Importar cartera (.csv / .xlsx)
+              </button>
+            )}
+
+            {isCajera ? (
+              <button
+                type="button"
+                onClick={() => setShowNewModal(true)}
+                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap"
+              >
+                <Plus className="h-4 w-4" />
+                Registrar llamada
+              </button>
+            ) : (
+              <span className="px-3 py-1.5 rounded-xl text-xs font-medium bg-[#FAF7FE] text-[#6D28D9] border border-[#EAE3F5]">
+                {isCreador ? 'Modo Control y Auditoría' : 'Modo Auditoría'}
+              </span>
+            )}
+          </div>
         </div>
       </section>
+
+      {importToast && (
+        <div className="rounded-xl px-4 py-3 bg-[#F0FDF4] border border-[#BBF7D0] text-xs font-semibold text-[#15803D] flex items-center justify-between">
+          <span>{importToast}</span>
+          <button
+            type="button"
+            onClick={() => setImportToast(null)}
+            className="underline ml-3"
+          >
+            Ocultar
+          </button>
+        </div>
+      )}
 
       {/* 4 Metric Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -313,7 +590,11 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
       {/* Search & Multi-Filters */}
       <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 md:p-5 space-y-3">
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+        <div
+          className={`grid grid-cols-1 md:grid-cols-2 gap-3 ${
+            canAudit && onSelectSucursal ? 'xl:grid-cols-6' : 'xl:grid-cols-5'
+          }`}
+        >
           <div className="xl:col-span-2 relative">
             <Search className="h-4 w-4 text-[#8B7CA5] absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
@@ -324,6 +605,24 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
               className="w-full pl-10 pr-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-sm text-[#1F172B] placeholder:text-[#9D8FB5] focus:outline-none focus:border-[#8B5CF6] focus:bg-white"
             />
           </div>
+
+          {canAudit && onSelectSucursal && (
+            <select
+              aria-label="Filtrar llamadas por sucursal"
+              value={selectedSucursalId}
+              onChange={(e) => onSelectSucursal(e.target.value)}
+              className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#5B21B6] focus:outline-none focus:border-[#8B5CF6]"
+            >
+              <option value="todas">Sucursal: Todas</option>
+              {sucursales
+                .filter((s) => s.activa)
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.nombre}
+                  </option>
+                ))}
+            </select>
+          )}
 
           <select
             aria-label="Filtrar por estatus de llamada"
@@ -864,6 +1163,184 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
           </div>
         </div>
       )}
+      {/* Import Cartera Modal (.csv / .xlsx) */}
+      {canAudit && showImportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/45 backdrop-blur-[2px]">
+          <div className="w-full max-w-3xl max-h-[90vh] flex flex-col rounded-2xl bg-white border border-[#E6DDF5] shadow-xl overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#F1ECF9]">
+              <div className="flex items-center gap-2.5">
+                <FileSpreadsheet className="h-5 w-5 text-[#7C3AED]" />
+                <div>
+                  <h3 className="font-display text-base font-bold text-[#1F172B]">
+                    Importar base de llamadas (.csv o Excel .xlsx)
+                  </h3>
+                  <p className="text-xs text-[#7A6B93]">
+                    Los registros se asignarán automáticamente a su sucursal en Supabase.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowImportModal(false)}
+                className="p-1.5 rounded-lg text-[#6E5F87] hover:bg-[#F5F0FC]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-5">
+              {/* Visual Required Headers Guide */}
+              <div className="rounded-xl border border-[#DDD6FE] bg-[#FAF7FE] p-4 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-xs font-bold text-[#4C1D95]">
+                      Guía de encabezados exactos requeridos
+                    </h4>
+                    <p className="text-[11px] text-[#6E5F87]">
+                      La primera fila de tu archivo debe incluir estas 6 columnas exactas (opcional: <code className="font-mono">estatus_vencimiento</code>).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleDownloadTemplateCSV}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#C4B5FD] transition-colors shrink-0"
+                  >
+                    <Download className="h-3.5 w-3.5 text-[#DB2777]" />
+                    Descargar plantilla de ejemplo (.csv)
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {[
+                    { col: 'sucursal', ex: 'Sucursal Centro o SUC-01' },
+                    { col: 'cliente', ex: 'María Fernanda López' },
+                    { col: 'contrato', ex: 'CTR-2026-8801' },
+                    { col: 'telefono', ex: '5512345678 (10 dígitos)' },
+                    { col: 'monto_prestamo', ex: '12500 (solo número)' },
+                    { col: 'fecha_vencimiento', ex: '2026-11-25 (AAAA-MM-DD)' },
+                  ].map((item) => (
+                    <div
+                      key={item.col}
+                      className="rounded-lg bg-white border border-[#EAE3F5] px-3 py-2"
+                    >
+                      <code className="text-xs font-bold text-[#DB2777]">
+                        {item.col}
+                      </code>
+                      <p className="text-[11px] text-[#6E5F87] truncate mt-0.5">
+                        Ej. {item.ex}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* File Picker */}
+              <label className="flex flex-col items-center justify-center gap-2 px-6 py-6 rounded-xl border-2 border-dashed border-[#C4B5FD] bg-[#FCFAFE] hover:bg-[#F3ECFC]/60 cursor-pointer transition-colors text-center">
+                <Upload className="h-6 w-6 text-[#7C3AED]" />
+                <div className="text-xs font-semibold text-[#1F172B]">
+                  {importFileName
+                    ? `Archivo seleccionado: ${importFileName}`
+                    : 'Haz clic para seleccionar tu archivo .csv o .xlsx'}
+                </div>
+                <p className="text-[11px] text-[#7A6B93]">
+                  Soporta libros de Excel (.xlsx, .xls) y archivos CSV separados por comas.
+                </p>
+                <input
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  className="hidden"
+                  onChange={handleImportFileChange}
+                />
+              </label>
+
+              {importWarnings.length > 0 && (
+                <div className="rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-3.5 space-y-1">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-[#B45309]">
+                    <AlertCircle className="h-4 w-4" />
+                    Observaciones al leer el archivo ({importWarnings.length})
+                  </div>
+                  <ul className="list-disc list-inside text-[11px] text-[#92400E] space-y-0.5 max-h-24 overflow-y-auto">
+                    {importWarnings.map((w, i) => (
+                      <li key={i}>{w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Preview Table */}
+              {parsedImportRows.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-[#15803D]">
+                      Vista previa lista para importar: {parsedImportRows.length} cliente(s)
+                    </span>
+                  </div>
+                  <div className="max-h-56 overflow-auto border border-[#EAE3F5] rounded-xl">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-[#FAF8FC] border-b border-[#F1ECF9] text-[#6E5F87]">
+                          <th className="py-2 px-3">Sucursal</th>
+                          <th className="py-2 px-3">Cliente</th>
+                          <th className="py-2 px-3">Contrato</th>
+                          <th className="py-2 px-3">Teléfono</th>
+                          <th className="py-2 px-3 text-right">Monto</th>
+                          <th className="py-2 px-3">Vencimiento</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#F3EEF9]">
+                        {parsedImportRows.slice(0, 50).map((row) => (
+                          <tr key={row.id}>
+                            <td className="py-2 px-3 font-medium text-[#5B21B6]">
+                              {row.sucursal_nombre}
+                            </td>
+                            <td className="py-2 px-3 font-semibold text-[#1F172B]">
+                              {row.cliente_nombre}
+                            </td>
+                            <td className="py-2 px-3 font-mono-num">
+                              {row.contrato}
+                            </td>
+                            <td className="py-2 px-3 font-mono-num">
+                              {row.telefono}
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono-num">
+                              {formatMXN(row.monto_prestamo)}
+                            </td>
+                            <td className="py-2 px-3 font-mono-num">
+                              {row.fecha_vencimiento} ({row.estatus_vencimiento})
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-[#F1ECF9] bg-[#FAF8FC]">
+              <button
+                type="button"
+                onClick={() => setShowImportModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-[#6E5F87] hover:bg-white border border-[#E6DDF5]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={importing || parsedImportRows.length === 0}
+                onClick={handleConfirmImport}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                {importing
+                  ? 'Importando a Supabase...'
+                  : `Importar ${parsedImportRows.length} llamada(s)`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Confirm Delete Modal (Creador only) */}
       <ConfirmDeleteModal
         open={Boolean(deleteTarget)}

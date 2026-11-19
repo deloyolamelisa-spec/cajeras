@@ -11,6 +11,8 @@ import {
   Trash2,
   Pencil,
   RotateCcw,
+  Save,
+  Maximize2,
 } from 'lucide-react';
 import {
   ActividadDiaria,
@@ -35,6 +37,7 @@ interface ActividadesViewProps {
   userRole: RolUsuario;
   tareasCatalogo: TareaCatalogo[];
   onChangeDiaActivo: (dia: DiaSemana) => void;
+  onSelectSucursal?: (id: string) => void;
   onUpdateActividad: (updated: ActividadDiaria) => Promise<void>;
   onCreateActividad: (nueva: ActividadDiaria) => Promise<void>;
   onCreateActividadesBatch: (nuevas: ActividadDiaria[]) => Promise<void>;
@@ -75,6 +78,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   userRole,
   tareasCatalogo,
   onChangeDiaActivo,
+  onSelectSucursal,
   onUpdateActividad,
   onCreateActividad,
   onCreateActividadesBatch,
@@ -88,8 +92,16 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   const isCajera = userRole === 'cajera';
   const isCreador = userRole === 'creador';
   const isSupervisor = userRole === 'supervisor';
+  const isAuditor = isCreador || isSupervisor;
 
   const [filterEstatus, setFilterEstatus] = useState<string>('todas');
+  const [filterFecha, setFilterFecha] = useState<string>('');
+  const [draftObs, setDraftObs] = useState<Record<string, string>>({});
+  const [savedObsId, setSavedObsId] = useState<string | null>(null);
+  const [inlineTimeDrafts, setInlineTimeDrafts] = useState<
+    Record<string, { hora_limite: string; sin_horario_limite: boolean }>
+  >({});
+  const [savedTimeId, setSavedTimeId] = useState<string | null>(null);
   const [uploadingId, setUploadingId] = useState<string | null>(null);
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<{
@@ -184,21 +196,31 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
       if (selectedSucursalId !== 'todas' && a.sucursal_id !== selectedSucursalId) {
         return false;
       }
+      if (filterFecha && a.fecha !== filterFecha) {
+        return false;
+      }
       if (a.dias_semana && a.dias_semana.length > 0) {
         return a.dias_semana.includes(diaActivo);
       }
       return true;
     });
-  }, [actividades, selectedSucursalId, diaActivo]);
+  }, [actividades, selectedSucursalId, filterFecha, diaActivo]);
 
   const scopedActividades = useMemo(() => {
     return dayScopedActividades.filter((a) => {
-      if (filterEstatus !== 'todas' && a.estatus !== filterEstatus) {
-        return false;
+      if (filterEstatus === 'todas') return true;
+      if (filterEstatus === 'fuera_horario') {
+        const h = horarios.find(
+          (hor) => hor.sucursal_id === a.sucursal_id && hor.dia === diaActivo
+        );
+        const ev = evaluarVencimientoActividad(a, h);
+        return (
+          ev.etiqueta === 'Vencida' || ev.etiqueta === 'Completada con retraso'
+        );
       }
-      return true;
+      return a.estatus === filterEstatus;
     });
-  }, [dayScopedActividades, filterEstatus]);
+  }, [dayScopedActividades, filterEstatus, horarios, diaActivo]);
 
   const stats = useMemo(() => {
     const base = dayScopedActividades;
@@ -208,7 +230,10 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
       const h = horarios.find(
         (hor) => hor.sucursal_id === a.sucursal_id && hor.dia === diaActivo
       );
-      return evaluarVencimientoActividad(a, h).vencidaPorHora;
+      const ev = evaluarVencimientoActividad(a, h);
+      return (
+        ev.vencidaPorHora || ev.etiqueta === 'Completada con retraso'
+      );
     }).length;
     const conEvidencia = base.filter((a) => Boolean(a.evidencia_url)).length;
 
@@ -403,6 +428,36 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
     });
   };
 
+  const handleSaveInlineObs = async (act: ActividadDiaria) => {
+    const nextObs =
+      draftObs[act.id] !== undefined ? draftObs[act.id] : act.observaciones;
+    await onUpdateActividad({
+      ...act,
+      observaciones: nextObs,
+    });
+    setSavedObsId(act.id);
+    setTimeout(() => setSavedObsId(null), 1600);
+  };
+
+  const handleSaveInlineDeadline = async (act: ActividadDiaria) => {
+    const draft = inlineTimeDrafts[act.id];
+    if (!draft) return;
+    await onUpdateActividad({
+      ...act,
+      hora_limite: draft.sin_horario_limite
+        ? null
+        : draft.hora_limite || '09:30',
+      sin_horario_limite: draft.sin_horario_limite,
+    });
+    setSavedTimeId(act.id);
+    setUploadNotice(
+      draft.sin_horario_limite
+        ? `"${act.titulo}" marcada como Sin horario límite.`
+        : `Horario límite de "${act.titulo}" actualizado a las ${draft.hora_limite}.`
+    );
+    setTimeout(() => setSavedTimeId(null), 1600);
+  };
+
   return (
     <div className="space-y-6">
       {/* Hidden shared file input (Cajera only) */}
@@ -546,31 +601,91 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
         </div>
       </div>
 
-      {/* Filter Tabs */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-1 p-1 bg-white border border-[#EAE3F5] rounded-xl">
-          {(['todas', 'Pendiente', 'Completada', 'Observada'] as const).map(
-            (st) => (
+      {/* Audit & Status Quick Filters */}
+      <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-1 p-1 bg-[#FAF8FC] border border-[#EAE3F5] rounded-xl">
+            {(
+              [
+                { id: 'todas', label: 'Todas' },
+                { id: 'Completada', label: 'Completada' },
+                { id: 'Pendiente', label: 'Pendiente' },
+                { id: 'fuera_horario', label: 'Fuera de horario' },
+                { id: 'Observada', label: 'Observada' },
+              ] as const
+            ).map((st) => (
               <button
-                key={st}
+                key={st.id}
                 type="button"
-                onClick={() => setFilterEstatus(st)}
+                onClick={() => setFilterEstatus(st.id)}
                 className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                  filterEstatus === st
-                    ? 'bg-[#F3ECFC] text-[#5B21B6]'
+                  filterEstatus === st.id
+                    ? 'bg-[#F3ECFC] text-[#5B21B6] font-semibold'
                     : 'text-[#6E5F87] hover:text-[#1F172B]'
                 }`}
               >
-                {st === 'todas' ? 'Todas' : st}
+                {st.label}
               </button>
-            )
+            ))}
+          </div>
+
+          {isAuditor ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {onSelectSucursal && (
+                <select
+                  aria-label="Filtrar actividades por sucursal"
+                  value={selectedSucursalId}
+                  onChange={(e) => onSelectSucursal(e.target.value)}
+                  className="px-3 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#5B21B6]"
+                >
+                  <option value="todas">Sucursal: Todas</option>
+                  {sucursales
+                    .filter((s) => s.activa)
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.nombre}
+                      </option>
+                    ))}
+                </select>
+              )}
+
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  aria-label="Filtrar actividades por fecha"
+                  value={filterFecha}
+                  onChange={(e) => setFilterFecha(e.target.value)}
+                  className="px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-mono-num text-[#1F172B]"
+                />
+                {filterFecha ? (
+                  <button
+                    type="button"
+                    onClick={() => setFilterFecha('')}
+                    className="px-2.5 py-1.5 rounded-xl text-xs font-medium text-[#DB2777] bg-[#FDF2F8] border border-[#FBCFE8]"
+                  >
+                    Todas las fechas
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFilterFecha(new Date().toISOString().slice(0, 10))
+                    }
+                    className="px-2.5 py-1.5 rounded-xl text-xs font-medium text-[#5B21B6] bg-[#FAF7FE] border border-[#E6DDF5]"
+                  >
+                    Solo hoy
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <span className="text-xs text-[#7A6B93]">
+              Bucket de almacenamiento:{' '}
+              <code className="font-mono">evidencias_controlops</code>
+            </span>
           )}
         </div>
-        <span className="text-xs text-[#7A6B93]">
-          Bucket de almacenamiento:{' '}
-          <code className="font-mono">evidencias_controlops</code>
-        </span>
-      </div>
+      </section>
 
       {/* Activities List */}
       {scopedActividades.length === 0 ? (
@@ -706,8 +821,8 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                     )}
                   </div>
 
-                  {/* Assigned days & deadline evaluation */}
-                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                  {/* Assigned days, upload timestamp & deadline evaluation */}
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
                     {evalHorario.etiqueta === 'Sin horario límite' ? (
                       <span className="inline-flex items-center gap-1 text-[#6D28D9] font-medium">
                         <Clock className="h-3.5 w-3.5" />
@@ -716,22 +831,26 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                     ) : evalHorario.etiqueta === 'Vencida' ? (
                       <span className="inline-flex items-center gap-1 text-[#BE123C] font-semibold">
                         <AlertTriangle className="h-3.5 w-3.5" />
-                        Vencida (límite {evalHorario.horaLimite})
+                        Fuera de horario (límite {evalHorario.horaLimite})
                       </span>
                     ) : evalHorario.etiqueta === 'Completada con retraso' ? (
-                      <span className="inline-flex items-center gap-1 text-[#B45309] font-medium">
+                      <span className="inline-flex items-center gap-1 text-[#B45309] font-semibold">
                         <Clock className="h-3.5 w-3.5" />
-                        Completada {act.hora_completada} (límite{' '}
+                        Con retraso · Subida {act.hora_completada} (límite{' '}
                         {evalHorario.horaLimite})
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 text-[#15803D] font-medium">
                         <CheckCircle2 className="h-3.5 w-3.5" />
                         {act.hora_completada
-                          ? `Completada ${act.hora_completada} · Límite ${evalHorario.horaLimite}`
+                          ? `A tiempo · Subida ${act.hora_completada} (límite ${evalHorario.horaLimite})`
                           : `En tiempo · Límite ${evalHorario.horaLimite}`}
                       </span>
                     )}
+
+                    <span className="font-mono-num text-[11px] text-[#7A6B93]">
+                      Fecha: {act.fecha}
+                    </span>
 
                     {act.dias_semana && act.dias_semana.length > 0 && (
                       <span className="text-[11px] text-[#7A6B93]">
@@ -740,10 +859,119 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                     )}
                   </div>
 
-                  {act.observaciones && (
-                    <p className="text-xs text-[#55476E] bg-[#FAF8FC] rounded-xl px-3 py-2 border border-[#F1ECF9]">
-                      {act.observaciones}
-                    </p>
+                  {/* Individual Activity Deadline Quick Control (Creador only) */}
+                  {isCreador && (
+                    <div className="rounded-xl bg-[#FAF7FE] border border-[#EAE3F5] px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-[#5B21B6]">
+                        {act.sin_horario_limite
+                          ? 'Regla individual: Sin límite'
+                          : act.hora_limite
+                            ? `Horario individual: ${act.hora_limite}`
+                            : `Usa horario sucursal (${evalHorario.horaLimite || 'Sin límite'})`}
+                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {(() => {
+                          const draft = inlineTimeDrafts[act.id] || {
+                            hora_limite:
+                              act.hora_limite || evalHorario.horaLimite || '09:30',
+                            sin_horario_limite: Boolean(act.sin_horario_limite),
+                          };
+                          const changed = Boolean(inlineTimeDrafts[act.id]);
+                          return (
+                            <>
+                              <input
+                                type="time"
+                                aria-label={`Horario límite para ${act.titulo}`}
+                                disabled={draft.sin_horario_limite}
+                                value={draft.hora_limite}
+                                onChange={(e) =>
+                                  setInlineTimeDrafts((prev) => ({
+                                    ...prev,
+                                    [act.id]: {
+                                      ...draft,
+                                      hora_limite: e.target.value,
+                                    },
+                                  }))
+                                }
+                                className="px-2 py-1 rounded-lg border border-[#E6DDF5] bg-white text-[11px] font-mono-num disabled:opacity-50"
+                              />
+                              <label className="inline-flex items-center gap-1 text-[11px] font-medium text-[#55476E] cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={draft.sin_horario_limite}
+                                  onChange={(e) =>
+                                    setInlineTimeDrafts((prev) => ({
+                                      ...prev,
+                                      [act.id]: {
+                                        ...draft,
+                                        sin_horario_limite: e.target.checked,
+                                      },
+                                    }))
+                                  }
+                                />
+                                Sin límite
+                              </label>
+                              {(changed || savedTimeId === act.id) && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveInlineDeadline(act)}
+                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
+                                    savedTimeId === act.id
+                                      ? 'bg-[#DCFCE7] text-[#15803D]'
+                                      : 'bg-[#7C3AED] hover:bg-[#6D28D9] text-white'
+                                  }`}
+                                >
+                                  {savedTimeId === act.id ? 'Guardado' : 'Guardar hora'}
+                                </button>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Comments / Audit Observations */}
+                  {isAuditor ? (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        value={
+                          draftObs[act.id] !== undefined
+                            ? draftObs[act.id]
+                            : act.observaciones
+                        }
+                        onChange={(e) =>
+                          setDraftObs((prev) => ({
+                            ...prev,
+                            [act.id]: e.target.value,
+                          }))
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveInlineObs(act);
+                        }}
+                        placeholder="Comentarios de revisión o auditoría..."
+                        className="flex-1 px-3 py-1.5 rounded-lg border border-[#E6DDF5] bg-[#FAF8FC] text-xs text-[#1F172B] placeholder:text-[#9D8FB5] focus:outline-none focus:border-[#7C3AED] focus:bg-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleSaveInlineObs(act)}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium inline-flex items-center gap-1 shrink-0 transition-colors ${
+                          savedObsId === act.id
+                            ? 'bg-[#DCFCE7] text-[#15803D]'
+                            : 'bg-[#F3ECFC] hover:bg-[#E7DAFA] text-[#5B21B6]'
+                        }`}
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        {savedObsId === act.id ? 'Listo' : 'Guardar'}
+                      </button>
+                    </div>
+                  ) : (
+                    act.observaciones && (
+                      <p className="text-xs text-[#55476E] bg-[#FAF8FC] rounded-xl px-3 py-2 border border-[#F1ECF9]">
+                        {act.observaciones}
+                      </p>
+                    )
                   )}
                 </div>
 
@@ -756,7 +984,11 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                         onClick={() =>
                           setPreviewImage({
                             url: act.evidencia_url!,
-                            title: `${act.sucursal_nombre} — ${act.titulo}`,
+                            title: `${act.sucursal_nombre} — ${act.titulo}${
+                              act.hora_completada
+                                ? ` (Subida ${act.hora_completada} · ${act.fecha})`
+                                : ''
+                            }`,
                           })
                         }
                         className="inline-flex items-center gap-2 text-xs font-semibold text-[#5B21B6] hover:text-[#DB2777] transition-colors"
@@ -765,9 +997,12 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                           src={act.evidencia_url}
                           alt={`Evidencia de ${act.titulo}`}
                           referrerPolicy="no-referrer"
-                          className="h-8 w-8 rounded-lg object-cover border border-[#E6DDF5]"
+                          className="h-10 w-10 rounded-lg object-cover border border-[#E6DDF5]"
                         />
-                        <span>Ver fotografía adjunta</span>
+                        <span className="inline-flex items-center gap-1">
+                          <Maximize2 className="h-3.5 w-3.5" />
+                          Ampliar evidencia
+                        </span>
                       </button>
 
                       {isCreador && (

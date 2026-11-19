@@ -37,6 +37,7 @@ import {
   saveGastoORefrendo,
   saveHorarioDia,
   saveLlamada,
+  saveLlamadasBatch,
   saveMetaSucursal,
   saveSessionUser,
   saveSucursal,
@@ -206,6 +207,14 @@ export default function App() {
     const next = [nueva, ...llamadas];
     setLlamadas(next);
     const res = await saveLlamada(nueva, next);
+    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+  };
+
+  const handleImportLlamadas = async (nuevas: LlamadaSucursal[]) => {
+    if (nuevas.length === 0) return;
+    const next = [...nuevas, ...llamadas];
+    setLlamadas(next);
+    const res = await saveLlamadasBatch(nuevas, next);
     if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
@@ -602,7 +611,13 @@ export default function App() {
                     opcionesReporte={catalogos.opciones_llamada}
                     onUpdateLlamada={handleUpdateLlamada}
                     onCreateLlamada={handleCreateLlamada}
+                    onImportLlamadas={handleImportLlamadas}
                     onDeleteLlamada={handleDeleteLlamada}
+                    onSelectSucursal={
+                      currentUser.rol !== 'cajera'
+                        ? setSelectedSucursalId
+                        : undefined
+                    }
                     openCreateModalExternal={quickModal === 'llamada'}
                     onCloseCreateModalExternal={() => setQuickModal(null)}
                   />
@@ -618,6 +633,11 @@ export default function App() {
                     userRole={currentUser.rol}
                     tareasCatalogo={catalogos.tareas_obligatorias}
                     onChangeDiaActivo={setDiaActivo}
+                    onSelectSucursal={
+                      currentUser.rol !== 'cajera'
+                        ? setSelectedSucursalId
+                        : undefined
+                    }
                     onUpdateActividad={handleUpdateActividad}
                     onCreateActividad={handleCreateActividad}
                     onCreateActividadesBatch={handleCreateActividadesBatch}
