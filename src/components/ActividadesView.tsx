@@ -24,8 +24,13 @@ import {
   TareaCatalogo,
 } from '../types/controlops';
 import { DIAS_SEMANA } from '../data/mockData';
-import { evaluarVencimientoActividad } from '../utils/calculations';
-import { uploadEvidenciaFoto } from '../services/controlOpsService';
+import {
+  evaluarVencimientoActividad,
+  extractCatalogTaskId,
+  getTodayLocalYYYYMMDD,
+  resolveDailyTasksForBranch,
+} from '../utils/calculations';
+import { ServiceResult, uploadEvidenciaFoto } from '../services/controlOpsService';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface ActividadesViewProps {
@@ -42,6 +47,11 @@ interface ActividadesViewProps {
   onCreateActividad: (nueva: ActividadDiaria) => Promise<unknown>;
   onCreateActividadesBatch: (nuevas: ActividadDiaria[]) => Promise<unknown>;
   onDeleteActividad: (actividad: ActividadDiaria) => Promise<unknown>;
+  onSaveCatalogTask?: (
+    tarea: TareaCatalogo,
+    isNew?: boolean
+  ) => Promise<ServiceResult>;
+  onDeleteCatalogTask?: (taskId: string) => Promise<ServiceResult>;
   onDeleteEvidenciaActividad: (actividad: ActividadDiaria) => Promise<void>;
   onResetActividadPendiente: (actividad: ActividadDiaria) => Promise<void>;
   onGoToHorarios: () => void;
@@ -83,6 +93,8 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   onCreateActividad,
   onCreateActividadesBatch,
   onDeleteActividad,
+  onSaveCatalogTask,
+  onDeleteCatalogTask,
   onDeleteEvidenciaActividad,
   onResetActividadPendiente,
   onGoToHorarios,
@@ -167,7 +179,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
       titulo: '',
       descripcion: '',
       categoria: 'Caja',
-      dias_semana: ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'],
+      dias_semana: [...ALL_DIAS],
       hora_limite: '09:30',
       sin_horario_limite: false,
     });
@@ -175,23 +187,54 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   };
 
   const openEditCreadorModal = (act: ActividadDiaria) => {
+    const catId = extractCatalogTaskId(act.id);
+    const catalogTask = catId
+      ? tareasCatalogo.find((t) => t.id === catId)
+      : undefined;
+
     setEditingActividad(act);
     setCreadorForm({
-      sucursal_id: act.sucursal_id,
-      titulo: act.titulo,
-      descripcion: act.descripcion || act.observaciones || '',
-      categoria: act.categoria,
+      sucursal_id: catalogTask?.sucursal_id || act.sucursal_id,
+      titulo: catalogTask?.titulo || act.titulo,
+      descripcion:
+        catalogTask?.descripcion ?? act.descripcion ?? act.observaciones ?? '',
+      categoria: catalogTask?.categoria || act.categoria,
       dias_semana:
-        act.dias_semana && act.dias_semana.length > 0
-          ? act.dias_semana
-          : [...ALL_DIAS],
-      hora_limite: act.hora_limite || '09:30',
-      sin_horario_limite: Boolean(act.sin_horario_limite),
+        catalogTask?.dias_semana && catalogTask.dias_semana.length > 0
+          ? catalogTask.dias_semana
+          : act.dias_semana && act.dias_semana.length > 0
+            ? act.dias_semana
+            : [...ALL_DIAS],
+      hora_limite:
+        catalogTask?.hora_limite ?? act.hora_limite ?? '09:30',
+      sin_horario_limite:
+        catalogTask?.sin_horario_limite !== undefined
+          ? Boolean(catalogTask.sin_horario_limite)
+          : Boolean(act.sin_horario_limite),
     });
     setShowCreadorModal(true);
   };
 
+  const evaluatedDate = filterFecha || getTodayLocalYYYYMMDD();
+
   const dayScopedActividades = useMemo(() => {
+    const targetBranches =
+      selectedSucursalId === 'todas'
+        ? sucursales.filter((s) => s.activa)
+        : sucursales.filter((s) => s.id === selectedSucursalId);
+
+    if (tareasCatalogo.length > 0) {
+      return targetBranches.flatMap((suc) =>
+        resolveDailyTasksForBranch(
+          suc,
+          tareasCatalogo,
+          actividades,
+          diaActivo,
+          evaluatedDate
+        )
+      );
+    }
+
     return actividades.filter((a) => {
       if (selectedSucursalId !== 'todas' && a.sucursal_id !== selectedSucursalId) {
         return false;
@@ -204,7 +247,15 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
       }
       return true;
     });
-  }, [actividades, selectedSucursalId, filterFecha, diaActivo]);
+  }, [
+    actividades,
+    sucursales,
+    tareasCatalogo,
+    selectedSucursalId,
+    filterFecha,
+    diaActivo,
+    evaluatedDate,
+  ]);
 
   const scopedActividades = useMemo(() => {
     return dayScopedActividades.filter((a) => {
@@ -356,34 +407,81 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
         creadorForm.dias_semana.length > 0
           ? creadorForm.dias_semana
           : [...ALL_DIAS];
+      const horaLim = creadorForm.sin_horario_limite
+        ? null
+        : creadorForm.hora_limite || '09:30';
 
       if (editingActividad) {
-        const targetSuc =
-          sucursales.find((s) => s.id === creadorForm.sucursal_id) ||
-          sucursales[0];
-        const updated: ActividadDiaria = {
-          ...editingActividad,
-          sucursal_id: targetSuc.id,
-          sucursal_nombre: targetSuc.nombre,
-          responsable: targetSuc.responsable_caja,
+        const catId = extractCatalogTaskId(editingActividad.id);
+        const existingCatalog = catId
+          ? tareasCatalogo.find((t) => t.id === catId)
+          : undefined;
+
+        if (existingCatalog && onSaveCatalogTask) {
+          const updatedTask: TareaCatalogo = {
+            ...existingCatalog,
+            titulo: creadorForm.titulo.trim(),
+            descripcion: creadorForm.descripcion.trim(),
+            categoria: creadorForm.categoria,
+            sucursal_id: creadorForm.sucursal_id,
+            dias_semana: dias,
+            hora_limite: horaLim,
+            sin_horario_limite: creadorForm.sin_horario_limite,
+          };
+          const res = await onSaveCatalogTask(updatedTask, false);
+          if (!res.ok) {
+            setUploadNotice(res.error || 'Error al actualizar actividad.');
+            return;
+          }
+          setUploadNotice(
+            `Actividad "${updatedTask.titulo}" actualizada en catalogos_controlops.`
+          );
+        } else {
+          const targetSuc =
+            sucursales.find((s) => s.id === creadorForm.sucursal_id) ||
+            sucursales[0];
+          const updated: ActividadDiaria = {
+            ...editingActividad,
+            sucursal_id: targetSuc.id,
+            sucursal_nombre: targetSuc.nombre,
+            responsable: targetSuc.responsable_caja,
+            titulo: creadorForm.titulo.trim(),
+            descripcion: creadorForm.descripcion.trim(),
+            categoria: creadorForm.categoria,
+            dias_semana: dias,
+            hora_limite: horaLim,
+            sin_horario_limite: creadorForm.sin_horario_limite,
+          };
+          await onUpdateActividad(updated);
+          setUploadNotice(`Actividad "${updated.titulo}" actualizada correctamente.`);
+        }
+      } else if (onSaveCatalogTask) {
+        const newTask: TareaCatalogo = {
+          id: `tar-${Date.now()}`,
           titulo: creadorForm.titulo.trim(),
           descripcion: creadorForm.descripcion.trim(),
           categoria: creadorForm.categoria,
+          sucursal_id: creadorForm.sucursal_id,
           dias_semana: dias,
-          hora_limite: creadorForm.sin_horario_limite
-            ? null
-            : creadorForm.hora_limite || '09:30',
+          hora_limite: horaLim,
           sin_horario_limite: creadorForm.sin_horario_limite,
+          activa: true,
         };
-        await onUpdateActividad(updated);
-        setUploadNotice(`Actividad "${updated.titulo}" actualizada correctamente.`);
+        const res = await onSaveCatalogTask(newTask, true);
+        if (!res.ok) {
+          setUploadNotice(res.error || 'Error al guardar nueva actividad.');
+          return;
+        }
+        setUploadNotice(
+          `Actividad "${newTask.titulo}" creada en catalogos_controlops y visible de inmediato para las cajeras.`
+        );
       } else {
         const targetBranches =
           creadorForm.sucursal_id === 'todas'
             ? sucursales.filter((s) => s.activa)
             : sucursales.filter((s) => s.id === creadorForm.sucursal_id);
 
-        const today = new Date().toISOString().slice(0, 10);
+        const today = getTodayLocalYYYYMMDD();
         const batch: ActividadDiaria[] = targetBranches.map((suc, idx) => ({
           id: `act-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
           sucursal_id: suc.id,
@@ -398,9 +496,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
           evidencia_url: null,
           observaciones: '',
           dias_semana: dias,
-          hora_limite: creadorForm.sin_horario_limite
-            ? null
-            : creadorForm.hora_limite || '09:30',
+          hora_limite: horaLim,
           sin_horario_limite: creadorForm.sin_horario_limite,
         }));
 
@@ -442,13 +538,30 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   const handleSaveInlineDeadline = async (act: ActividadDiaria) => {
     const draft = inlineTimeDrafts[act.id];
     if (!draft) return;
-    await onUpdateActividad({
-      ...act,
-      hora_limite: draft.sin_horario_limite
-        ? null
-        : draft.hora_limite || '09:30',
-      sin_horario_limite: draft.sin_horario_limite,
-    });
+    const nextHora = draft.sin_horario_limite
+      ? null
+      : draft.hora_limite || '09:30';
+    const catId = extractCatalogTaskId(act.id);
+    const existingCatalog = catId
+      ? tareasCatalogo.find((t) => t.id === catId)
+      : undefined;
+
+    if (existingCatalog && onSaveCatalogTask) {
+      await onSaveCatalogTask(
+        {
+          ...existingCatalog,
+          hora_limite: nextHora,
+          sin_horario_limite: draft.sin_horario_limite,
+        },
+        false
+      );
+    } else {
+      await onUpdateActividad({
+        ...act,
+        hora_limite: nextHora,
+        sin_horario_limite: draft.sin_horario_limite,
+      });
+    }
     setSavedTimeId(act.id);
     setUploadNotice(
       draft.sin_horario_limite
@@ -1304,7 +1417,8 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                     }
                     className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm"
                   >
-                    {!editingActividad && (
+                    {(!editingActividad ||
+                      Boolean(extractCatalogTaskId(editingActividad.id))) && (
                       <option value="todas">
                         Todas las sucursales activas (
                         {sucursales.filter((s) => s.activa).length})
@@ -1481,7 +1595,9 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
             : confirmAction?.mode === 'reset_pending'
               ? `La actividad "${confirmAction.actividad.titulo}" (${confirmAction.actividad.sucursal_nombre}) volverá a estatus Pendiente y se eliminará su evidencia adjunta.`
               : confirmAction
-                ? `Se eliminará la actividad "${confirmAction.actividad.titulo}" (${confirmAction.actividad.sucursal_nombre}) y su evidencia fotográfica si existe.`
+                ? extractCatalogTaskId(confirmAction.actividad.id)
+                  ? `Se eliminará definitivamente "${confirmAction.actividad.titulo}" del catálogo (catalogos_controlops) y sus registros en actividades_diarias.`
+                  : `Se eliminará la actividad "${confirmAction.actividad.titulo}" (${confirmAction.actividad.sucursal_nombre}) y su evidencia fotográfica si existe.`
                 : undefined
         }
         loading={confirming}
@@ -1491,7 +1607,15 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
           setConfirming(true);
           try {
             if (confirmAction.mode === 'delete_activity') {
-              await onDeleteActividad(confirmAction.actividad);
+              const catId = extractCatalogTaskId(confirmAction.actividad.id);
+              if (catId && onDeleteCatalogTask) {
+                await onDeleteCatalogTask(catId);
+                setUploadNotice(
+                  `Actividad "${confirmAction.actividad.titulo}" eliminada definitivamente de Supabase.`
+                );
+              } else {
+                await onDeleteActividad(confirmAction.actividad);
+              }
             } else if (confirmAction.mode === 'delete_photo') {
               await onDeleteEvidenciaActividad(confirmAction.actividad);
             } else {

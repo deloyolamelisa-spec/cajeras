@@ -48,6 +48,11 @@ interface AdminCatalogosViewProps {
   onDeleteSucursal: (id: string) => Promise<ServiceResult>;
   onSaveMeta: (meta: MetaSucursal) => Promise<ServiceResult>;
   onSaveCatalogos: (catalogos: CatalogosControlOps) => Promise<ServiceResult>;
+  onSaveCatalogTask: (
+    tarea: TareaCatalogo,
+    isNew?: boolean
+  ) => Promise<ServiceResult>;
+  onDeleteCatalogTask: (taskId: string) => Promise<ServiceResult>;
   onSaveUsuario: (
     usr: UsuarioControlOps,
     isNew?: boolean
@@ -97,9 +102,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   onDeleteSucursal,
   onSaveMeta,
   onSaveCatalogos,
+  onSaveCatalogTask,
+  onDeleteCatalogTask,
   onSaveUsuario,
   onDeleteUsuario,
-  onCreateActividadesBatch,
+  onCreateActividadesBatch: _onCreateActividadesBatch,
   onUpdateActividad,
   onDeleteActividad,
 }) => {
@@ -140,23 +147,25 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   );
 
   // --- Catalogos State ---
-  const [newTaskTitle, setNewTaskTitle] = useState('');
-  const [newTaskCat, setNewTaskCat] =
-    useState<TareaCatalogo['categoria']>('Caja');
   const [newCallOption, setNewCallOption] = useState('');
 
-  // --- Actividades Asignadas State ---
-  const [actBranchFilter, setActBranchFilter] = useState<string>('todas');
-  const [editingAct, setEditingAct] = useState<ActividadDiaria | null>(null);
-  const [actForm, setActForm] = useState({
+  // --- Actividades Base del Catálogo (catalogos_controlops) ---
+  const [editingTask, setEditingTask] = useState<TareaCatalogo | null>(null);
+  const [taskForm, setTaskForm] = useState({
     sucursal_id: 'todas',
     titulo: '',
     descripcion: '',
-    categoria: 'Caja' as ActividadDiaria['categoria'],
-    dias_semana: ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'] as DiaSemana[],
+    categoria: 'Caja' as TareaCatalogo['categoria'],
+    dias_semana: [...ALL_DIAS] as DiaSemana[],
     hora_limite: '09:30',
     sin_horario_limite: false,
   });
+  const [savingTask, setSavingTask] = useState(false);
+  const [deleteTaskTarget, setDeleteTaskTarget] =
+    useState<TareaCatalogo | null>(null);
+
+  // --- Registros de cumplimiento (actividades_diarias) ---
+  const [actBranchFilter, setActBranchFilter] = useState<string>('todas');
   const [deleteActTarget, setDeleteActTarget] =
     useState<ActividadDiaria | null>(null);
   const [deletingAct, setDeletingAct] = useState(false);
@@ -303,58 +312,96 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
     notify(`Metas y techo máximo actualizados para ${suc.nombre}.`);
   };
 
-  const handleAddTask = async (e: React.FormEvent) => {
+  const toggleTaskDia = (dia: DiaSemana) => {
+    setTaskForm((prev) => {
+      const exists = prev.dias_semana.includes(dia);
+      return {
+        ...prev,
+        dias_semana: exists
+          ? prev.dias_semana.filter((d) => d !== dia)
+          : [...prev.dias_semana, dia],
+      };
+    });
+  };
+
+  const resetTaskForm = () => {
+    setEditingTask(null);
+    setTaskForm({
+      sucursal_id: 'todas',
+      titulo: '',
+      descripcion: '',
+      categoria: 'Caja',
+      dias_semana: [...ALL_DIAS],
+      hora_limite: '09:30',
+      sin_horario_limite: false,
+    });
+  };
+
+  const handleSaveCatalogTaskForm = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newTaskTitle.trim()) return;
-    const nextCatalogos: CatalogosControlOps = {
-      ...catalogos,
-      tareas_obligatorias: [
-        ...catalogos.tareas_obligatorias,
-        {
+    if (!taskForm.titulo.trim()) return;
+    setSavingTask(true);
+    setErrorAlert(null);
+    try {
+      const dias =
+        taskForm.dias_semana.length > 0 ? taskForm.dias_semana : [...ALL_DIAS];
+      const horaLim = taskForm.sin_horario_limite
+        ? null
+        : taskForm.hora_limite || '09:30';
+
+      if (editingTask) {
+        const updated: TareaCatalogo = {
+          ...editingTask,
+          titulo: taskForm.titulo.trim(),
+          descripcion: taskForm.descripcion.trim(),
+          categoria: taskForm.categoria,
+          sucursal_id: taskForm.sucursal_id,
+          dias_semana: dias,
+          hora_limite: horaLim,
+          sin_horario_limite: taskForm.sin_horario_limite,
+        };
+        const res = await onSaveCatalogTask(updated, false);
+        if (!res.ok) {
+          fail(res.error);
+          return;
+        }
+        notify(`Actividad "${updated.titulo}" actualizada en catalogos_controlops.`);
+      } else {
+        const created: TareaCatalogo = {
           id: `tar-${Date.now()}`,
-          titulo: newTaskTitle.trim(),
-          categoria: newTaskCat,
+          titulo: taskForm.titulo.trim(),
+          descripcion: taskForm.descripcion.trim(),
+          categoria: taskForm.categoria,
+          sucursal_id: taskForm.sucursal_id,
+          dias_semana: dias,
+          hora_limite: horaLim,
+          sin_horario_limite: taskForm.sin_horario_limite,
           activa: true,
-        },
-      ],
-    };
-    const res = await onSaveCatalogos(nextCatalogos);
-    if (!res.ok) {
-      fail(res.error);
-      return;
+        };
+        const res = await onSaveCatalogTask(created, true);
+        if (!res.ok) {
+          fail(res.error);
+          return;
+        }
+        notify(
+          `Actividad "${created.titulo}" creada en catalogos_controlops y visible al instante para cajeras.`
+        );
+      }
+      resetTaskForm();
+    } finally {
+      setSavingTask(false);
     }
-    setNewTaskTitle('');
-    notify('Tarea agregada al catálogo operativo.');
   };
 
-  const handleToggleTask = async (taskId: string) => {
-    const nextCatalogos: CatalogosControlOps = {
-      ...catalogos,
-      tareas_obligatorias: catalogos.tareas_obligatorias.map((t) =>
-        t.id === taskId ? { ...t, activa: !t.activa } : t
-      ),
-    };
-    const res = await onSaveCatalogos(nextCatalogos);
+  const handleToggleTask = async (task: TareaCatalogo) => {
+    const res = await onSaveCatalogTask({ ...task, activa: !task.activa }, false);
     if (!res.ok) {
       fail(res.error);
       return;
     }
-    notify('Catálogo de actividades actualizado.');
-  };
-
-  const handleDeleteTask = async (taskId: string) => {
-    const nextCatalogos: CatalogosControlOps = {
-      ...catalogos,
-      tareas_obligatorias: catalogos.tareas_obligatorias.filter(
-        (t) => t.id !== taskId
-      ),
-    };
-    const res = await onSaveCatalogos(nextCatalogos);
-    if (!res.ok) {
-      fail(res.error);
-      return;
-    }
-    notify('Tarea eliminada del catálogo.');
+    notify(
+      `Actividad "${task.titulo}" ${!task.activa ? 'activada' : 'pausada'} en Supabase.`
+    );
   };
 
   const handleAddCallOption = async (e: React.FormEvent) => {
@@ -385,93 +432,6 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
       return;
     }
     notify(`Opción "${opt}" eliminada.`);
-  };
-
-  const toggleActDia = (dia: DiaSemana) => {
-    setActForm((prev) => {
-      const exists = prev.dias_semana.includes(dia);
-      return {
-        ...prev,
-        dias_semana: exists
-          ? prev.dias_semana.filter((d) => d !== dia)
-          : [...prev.dias_semana, dia],
-      };
-    });
-  };
-
-  const handleSaveAssignedActivity = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!actForm.titulo.trim()) return;
-    const dias =
-      actForm.dias_semana.length > 0 ? actForm.dias_semana : [...ALL_DIAS];
-
-    if (editingAct) {
-      const targetSuc =
-        sucursales.find((s) => s.id === actForm.sucursal_id) || sucursales[0];
-      const res = await onUpdateActividad({
-        ...editingAct,
-        sucursal_id: targetSuc.id,
-        sucursal_nombre: targetSuc.nombre,
-        responsable: targetSuc.responsable_caja,
-        titulo: actForm.titulo.trim(),
-        descripcion: actForm.descripcion.trim(),
-        categoria: actForm.categoria,
-        dias_semana: dias,
-        hora_limite: actForm.sin_horario_limite
-          ? null
-          : actForm.hora_limite || '09:30',
-        sin_horario_limite: actForm.sin_horario_limite,
-      });
-      if (!res.ok) {
-        fail(res.error);
-        return;
-      }
-      notify(`Actividad "${actForm.titulo.trim()}" actualizada.`);
-      setEditingAct(null);
-    } else {
-      const targets =
-        actForm.sucursal_id === 'todas'
-          ? sucursales.filter((s) => s.activa)
-          : sucursales.filter((s) => s.id === actForm.sucursal_id);
-      const today = new Date().toISOString().slice(0, 10);
-      const batch: ActividadDiaria[] = targets.map((suc, idx) => ({
-        id: `act-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
-        sucursal_id: suc.id,
-        sucursal_nombre: suc.nombre,
-        titulo: actForm.titulo.trim(),
-        descripcion: actForm.descripcion.trim(),
-        categoria: actForm.categoria,
-        responsable: suc.responsable_caja,
-        fecha: today,
-        hora_completada: null,
-        estatus: 'Pendiente',
-        evidencia_url: null,
-        observaciones: '',
-        dias_semana: dias,
-        hora_limite: actForm.sin_horario_limite
-          ? null
-          : actForm.hora_limite || '09:30',
-        sin_horario_limite: actForm.sin_horario_limite,
-      }));
-      const res = await onCreateActividadesBatch(batch);
-      if (!res.ok) {
-        fail(res.error);
-        return;
-      }
-      notify(
-        `Actividad asignada a ${batch.length} sucursal(es) en actividades_diarias.`
-      );
-    }
-
-    setActForm({
-      sucursal_id: 'todas',
-      titulo: '',
-      descripcion: '',
-      categoria: 'Caja',
-      dias_semana: ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'],
-      hora_limite: '09:30',
-      sin_horario_limite: false,
-    });
   };
 
   const handleAddUser = async (e: React.FormEvent) => {
@@ -1018,32 +978,21 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
       {/* TAB 3: CATÁLOGO DE ACTIVIDADES Y OPCIONES DE LLAMADA */}
       {tab === 'catalogos' && (
         <div className="space-y-6">
-          {/* Assigned Activities Management (actividades_diarias) */}
+          {/* Master Daily Activities Catalog (catalogos_controlops) */}
           <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 space-y-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <h2 className="font-display text-sm font-bold text-[#1F172B]">
-                  Asignar, editar o eliminar actividades en sucursales (actividades_diarias)
+                  Actividades base diarias ({catalogos.tareas_obligatorias.length}) — catalogos_controlops
                 </h2>
                 <p className="text-xs text-[#7A6B93]">
-                  Las actividades creadas aquí aparecen automáticamente en la lista diaria de las cajeras asignadas.
+                  Crea, edita (nombre, descripción, hora límite, sucursal o días) o elimina definitivamente cualquier actividad. Los cambios se reflejan al instante en las cajeras.
                 </p>
               </div>
-              {editingAct && (
+              {editingTask && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setEditingAct(null);
-                    setActForm({
-                      sucursal_id: 'todas',
-                      titulo: '',
-                      descripcion: '',
-                      categoria: 'Caja',
-                      dias_semana: ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'],
-                      hora_limite: '09:30',
-                      sin_horario_limite: false,
-                    });
-                  }}
+                  onClick={resetTaskForm}
                   className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#FAF8FC] text-[#6E5F87] border border-[#EAE3F5]"
                 >
                   <X className="h-3.5 w-3.5" />
@@ -1053,32 +1002,30 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
             </div>
 
             <form
-              onSubmit={handleSaveAssignedActivity}
+              onSubmit={handleSaveCatalogTaskForm}
               className="rounded-xl border border-[#EAE3F5] bg-[#FAF8FC] p-4 space-y-3"
             >
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                 <input
                   type="text"
                   required
-                  value={actForm.titulo}
+                  value={taskForm.titulo}
                   onChange={(e) =>
-                    setActForm({ ...actForm, titulo: e.target.value })
+                    setTaskForm({ ...taskForm, titulo: e.target.value })
                   }
                   placeholder="Título de actividad *"
                   className="md:col-span-2 px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs"
                 />
                 <select
-                  value={actForm.sucursal_id}
+                  value={taskForm.sucursal_id}
                   onChange={(e) =>
-                    setActForm({ ...actForm, sucursal_id: e.target.value })
+                    setTaskForm({ ...taskForm, sucursal_id: e.target.value })
                   }
                   className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs"
                 >
-                  {!editingAct && (
-                    <option value="todas">
-                      Todas las sucursales activas ({sucursales.filter((s) => s.activa).length})
-                    </option>
-                  )}
+                  <option value="todas">
+                    Todas las sucursales ({sucursales.filter((s) => s.activa).length})
+                  </option>
                   {sucursales
                     .filter((s) => s.activa)
                     .map((s) => (
@@ -1088,11 +1035,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                     ))}
                 </select>
                 <select
-                  value={actForm.categoria}
+                  value={taskForm.categoria}
                   onChange={(e) =>
-                    setActForm({
-                      ...actForm,
-                      categoria: e.target.value as ActividadDiaria['categoria'],
+                    setTaskForm({
+                      ...taskForm,
+                      categoria: e.target.value as TareaCatalogo['categoria'],
                     })
                   }
                   className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs"
@@ -1107,22 +1054,22 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center">
                 <input
                   type="text"
-                  value={actForm.descripcion}
+                  value={taskForm.descripcion}
                   onChange={(e) =>
-                    setActForm({ ...actForm, descripcion: e.target.value })
+                    setTaskForm({ ...taskForm, descripcion: e.target.value })
                   }
-                  placeholder="Descripción o instrucciones para la cajera..."
+                  placeholder="Descripción o evidencia requerida para la cajera..."
                   className="lg:col-span-5 px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs"
                 />
 
                 <div className="lg:col-span-4 flex flex-wrap gap-1">
                   {ALL_DIAS.map((d) => {
-                    const active = actForm.dias_semana.includes(d);
+                    const active = taskForm.dias_semana.includes(d);
                     return (
                       <button
                         key={d}
                         type="button"
-                        onClick={() => toggleActDia(d)}
+                        onClick={() => toggleTaskDia(d)}
                         className={`px-2 py-1 rounded-lg text-[11px] font-semibold border ${
                           active
                             ? 'bg-[#F3ECFC] border-[#C4B5FD] text-[#5B21B6]'
@@ -1138,20 +1085,20 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                 <div className="lg:col-span-3 flex items-center gap-2">
                   <input
                     type="time"
-                    disabled={actForm.sin_horario_limite}
-                    value={actForm.hora_limite}
+                    disabled={taskForm.sin_horario_limite}
+                    value={taskForm.hora_limite}
                     onChange={(e) =>
-                      setActForm({ ...actForm, hora_limite: e.target.value })
+                      setTaskForm({ ...taskForm, hora_limite: e.target.value })
                     }
                     className="px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-white text-xs font-mono-num disabled:opacity-50"
                   />
                   <label className="flex items-center gap-1.5 text-[11px] font-semibold text-[#5B21B6] whitespace-nowrap cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={actForm.sin_horario_limite}
+                      checked={taskForm.sin_horario_limite}
                       onChange={(e) =>
-                        setActForm({
-                          ...actForm,
+                        setTaskForm({
+                          ...taskForm,
                           sin_horario_limite: e.target.checked,
                         })
                       }
@@ -1164,29 +1111,193 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
               <div className="flex justify-end">
                 <button
                   type="submit"
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white"
+                  disabled={savingTask}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
                 >
-                  {editingAct ? (
+                  {editingTask ? (
                     <>
                       <Save className="h-3.5 w-3.5" />
-                      Guardar cambios en actividad
+                      {savingTask ? 'Guardando...' : 'Guardar cambios'}
                     </>
                   ) : (
                     <>
                       <Plus className="h-3.5 w-3.5" />
-                      Crear y asignar actividad
+                      {savingTask ? 'Agregando...' : 'Agregar nueva actividad'}
                     </>
                   )}
                 </button>
               </div>
             </form>
 
+            {catalogos.tareas_obligatorias.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-[#E6DDF5] p-6 text-center text-xs text-[#7A6B93]">
+                No hay actividades en el catálogo. Usa el formulario de arriba para agregar actividades diarias.
+              </div>
+            ) : (
+              <div className="divide-y divide-[#F1ECF9] border border-[#EAE3F5] rounded-xl overflow-hidden">
+                {catalogos.tareas_obligatorias.map((t) => {
+                  const branchLabel =
+                    !t.sucursal_id || t.sucursal_id === 'todas'
+                      ? 'Todas las sucursales'
+                      : sucursales.find((s) => s.id === t.sucursal_id)?.nombre ||
+                        t.sucursal_id;
+                  const diasLabel =
+                    !t.dias_semana || t.dias_semana.length === 7
+                      ? 'Todos los días'
+                      : t.dias_semana.map((d) => DIA_SHORT[d]).join(', ');
+
+                  return (
+                    <div
+                      key={t.id}
+                      className="px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3 bg-white hover:bg-[#FCFAFE]"
+                    >
+                      <div className="min-w-0">
+                        <p
+                          className={`text-xs font-bold ${
+                            t.activa
+                              ? 'text-[#1F172B]'
+                              : 'text-[#9D8FB5] line-through'
+                          }`}
+                        >
+                          {t.titulo}
+                        </p>
+                        {t.descripcion && (
+                          <p className="text-[11px] text-[#55476E] mt-0.5">
+                            {t.descripcion}
+                          </p>
+                        )}
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#7A6B93] mt-1">
+                          <span>{branchLabel}</span>
+                          <span>·</span>
+                          <span>{t.categoria}</span>
+                          <span>·</span>
+                          <span>{diasLabel}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <div className="flex items-center gap-1.5 bg-[#FAF8FC] border border-[#EAE3F5] rounded-lg px-2 py-1">
+                          <Clock className="h-3 w-3 text-[#6D28D9]" />
+                          <input
+                            type="time"
+                            aria-label={`Hora límite de ${t.titulo}`}
+                            disabled={Boolean(t.sin_horario_limite)}
+                            value={t.hora_limite || '09:30'}
+                            onChange={async (e) => {
+                              const res = await onSaveCatalogTask(
+                                {
+                                  ...t,
+                                  hora_limite: e.target.value,
+                                  sin_horario_limite: false,
+                                },
+                                false
+                              );
+                              if (!res.ok) {
+                                fail(res.error);
+                                return;
+                              }
+                              notify(
+                                `Horario de "${t.titulo}" actualizado a ${e.target.value}.`
+                              );
+                            }}
+                            className="text-[11px] font-mono-num bg-transparent focus:outline-none disabled:opacity-45"
+                          />
+                          <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#5B21B6] cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(t.sin_horario_limite)}
+                              onChange={async (e) => {
+                                const sinLim = e.target.checked;
+                                const res = await onSaveCatalogTask(
+                                  {
+                                    ...t,
+                                    sin_horario_limite: sinLim,
+                                    hora_limite: sinLim
+                                      ? null
+                                      : t.hora_limite || '09:30',
+                                  },
+                                  false
+                                );
+                                if (!res.ok) {
+                                  fail(res.error);
+                                  return;
+                                }
+                                notify(
+                                  sinLim
+                                    ? `"${t.titulo}" sin horario límite.`
+                                    : `Horario límite reactivado en "${t.titulo}".`
+                                );
+                              }}
+                            />
+                            Sin límite
+                          </label>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleToggleTask(t)}
+                          className={`px-2 py-1 rounded-lg text-[11px] font-semibold ${
+                            t.activa
+                              ? 'bg-[#F0FDF4] text-[#15803D]'
+                              : 'bg-[#FAF8FC] text-[#8B7CA5]'
+                          }`}
+                        >
+                          {t.activa ? 'Activa' : 'Pausada'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingTask(t);
+                            setTaskForm({
+                              sucursal_id: t.sucursal_id || 'todas',
+                              titulo: t.titulo,
+                              descripcion: t.descripcion || '',
+                              categoria: t.categoria,
+                              dias_semana:
+                                t.dias_semana && t.dias_semana.length > 0
+                                  ? t.dias_semana
+                                  : [...ALL_DIAS],
+                              hora_limite: t.hora_limite || '09:30',
+                              sin_horario_limite: Boolean(t.sin_horario_limite),
+                            });
+                          }}
+                          title="Editar actividad"
+                          className="p-1.5 rounded-lg text-[#5B21B6] hover:bg-[#F3ECFC]"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setDeleteTaskTarget(t)}
+                          title="Eliminar actividad definitivamente"
+                          className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Submitted daily records in actividades_diarias */}
+          <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs font-semibold text-[#55476E]">
-                Actividades asignadas ({actividades.filter((a) => actBranchFilter === 'todas' || a.sucursal_id === actBranchFilter).length})
-              </span>
+              <div>
+                <h2 className="font-display text-sm font-bold text-[#1F172B]">
+                  Registros diarios guardados (actividades_diarias)
+                </h2>
+                <p className="text-xs text-[#7A6B93]">
+                  Cumplimientos y evidencias subidas por las sucursales ({actividades.length}).
+                </p>
+              </div>
               <select
-                aria-label="Filtrar actividades asignadas por sucursal"
+                aria-label="Filtrar registros diarios por sucursal"
                 value={actBranchFilter}
                 onChange={(e) => setActBranchFilter(e.target.value)}
                 className="px-3 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs"
@@ -1201,209 +1312,45 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
             </div>
 
             <div className="max-h-72 overflow-y-auto divide-y divide-[#F1ECF9] border border-[#EAE3F5] rounded-xl">
-              {actividades
-                .filter(
-                  (a) =>
-                    actBranchFilter === 'todas' ||
-                    a.sucursal_id === actBranchFilter
-                )
-                .map((act) => (
-                  <div
-                    key={act.id}
-                    className="px-4 py-3 flex items-center justify-between gap-3 bg-white hover:bg-[#FCFAFE]"
-                  >
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold text-[#1F172B] truncate">
-                        {act.titulo}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#7A6B93] mt-0.5">
-                        <span>{act.sucursal_nombre}</span>
-                        <span>·</span>
-                        <span>{act.categoria}</span>
-                        <span>·</span>
-                        <span className="inline-flex items-center gap-1">
-                          <Clock className="h-3 w-3" />
-                          {act.sin_horario_limite
-                            ? 'Sin horario límite'
-                            : act.hora_limite
-                              ? `Límite ${act.hora_limite}`
-                              : 'Horario sucursal'}
-                        </span>
-                        {act.dias_semana && act.dias_semana.length > 0 && (
-                          <span>
-                            ({act.dias_semana.map((d) => DIA_SHORT[d]).join(', ')})
-                          </span>
-                        )}
-                      </div>
-                      {act.descripcion && (
-                        <p className="text-[11px] text-[#55476E] truncate mt-0.5">
-                          {act.descripcion}
+              {actividades.filter(
+                (a) =>
+                  actBranchFilter === 'todas' || a.sucursal_id === actBranchFilter
+              ).length === 0 ? (
+                <div className="p-6 text-center text-xs text-[#7A6B93]">
+                  No hay registros guardados en actividades_diarias todavía.
+                </div>
+              ) : (
+                actividades
+                  .filter(
+                    (a) =>
+                      actBranchFilter === 'todas' ||
+                      a.sucursal_id === actBranchFilter
+                  )
+                  .map((act) => (
+                    <div
+                      key={act.id}
+                      className="px-4 py-3 flex items-center justify-between gap-3 bg-white hover:bg-[#FCFAFE]"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-[#1F172B] truncate">
+                          {act.titulo}
                         </p>
-                      )}
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      <div className="flex items-center gap-1.5 bg-[#FAF8FC] border border-[#EAE3F5] rounded-lg px-2 py-1">
-                        <input
-                          type="time"
-                          aria-label={`Hora límite de ${act.titulo}`}
-                          disabled={Boolean(act.sin_horario_limite)}
-                          value={act.hora_limite || '09:30'}
-                          onChange={async (e) => {
-                            const res = await onUpdateActividad({
-                              ...act,
-                              hora_limite: e.target.value,
-                              sin_horario_limite: false,
-                            });
-                            if (!res.ok) {
-                              fail(res.error);
-                              return;
-                            }
-                            notify(`Horario de "${act.titulo}" actualizado a ${e.target.value}.`);
-                          }}
-                          className="text-[11px] font-mono-num bg-transparent focus:outline-none disabled:opacity-45"
-                        />
-                        <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#5B21B6] cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={Boolean(act.sin_horario_limite)}
-                            onChange={async (e) => {
-                              const sinLim = e.target.checked;
-                              const res = await onUpdateActividad({
-                                ...act,
-                                sin_horario_limite: sinLim,
-                                hora_limite: sinLim ? null : act.hora_limite || '09:30',
-                              });
-                              if (!res.ok) {
-                                fail(res.error);
-                                return;
-                              }
-                              notify(
-                                sinLim
-                                  ? `"${act.titulo}" marcada sin horario límite.`
-                                  : `Horario límite reactivado en "${act.titulo}".`
-                              );
-                            }}
-                          />
-                          Sin límite
-                        </label>
+                        <p className="text-[11px] text-[#7A6B93]">
+                          {act.sucursal_nombre} · {act.fecha} · {act.estatus}
+                          {act.hora_completada ? ` (${act.hora_completada})` : ''}
+                        </p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingAct(act);
-                          setActForm({
-                            sucursal_id: act.sucursal_id,
-                            titulo: act.titulo,
-                            descripcion: act.descripcion || '',
-                            categoria: act.categoria,
-                            dias_semana:
-                              act.dias_semana && act.dias_semana.length > 0
-                                ? act.dias_semana
-                                : [...ALL_DIAS],
-                            hora_limite: act.hora_limite || '09:30',
-                            sin_horario_limite: Boolean(act.sin_horario_limite),
-                          });
-                        }}
-                        title="Editar actividad"
-                        className="p-1.5 rounded-lg text-[#5B21B6] hover:bg-[#F3ECFC]"
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </button>
                       <button
                         type="button"
                         onClick={() => setDeleteActTarget(act)}
-                        title="Eliminar actividad"
-                        className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
+                        title="Eliminar registro de cumplimiento"
+                        className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2] shrink-0"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
-                  </div>
-                ))}
-            </div>
-          </section>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Mandatory Tasks */}
-          <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 space-y-4">
-            <div>
-              <h2 className="font-display text-sm font-bold text-[#1F172B]">
-                Tareas diarias obligatorias de cajeras
-              </h2>
-              <p className="text-xs text-[#7A6B93]">
-                Define las actividades base disponibles al programar o registrar
-                operación diaria.
-              </p>
-            </div>
-
-            <form onSubmit={handleAddTask} className="flex flex-col sm:flex-row gap-2">
-              <input
-                type="text"
-                required
-                value={newTaskTitle}
-                onChange={(e) => setNewTaskTitle(e.target.value)}
-                placeholder="Nueva tarea obligatoria..."
-                className="flex-1 px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs"
-              />
-              <select
-                value={newTaskCat}
-                onChange={(e) =>
-                  setNewTaskCat(e.target.value as TareaCatalogo['categoria'])
-                }
-                className="px-2.5 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs"
-              >
-                <option value="Caja">Caja</option>
-                <option value="Corte">Corte</option>
-                <option value="Expedientes">Expedientes</option>
-                <option value="Auditoría">Auditoría</option>
-              </select>
-              <button
-                type="submit"
-                className="inline-flex items-center justify-center gap-1 px-3.5 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Agregar
-              </button>
-            </form>
-
-            <div className="divide-y divide-[#F1ECF9] border border-[#EAE3F5] rounded-xl overflow-hidden">
-              {catalogos.tareas_obligatorias.map((t) => (
-                <div
-                  key={t.id}
-                  className="px-4 py-3 flex items-center justify-between gap-3 bg-white hover:bg-[#FCFAFE]"
-                >
-                  <div className="min-w-0">
-                    <p
-                      className={`text-xs font-semibold ${
-                        t.activa ? 'text-[#1F172B]' : 'text-[#9D8FB5] line-through'
-                      }`}
-                    >
-                      {t.titulo}
-                    </p>
-                    <p className="text-[11px] text-[#7A6B93]">{t.categoria}</p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => handleToggleTask(t.id)}
-                      className={`px-2 py-1 rounded-lg text-[11px] font-semibold ${
-                        t.activa
-                          ? 'bg-[#F0FDF4] text-[#15803D]'
-                          : 'bg-[#FAF8FC] text-[#8B7CA5]'
-                      }`}
-                    >
-                      {t.activa ? 'Activa' : 'Pausada'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteTask(t.id)}
-                      className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
+                  ))
+              )}
             </div>
           </section>
 
@@ -1733,11 +1680,41 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
         </div>
       )}
       <ConfirmDeleteModal
+        open={Boolean(deleteTaskTarget)}
+        title="¿Seguro que deseas eliminar esta actividad definitivamente?"
+        detail={
+          deleteTaskTarget
+            ? `Se eliminará "${deleteTaskTarget.titulo}" de catalogos_controlops y sus registros asociados en actividades_diarias. No volverá a aparecer automáticamente.`
+            : undefined
+        }
+        loading={deletingAct}
+        onCancel={() => setDeleteTaskTarget(null)}
+        onConfirm={async () => {
+          if (!deleteTaskTarget) return;
+          setDeletingAct(true);
+          try {
+            const res = await onDeleteCatalogTask(deleteTaskTarget.id);
+            if (!res.ok) {
+              fail(res.error);
+              setDeleteTaskTarget(null);
+              return;
+            }
+            notify(
+              `Actividad "${deleteTaskTarget.titulo}" eliminada definitivamente de Supabase.`
+            );
+            setDeleteTaskTarget(null);
+          } finally {
+            setDeletingAct(false);
+          }
+        }}
+      />
+
+      <ConfirmDeleteModal
         open={Boolean(deleteActTarget)}
         title="¿Seguro que deseas eliminar este registro?"
         detail={
           deleteActTarget
-            ? `Se eliminará la actividad "${deleteActTarget.titulo}" (${deleteActTarget.sucursal_nombre}) de actividades_diarias y su evidencia adjunta si existe.`
+            ? `Se eliminará el registro "${deleteActTarget.titulo}" (${deleteActTarget.sucursal_nombre}) de actividades_diarias y su evidencia adjunta si existe.`
             : undefined
         }
         loading={deletingAct}
@@ -1752,7 +1729,7 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
               setDeleteActTarget(null);
               return;
             }
-            notify(`Actividad "${deleteActTarget.titulo}" eliminada.`);
+            notify(`Registro "${deleteActTarget.titulo}" eliminado.`);
             setDeleteActTarget(null);
           } finally {
             setDeletingAct(false);

@@ -20,6 +20,7 @@ import {
   MetaSucursal,
   SectionId,
   Sucursal,
+  TareaCatalogo,
   UsuarioControlOps,
 } from './types/controlops';
 import {
@@ -28,6 +29,7 @@ import {
   createSucursal,
   createUsuario,
   deleteActividadRecord,
+  deleteActividadesByCatalogTaskId,
   deleteEvidenciaFoto,
   deleteGastoORefrendoRecord,
   deleteLlamadaRecord,
@@ -211,7 +213,8 @@ export default function App() {
         gastosYRefrendos,
         horarios,
         diaActivo,
-        metas
+        metas,
+        catalogos.tareas_obligatorias
       ),
     [
       sucursales,
@@ -221,6 +224,7 @@ export default function App() {
       horarios,
       diaActivo,
       metas,
+      catalogos.tareas_obligatorias,
     ]
   );
 
@@ -264,7 +268,10 @@ export default function App() {
   const handleUpdateActividad = async (
     updated: ActividadDiaria
   ): Promise<ServiceResult> => {
-    const next = actividades.map((a) => (a.id === updated.id ? updated : a));
+    const exists = actividades.some((a) => a.id === updated.id);
+    const next = exists
+      ? actividades.map((a) => (a.id === updated.id ? updated : a))
+      : [updated, ...actividades];
     const res = await saveActividad(updated, next);
     if (!res.ok) {
       if (res.error) setSyncError(res.error);
@@ -528,6 +535,51 @@ export default function App() {
     }
     setCatalogos(nextCatalogos);
     return res;
+  };
+
+  const handleSaveCatalogTask = async (
+    tarea: TareaCatalogo,
+    isNew = false
+  ): Promise<ServiceResult> => {
+    const exists = catalogos.tareas_obligatorias.some((t) => t.id === tarea.id);
+    const nextTasks =
+      isNew || !exists
+        ? [...catalogos.tareas_obligatorias, tarea]
+        : catalogos.tareas_obligatorias.map((t) =>
+            t.id === tarea.id ? tarea : t
+          );
+    const nextCatalogos: CatalogosControlOps = {
+      ...catalogos,
+      id: catalogos.id || 'cat-global',
+      tareas_obligatorias: nextTasks,
+    };
+    return handleSaveCatalogos(nextCatalogos);
+  };
+
+  const handleDeleteCatalogTask = async (
+    taskId: string
+  ): Promise<ServiceResult> => {
+    const nextCatalogos: CatalogosControlOps = {
+      ...catalogos,
+      id: catalogos.id || 'cat-global',
+      tareas_obligatorias: catalogos.tareas_obligatorias.filter(
+        (t) => t.id !== taskId
+      ),
+    };
+    const res = await handleSaveCatalogos(nextCatalogos);
+    if (!res.ok) return res;
+
+    const cleanupRes = await deleteActividadesByCatalogTaskId(
+      taskId,
+      actividades
+    );
+    if (!cleanupRes.ok) {
+      if (cleanupRes.error) setSyncError(cleanupRes.error);
+      return cleanupRes;
+    }
+    const prefix = `act-cat-${taskId}__`;
+    setActividades((prev) => prev.filter((a) => !a.id.startsWith(prefix)));
+    return { ok: true };
   };
 
   const handleSaveUsuario = async (
@@ -803,6 +855,7 @@ export default function App() {
                       sucursal={currentCajeraSucursal}
                       metaSucursal={currentCajeraMeta}
                       actividades={actividades}
+                      tareasCatalogo={catalogos.tareas_obligatorias}
                       llamadas={llamadas}
                       gastosYRefrendos={gastosYRefrendos}
                       horarios={horarios}
@@ -857,6 +910,8 @@ export default function App() {
                     onCreateActividad={handleCreateActividad}
                     onCreateActividadesBatch={handleCreateActividadesBatch}
                     onDeleteActividad={handleDeleteActividad}
+                    onSaveCatalogTask={handleSaveCatalogTask}
+                    onDeleteCatalogTask={handleDeleteCatalogTask}
                     onDeleteEvidenciaActividad={handleDeleteEvidenciaActividad}
                     onResetActividadPendiente={handleResetActividadPendiente}
                     onGoToHorarios={() => setActiveSection('horarios')}
@@ -917,6 +972,8 @@ export default function App() {
                     onDeleteSucursal={handleDeleteSucursal}
                     onSaveMeta={handleSaveMeta}
                     onSaveCatalogos={handleSaveCatalogos}
+                    onSaveCatalogTask={handleSaveCatalogTask}
+                    onDeleteCatalogTask={handleDeleteCatalogTask}
                     onSaveUsuario={handleSaveUsuario}
                     onDeleteUsuario={handleDeleteUsuario}
                     onCreateActividadesBatch={handleCreateActividadesBatch}

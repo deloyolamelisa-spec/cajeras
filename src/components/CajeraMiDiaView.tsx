@@ -21,6 +21,7 @@ import {
   LlamadaSucursal,
   MetaSucursal,
   Sucursal,
+  TareaCatalogo,
   UsuarioControlOps,
 } from '../types/controlops';
 import {
@@ -29,6 +30,7 @@ import {
   formatHora12h,
   getCurrentLocalHHMM,
   getDiaSemanaFromDate,
+  resolveDailyTasksForBranch,
 } from '../utils/calculations';
 import { uploadEvidenciaFoto } from '../services/controlOpsService';
 
@@ -37,6 +39,7 @@ interface CajeraMiDiaViewProps {
   sucursal: Sucursal;
   metaSucursal?: MetaSucursal;
   actividades: ActividadDiaria[];
+  tareasCatalogo: TareaCatalogo[];
   llamadas: LlamadaSucursal[];
   gastosYRefrendos: GastoYRefrendo[];
   horarios: HorarioSucursalDia[];
@@ -49,6 +52,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
   sucursal,
   metaSucursal,
   actividades,
+  tareasCatalogo,
   llamadas,
   gastosYRefrendos,
   horarios,
@@ -109,14 +113,17 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     [actividades, sucursal.id]
   );
 
-  const tareasHoy = useMemo(() => {
-    return branchActividades.filter(
-      (a) =>
-        !a.dias_semana ||
-        a.dias_semana.length === 0 ||
-        a.dias_semana.includes(diaActivo)
-    );
-  }, [branchActividades, diaActivo]);
+  const tareasHoy = useMemo(
+    () =>
+      resolveDailyTasksForBranch(
+        sucursal,
+        tareasCatalogo,
+        actividades,
+        diaActivo,
+        todayStr
+      ),
+    [sucursal, tareasCatalogo, actividades, diaActivo, todayStr]
+  );
 
   const branchLlamadas = useMemo(
     () => llamadas.filter((l) => l.sucursal_id === sucursal.id),
@@ -135,24 +142,24 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
       (a) => a.estatus === 'Completada'
     ).length;
 
-    const delMes = branchActividades.filter((a) =>
-      a.fecha?.startsWith(currentMonthPrefix)
-    );
-    const fuenteMes = delMes.length > 0 ? delMes : tareasHoy;
-    const completadasMes = fuenteMes.filter(
-      (a) => a.estatus === 'Completada'
+    const completadasMes = branchActividades.filter(
+      (a) => a.fecha?.startsWith(currentMonthPrefix) && a.estatus === 'Completada'
     ).length;
-    const totalMes = Math.max(fuenteMes.length, completadasMes, 1);
-    const pctMes = Math.min(100, Math.round((completadasMes / totalMes) * 100));
+    const metaDiaria = Math.max(asignadasHoy, 1);
+    const totalEsperadoMes = metaDiaria * currentDay;
+    const pctMes = Math.min(
+      100,
+      Math.round((completadasMes / Math.max(totalEsperadoMes, 1)) * 100)
+    );
 
     return {
       completadasMes,
-      totalMes: fuenteMes.length,
+      totalMes: totalEsperadoMes,
       pctMes,
       completadasHoy,
       asignadasHoy,
     };
-  }, [branchActividades, tareasHoy, currentMonthPrefix]);
+  }, [branchActividades, tareasHoy, currentMonthPrefix, currentDay]);
 
   // KPI 2: METAS DE REFRENDOS (in clean MXN, max 2 decimals)
   const kpiRefrendos = useMemo(() => {
@@ -335,18 +342,16 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
             .reduce((acc, g) => acc + (Number(g.monto_real) || 0), 0) * 100
         ) / 100;
 
-      // Actividades asignadas para ese día de la semana (o registradas explícitamente en esa fecha)
-      const asignadasDiaList = branchActividades.filter(
-        (a) =>
-          !a.dias_semana ||
-          a.dias_semana.length === 0 ||
-          a.dias_semana.includes(diaSem)
+      const asignadasDiaList = resolveDailyTasksForBranch(
+        sucursal,
+        tareasCatalogo,
+        actividades,
+        diaSem,
+        dateStr
       );
       const actAsignadas = asignadasDiaList.length;
       const actCompletadas = asignadasDiaList.filter(
-        (a) =>
-          a.estatus === 'Completada' &&
-          (a.fecha === dateStr || (!a.fecha && dateStr === todayStr))
+        (a) => a.estatus === 'Completada'
       ).length;
 
       rows.push({
@@ -371,7 +376,8 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     todayStr,
     branchLlamadas,
     branchGastosRefrendos,
-    branchActividades,
+    actividades,
+    tareasCatalogo,
     metaSucursal,
     sucursal,
   ]);

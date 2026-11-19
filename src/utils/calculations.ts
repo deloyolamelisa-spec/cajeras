@@ -7,6 +7,7 @@ import {
   LlamadaSucursal,
   MetaSucursal,
   Sucursal,
+  TareaCatalogo,
 } from '../types/controlops';
 
 export function formatMXN(amount: number, decimals = 0): string {
@@ -88,6 +89,149 @@ export function getCurrentLocalHHMM(): string {
   const hh = String(now.getHours()).padStart(2, '0');
   const mm = String(now.getMinutes()).padStart(2, '0');
   return `${hh}:${mm}`;
+}
+
+export function getTodayLocalYYYYMMDD(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function buildCatalogActividadId(
+  tareaId: string,
+  sucursalId: string,
+  fechaStr: string
+): string {
+  return `act-cat-${tareaId}__${sucursalId}__${fechaStr}`;
+}
+
+export function extractCatalogTaskId(actividadId: string): string | null {
+  if (!actividadId.startsWith('act-cat-')) return null;
+  const rest = actividadId.slice('act-cat-'.length);
+  const sepIdx = rest.indexOf('__');
+  if (sepIdx === -1) return null;
+  return rest.slice(0, sepIdx);
+}
+
+export function resolveDailyTasksForBranch(
+  sucursal: Sucursal,
+  tareasCatalogo: TareaCatalogo[],
+  actividades: ActividadDiaria[],
+  diaActivo: DiaSemana,
+  fechaStr: string = getTodayLocalYYYYMMDD()
+): ActividadDiaria[] {
+  const activeCatalogTasks = tareasCatalogo.filter(
+    (t) =>
+      t.activa !== false &&
+      (!t.sucursal_id ||
+        t.sucursal_id === 'todas' ||
+        t.sucursal_id === sucursal.id) &&
+      (!t.dias_semana ||
+        t.dias_semana.length === 0 ||
+        t.dias_semana.includes(diaActivo))
+  );
+
+  const catalogTaskIdSet = new Set(tareasCatalogo.map((t) => t.id));
+  const branchActsOnDate = actividades.filter(
+    (a) => a.sucursal_id === sucursal.id && a.fecha === fechaStr
+  );
+
+  const usedRecordIds = new Set<string>();
+
+  const resolvedFromCatalog: ActividadDiaria[] = activeCatalogTasks.map(
+    (tarea) => {
+      const deterministicId = buildCatalogActividadId(
+        tarea.id,
+        sucursal.id,
+        fechaStr
+      );
+      const match =
+        branchActsOnDate.find((a) => a.id === deterministicId) ||
+        branchActsOnDate.find(
+          (a) => extractCatalogTaskId(a.id) === tarea.id
+        ) ||
+        branchActsOnDate.find(
+          (a) =>
+            !usedRecordIds.has(a.id) &&
+            a.titulo.trim().toLowerCase() === tarea.titulo.trim().toLowerCase()
+        );
+
+      if (match) {
+        usedRecordIds.add(match.id);
+        return {
+          ...match,
+          titulo: tarea.titulo,
+          descripcion:
+            tarea.descripcion !== undefined
+              ? tarea.descripcion
+              : match.descripcion,
+          categoria: tarea.categoria || match.categoria,
+          dias_semana:
+            tarea.dias_semana && tarea.dias_semana.length > 0
+              ? tarea.dias_semana
+              : match.dias_semana,
+          hora_limite: tarea.sin_horario_limite
+            ? null
+            : tarea.hora_limite ?? match.hora_limite ?? null,
+          sin_horario_limite:
+            tarea.sin_horario_limite !== undefined
+              ? Boolean(tarea.sin_horario_limite)
+              : Boolean(match.sin_horario_limite),
+        };
+      }
+
+      return {
+        id: deterministicId,
+        sucursal_id: sucursal.id,
+        sucursal_nombre: sucursal.nombre,
+        titulo: tarea.titulo,
+        descripcion: tarea.descripcion || '',
+        categoria: tarea.categoria,
+        responsable: sucursal.responsable_caja,
+        fecha: fechaStr,
+        dias_semana: tarea.dias_semana,
+        hora_limite: tarea.sin_horario_limite ? null : tarea.hora_limite ?? null,
+        sin_horario_limite: Boolean(tarea.sin_horario_limite),
+        hora_completada: null,
+        estatus: 'Pendiente',
+        evidencia_url: null,
+        observaciones: '',
+      };
+    }
+  );
+
+  // Include standalone branch-specific records in actividades_diarias that aren't deleted catalog orphans
+  const extraStandalone = actividades.filter((a) => {
+    if (a.sucursal_id !== sucursal.id) return false;
+    if (usedRecordIds.has(a.id)) return false;
+    const catId = extractCatalogTaskId(a.id);
+    if (catId) {
+      // If it came from a catalog task that is paused/deleted/not for this day, skip it
+      return false;
+    }
+    if (
+      a.dias_semana &&
+      a.dias_semana.length > 0 &&
+      !a.dias_semana.includes(diaActivo)
+    ) {
+      return false;
+    }
+    if (catalogTaskIdSet.size > 0 && a.fecha && a.fecha !== fechaStr) {
+      return false;
+    }
+    return true;
+  });
+
+  const combined = [...resolvedFromCatalog, ...extraStandalone];
+  return combined.sort((a, b) => {
+    if (a.sin_horario_limite && !b.sin_horario_limite) return 1;
+    if (!a.sin_horario_limite && b.sin_horario_limite) return -1;
+    const ha = a.hora_limite || '23:59';
+    const hb = b.hora_limite || '23:59';
+    return ha.localeCompare(hb);
+  });
 }
 
 export function evaluarVencimientoActividad(
@@ -200,9 +344,11 @@ export function computeBranchSummaries(
   gastosYRefrendos: GastoYRefrendo[],
   horarios: HorarioSucursalDia[],
   diaActivo: DiaSemana,
-  metasSucursal: MetaSucursal[] = []
+  metasSucursal: MetaSucursal[] = [],
+  tareasCatalogo: TareaCatalogo[] = []
 ): BranchMetricSummary[] {
   const activas = sucursales.filter((s) => s.activa);
+  const todayStr = getTodayLocalYYYYMMDD();
 
   return activas.map((sucursal) => {
     const metaConfig = metasSucursal.find((m) => m.sucursal_id === sucursal.id);
@@ -224,13 +370,22 @@ export function computeBranchSummaries(
       metaConfig?.meta_llamadas_diarias || sucursal.meta_llamadas_diarias || 30;
     const pctLlamadas = Math.min(100, (llamadasRegistradas / metaLlamadas) * 100);
 
-    const actividadesSuc = actividades.filter(
-      (a) =>
-        a.sucursal_id === sucursal.id &&
-        (!a.dias_semana ||
-          a.dias_semana.length === 0 ||
-          a.dias_semana.includes(diaActivo))
-    );
+    const actividadesSuc =
+      tareasCatalogo.length > 0
+        ? resolveDailyTasksForBranch(
+            sucursal,
+            tareasCatalogo,
+            actividades,
+            diaActivo,
+            todayStr
+          )
+        : actividades.filter(
+            (a) =>
+              a.sucursal_id === sucursal.id &&
+              (!a.dias_semana ||
+                a.dias_semana.length === 0 ||
+                a.dias_semana.includes(diaActivo))
+          );
     const horarioDia = horarios.find(
       (h) => h.sucursal_id === sucursal.id && h.dia === diaActivo
     );

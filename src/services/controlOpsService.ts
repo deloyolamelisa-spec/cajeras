@@ -397,12 +397,38 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
       writeLocal(STORAGE_KEYS.USUARIOS, usuarios);
     }
 
-    const catalogos =
-      !catalogosRes.error && catalogosRes.data && catalogosRes.data.length > 0
-        ? (catalogosRes.data[0] as CatalogosControlOps)
-        : readLocal(STORAGE_KEYS.CATALOGOS, INITIAL_CATALOGOS);
-    if (!catalogosRes.error && catalogosRes.data && catalogosRes.data.length > 0) {
-      writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
+    let catalogos: CatalogosControlOps;
+    if (!catalogosRes.error && catalogosRes.data) {
+      if (catalogosRes.data.length > 0) {
+        catalogos = catalogosRes.data[0] as CatalogosControlOps;
+        writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
+      } else {
+        // Carga inicial única: insertar las 9 actividades base solo cuando catalogos_controlops está vacío
+        const seedCatalog: CatalogosControlOps = {
+          id: 'cat-global',
+          tareas_obligatorias: INITIAL_CATALOGOS.tareas_obligatorias,
+          opciones_llamada: INITIAL_CATALOGOS.opciones_llamada,
+        };
+        const { data: seededData, error: seedError } = await supabase
+          .from(SUPABASE_TABLES.CATALOGOS)
+          .insert(seedCatalog)
+          .select();
+        if (seedError) {
+          tableWarnings.push(
+            `Seed ${SUPABASE_TABLES.CATALOGOS}: ${formatSupabaseError(seedError)}`
+          );
+          catalogos = readLocal(STORAGE_KEYS.CATALOGOS, seedCatalog);
+        } else {
+          catalogos =
+            seededData && seededData.length > 0
+              ? (seededData[0] as CatalogosControlOps)
+              : seedCatalog;
+          remoteCounts[SUPABASE_TABLES.CATALOGOS] = 1;
+          writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
+        }
+      }
+    } else {
+      catalogos = readLocal(STORAGE_KEYS.CATALOGOS, INITIAL_CATALOGOS);
     }
 
     const llamadas =
@@ -719,6 +745,48 @@ export async function deleteActividadRecord(
         err instanceof Error
           ? err.message
           : `Error de red al eliminar en ${SUPABASE_TABLES.ACTIVIDADES}`,
+    };
+  }
+}
+
+export async function deleteActividadesByCatalogTaskId(
+  taskId: string,
+  allActividades: ActividadDiaria[]
+): Promise<ServiceResult> {
+  const conn = requireConfiguredSupabase();
+  if (!conn.ok) return { ok: false, error: conn.error };
+
+  try {
+    const prefix = `act-cat-${taskId}__`;
+    const matching = allActividades.filter((a) => a.id.startsWith(prefix));
+    const { error } = await conn.client
+      .from(SUPABASE_TABLES.ACTIVIDADES)
+      .delete()
+      .like('id', `${prefix}%`);
+
+    if (error) {
+      return {
+        ok: false,
+        error: `Error al limpiar registros de actividad en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+      };
+    }
+
+    for (const act of matching) {
+      if (act.evidencia_url) {
+        await deleteEvidenciaFoto(act.evidencia_url);
+      }
+    }
+
+    const remaining = allActividades.filter((a) => !a.id.startsWith(prefix));
+    writeLocal(STORAGE_KEYS.ACTIVIDADES, remaining);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : `Error de red al limpiar actividad en ${SUPABASE_TABLES.ACTIVIDADES}`,
     };
   }
 }

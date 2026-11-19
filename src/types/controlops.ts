@@ -56,7 +56,12 @@ export interface MetaSucursal {
 export interface TareaCatalogo {
   id: string;
   titulo: string;
+  descripcion?: string;
   categoria: 'Caja' | 'Auditoría' | 'Expedientes' | 'Corte';
+  hora_limite?: string | null;
+  sin_horario_limite?: boolean;
+  sucursal_id?: string;
+  dias_semana?: DiaSemana[];
   activa: boolean;
 }
 
