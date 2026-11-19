@@ -1,0 +1,6 @@
+{
+  "name": "ControlOps",
+  "description": "Plataforma operativa para el monitoreo de cajas, llamadas, actividades, gastos, refrendos y auditoría de sucursales.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
