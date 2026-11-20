@@ -1,13 +1,17 @@
 import { getSupabaseClient } from '../lib/supabaseClient';
 import {
+  SUPABASE_ANON_KEY,
   SUPABASE_BUCKETS,
   SUPABASE_TABLES,
+  SUPABASE_URL,
   getSupabaseConfigStatus,
   isSupabaseConfigured,
 } from '../lib/supabaseConfig';
 import {
   ActividadDiaria,
   CatalogosControlOps,
+  EstatusAuditoriaLlamada,
+  EstatusVencimiento,
   GastoYRefrendo,
   HorarioSucursalDia,
   LlamadaSucursal,
@@ -55,6 +59,8 @@ export interface LoadedOperationalData {
 export interface ServiceResult<T = unknown> {
   ok: boolean;
   error?: string;
+  warning?: string;
+  insertedCount?: number;
   data?: T;
 }
 
@@ -301,10 +307,7 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
       metasRes,
       catalogosRes,
     ] = await Promise.all([
-      supabase
-        .from(SUPABASE_TABLES.LLAMADAS)
-        .select('*')
-        .order('fecha_registro', { ascending: false }),
+      supabase.from(SUPABASE_TABLES.LLAMADAS).select('*'),
       supabase
         .from(SUPABASE_TABLES.ACTIVIDADES)
         .select('*')
@@ -431,12 +434,21 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
       catalogos = readLocal(STORAGE_KEYS.CATALOGOS, INITIAL_CATALOGOS);
     }
 
-    const llamadas =
-      !llamadasRes.error && llamadasRes.data
-        ? (llamadasRes.data as LlamadaSucursal[])
-        : readLocal(STORAGE_KEYS.LLAMADAS, INITIAL_LLAMADAS);
+    let llamadas: LlamadaSucursal[];
     if (!llamadasRes.error && llamadasRes.data) {
+      if (llamadasRes.data.length > 0) {
+        llamadasSchemaCache.validColumns = new Set(
+          Object.keys(llamadasRes.data[0] as Record<string, unknown>)
+        );
+      }
+      llamadas = (llamadasRes.data as Record<string, unknown>[])
+        .map((row) => normalizeLlamadaFromDb(row, sucursales))
+        .sort((a, b) =>
+          (b.fecha_registro || '').localeCompare(a.fecha_registro || '')
+        );
       writeLocal(STORAGE_KEYS.LLAMADAS, llamadas);
+    } else {
+      llamadas = readLocal(STORAGE_KEYS.LLAMADAS, INITIAL_LLAMADAS);
     }
 
     const actividades =
@@ -488,17 +500,211 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
   }
 }
 
-function buildLlamadaPayload(llamada: LlamadaSucursal) {
+interface LlamadasSchemaCache {
+  validColumns: Set<string> | null;
+  missingColumns: Set<string>;
+  useAliasSucursal: boolean;
+  useAliasCliente: boolean;
+  omitGeneratedId: boolean;
+  useInsertInsteadOfUpsert: boolean;
+  openApiChecked: boolean;
+}
+
+const llamadasSchemaCache: LlamadasSchemaCache = {
+  validColumns: null,
+  missingColumns: new Set<string>(),
+  useAliasSucursal: false,
+  useAliasCliente: false,
+  omitGeneratedId: false,
+  useInsertInsteadOfUpsert: false,
+  openApiChecked: false,
+};
+
+function computeSafeVencimiento(fechaVenc: string): EstatusVencimiento {
+  if (!fechaVenc) return 'Al corriente';
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (fechaVenc < todayStr) return 'Vencido';
+  const today = new Date(`${todayStr}T00:00:00`);
+  const due = new Date(`${fechaVenc.slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(due.getTime())) return 'Al corriente';
+  const diffDays = (due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24);
+  if (diffDays <= 3) return 'Por vencer';
+  return 'Al corriente';
+}
+
+function normalizeLlamadaFromDb(
+  row: Record<string, unknown>,
+  sucursales: Sucursal[] = []
+): LlamadaSucursal {
+  const rawSucName = String(
+    row.sucursal_nombre ?? row.sucursal ?? ''
+  ).trim();
+  const rawSucId = String(row.sucursal_id ?? '').trim();
+  const matchedSuc =
+    sucursales.find((s) => s.id === rawSucId) ||
+    sucursales.find(
+      (s) => s.nombre.toLowerCase() === rawSucName.toLowerCase()
+    ) ||
+    sucursales.find(
+      (s) => s.codigo.toLowerCase() === rawSucName.toLowerCase()
+    );
+
+  const fechaVenc = row.fecha_vencimiento
+    ? String(row.fecha_vencimiento).slice(0, 10)
+    : '';
+  const reporteCajera = String(row.reporte_cajera ?? 'Sin reporte');
+  const rawEstatusVenc = String(row.estatus_vencimiento ?? '');
+  const estatusVencimiento: EstatusVencimiento =
+    rawEstatusVenc === 'Vencido' ||
+    rawEstatusVenc === 'Por vencer' ||
+    rawEstatusVenc === 'Al corriente'
+      ? rawEstatusVenc
+      : computeSafeVencimiento(fechaVenc);
+
+  const rawAud = String(row.estatus_auditoria ?? '');
+  const estatusAuditoria: EstatusAuditoriaLlamada =
+    rawAud === 'Verificada' || rawAud === 'Falsa' || rawAud === 'Sin auditar'
+      ? rawAud
+      : 'Sin auditar';
+
+  const idStr = String(
+    row.id ??
+      `ll-db-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+  );
+
   return {
+    id: idStr,
+    sucursal_id: rawSucId || matchedSuc?.id || '',
+    sucursal_nombre: rawSucName || matchedSuc?.nombre || 'Sucursal',
+    cliente_nombre: String(row.cliente_nombre ?? row.cliente ?? 'Cliente'),
+    contrato: String(row.contrato ?? ''),
+    telefono: String(row.telefono ?? ''),
+    monto_prestamo: Number(row.monto_prestamo ?? 0) || 0,
+    estatus_vencimiento: estatusVencimiento,
+    fecha_vencimiento: fechaVenc,
+    reporte_cajera: reporteCajera,
+    estatus_auditoria: estatusAuditoria,
+    observaciones_admin: String(row.observaciones_admin ?? ''),
+    cajera_nombre: String(
+      row.cajera_nombre ?? matchedSuc?.responsable_caja ?? ''
+    ),
+    llamada_registrada:
+      row.llamada_registrada !== undefined && row.llamada_registrada !== null
+        ? Boolean(row.llamada_registrada)
+        : reporteCajera !== 'Sin reporte',
+    fecha_registro: String(
+      row.fecha_registro ?? row.created_at ?? new Date().toISOString()
+    ),
+  };
+}
+
+function isClientTempId(id: string): boolean {
+  return id.startsWith('ll-');
+}
+
+async function discoverLlamadasSchema(): Promise<void> {
+  if (llamadasSchemaCache.validColumns || llamadasSchemaCache.openApiChecked) {
+    return;
+  }
+  llamadasSchemaCache.openApiChecked = true;
+  if (!isSupabaseConfigured()) return;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/`, {
+      method: 'GET',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        Accept: 'application/openapi+json, application/json',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return;
+
+    const spec = (await res.json()) as {
+      definitions?: Record<
+        string,
+        {
+          properties?: Record<
+            string,
+            { type?: string; format?: string }
+          >;
+        }
+      >;
+    };
+    const props = spec?.definitions?.[SUPABASE_TABLES.LLAMADAS]?.properties;
+    if (props && Object.keys(props).length > 0) {
+      llamadasSchemaCache.validColumns = new Set(Object.keys(props));
+      const idProp = props.id;
+      if (
+        idProp &&
+        (idProp.type === 'integer' ||
+          idProp.type === 'number' ||
+          idProp.format === 'uuid')
+      ) {
+        llamadasSchemaCache.omitGeneratedId = true;
+      }
+    }
+  } catch {
+    // OpenAPI introspection is optional; dynamic error-stripping handles fallback
+  }
+}
+
+function extractMissingColumnFromError(err: {
+  message?: string;
+  details?: string | null;
+  hint?: string | null;
+  code?: string;
+}): string | null {
+  const combined = `${err.message || ''} ${err.details || ''} ${err.hint || ''}`;
+  const patterns = [
+    /Could not find the ['"]([^'"]+)['"] column/i,
+    /column ['"]?([a-zA-Z0-9_]+)['"]? of relation/i,
+    /column [a-zA-Z0-9_]+\.([a-zA-Z0-9_]+) does not exist/i,
+    /column ['"]?([a-zA-Z0-9_]+)['"]? does not exist/i,
+  ];
+  for (const regex of patterns) {
+    const match = combined.match(regex);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+  return null;
+}
+
+function isRlsOrAuthError(err: { code?: string; message?: string }): boolean {
+  const msg = (err.message || '').toLowerCase();
+  return (
+    err.code === '42501' ||
+    msg.includes('row-level security') ||
+    msg.includes('permission denied') ||
+    msg.includes('jwt')
+  );
+}
+
+function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> {
+  const monto = Number(llamada.monto_prestamo);
+  const safeMonto = Number.isFinite(monto) && monto >= 0 ? monto : 0;
+  const safeFechaVenc =
+    llamada.fecha_vencimiento && String(llamada.fecha_vencimiento).trim()
+      ? String(llamada.fecha_vencimiento).trim().slice(0, 10)
+      : null;
+
+  const candidateValues: Record<string, unknown> = {
     id: llamada.id,
     sucursal_id: llamada.sucursal_id,
     sucursal_nombre: llamada.sucursal_nombre,
+    sucursal: llamada.sucursal_nombre,
     cliente_nombre: llamada.cliente_nombre,
+    cliente: llamada.cliente_nombre,
     contrato: llamada.contrato,
     telefono: llamada.telefono,
-    monto_prestamo: Number(llamada.monto_prestamo) || 0,
+    monto_prestamo: safeMonto,
     estatus_vencimiento: llamada.estatus_vencimiento,
-    fecha_vencimiento: llamada.fecha_vencimiento || null,
+    fecha_vencimiento: safeFechaVenc,
     reporte_cajera: llamada.reporte_cajera || 'Sin reporte',
     estatus_auditoria: llamada.estatus_auditoria || 'Sin auditar',
     observaciones_admin: llamada.observaciones_admin ?? '',
@@ -506,35 +712,272 @@ function buildLlamadaPayload(llamada: LlamadaSucursal) {
     llamada_registrada: Boolean(llamada.llamada_registrada),
     fecha_registro: llamada.fecha_registro || new Date().toISOString(),
   };
+
+  const { validColumns, missingColumns, useAliasSucursal, useAliasCliente, omitGeneratedId } =
+    llamadasSchemaCache;
+
+  const payload: Record<string, unknown> = {};
+
+  if (validColumns && validColumns.size > 0) {
+    for (const [col, val] of Object.entries(candidateValues)) {
+      if (!validColumns.has(col) || missingColumns.has(col)) continue;
+      if (col === 'id' && omitGeneratedId && isClientTempId(llamada.id)) {
+        continue;
+      }
+      payload[col] = val;
+    }
+    return payload;
+  }
+
+  // Schema not yet discovered: send canonical columns excluding known missing ones,
+  // and map base aliases (sucursal / cliente) if canonical columns were rejected.
+  const orderedKeys = [
+    'id',
+    'sucursal_id',
+    'sucursal_nombre',
+    ...(useAliasSucursal ? ['sucursal'] : []),
+    'cliente_nombre',
+    ...(useAliasCliente ? ['cliente'] : []),
+    'contrato',
+    'telefono',
+    'monto_prestamo',
+    'estatus_vencimiento',
+    'fecha_vencimiento',
+    'reporte_cajera',
+    'estatus_auditoria',
+    'observaciones_admin',
+    'cajera_nombre',
+    'llamada_registrada',
+    'fecha_registro',
+  ];
+
+  for (const col of orderedKeys) {
+    if (missingColumns.has(col)) continue;
+    if (col === 'id' && omitGeneratedId && isClientTempId(llamada.id)) {
+      continue;
+    }
+    payload[col] = candidateValues[col];
+  }
+
+  return payload;
+}
+
+function mergeDbRowWithInput(
+  orig: LlamadaSucursal,
+  dbRow: Record<string, unknown>
+): LlamadaSucursal {
+  const normalizedDb = normalizeLlamadaFromDb(dbRow);
+  return {
+    ...orig,
+    id: dbRow.id !== undefined && dbRow.id !== null ? String(dbRow.id) : orig.id,
+    sucursal_id:
+      dbRow.sucursal_id !== undefined && dbRow.sucursal_id !== null
+        ? normalizedDb.sucursal_id
+        : orig.sucursal_id,
+    sucursal_nombre:
+      dbRow.sucursal_nombre !== undefined || dbRow.sucursal !== undefined
+        ? normalizedDb.sucursal_nombre
+        : orig.sucursal_nombre,
+    cliente_nombre:
+      dbRow.cliente_nombre !== undefined || dbRow.cliente !== undefined
+        ? normalizedDb.cliente_nombre
+        : orig.cliente_nombre,
+    contrato:
+      dbRow.contrato !== undefined ? normalizedDb.contrato : orig.contrato,
+    telefono:
+      dbRow.telefono !== undefined ? normalizedDb.telefono : orig.telefono,
+    monto_prestamo:
+      dbRow.monto_prestamo !== undefined
+        ? normalizedDb.monto_prestamo
+        : orig.monto_prestamo,
+    estatus_vencimiento:
+      dbRow.estatus_vencimiento !== undefined
+        ? normalizedDb.estatus_vencimiento
+        : orig.estatus_vencimiento,
+    fecha_vencimiento:
+      dbRow.fecha_vencimiento !== undefined
+        ? normalizedDb.fecha_vencimiento
+        : orig.fecha_vencimiento,
+    reporte_cajera:
+      dbRow.reporte_cajera !== undefined
+        ? normalizedDb.reporte_cajera
+        : orig.reporte_cajera,
+    estatus_auditoria:
+      dbRow.estatus_auditoria !== undefined
+        ? normalizedDb.estatus_auditoria
+        : orig.estatus_auditoria,
+    observaciones_admin:
+      dbRow.observaciones_admin !== undefined
+        ? normalizedDb.observaciones_admin
+        : orig.observaciones_admin,
+    cajera_nombre:
+      dbRow.cajera_nombre !== undefined
+        ? normalizedDb.cajera_nombre
+        : orig.cajera_nombre,
+    llamada_registrada:
+      dbRow.llamada_registrada !== undefined
+        ? normalizedDb.llamada_registrada
+        : orig.llamada_registrada,
+    fecha_registro:
+      dbRow.fecha_registro !== undefined || dbRow.created_at !== undefined
+        ? normalizedDb.fecha_registro
+        : orig.fecha_registro,
+  };
+}
+
+async function executeLlamadasWriteChunk(
+  client: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  records: LlamadaSucursal[]
+): Promise<{
+  ok: boolean;
+  savedPairs: { origId: string; saved: LlamadaSucursal }[];
+  error?: string;
+  schemaFailed?: boolean;
+}> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const payloads = records.map(buildLlamadaPayload);
+    const hasPayloadKeys = payloads.every((p) => Object.keys(p).length > 0);
+    if (!hasPayloadKeys) {
+      return {
+        ok: false,
+        savedPairs: [],
+        schemaFailed: true,
+        error: `No quedaron columnas válidas para escribir en ${SUPABASE_TABLES.LLAMADAS}.`,
+      };
+    }
+
+    const hasIdInPayload = payloads.every(
+      (p) =>
+        (typeof p.id === 'string' && p.id.length > 0) ||
+        typeof p.id === 'number'
+    );
+    const useInsert =
+      llamadasSchemaCache.useInsertInsteadOfUpsert || !hasIdInPayload;
+
+    const query = useInsert
+      ? client.from(SUPABASE_TABLES.LLAMADAS).insert(payloads).select()
+      : client
+          .from(SUPABASE_TABLES.LLAMADAS)
+          .upsert(payloads, { onConflict: 'id' })
+          .select();
+
+    const { data, error } = await query;
+
+    if (!error) {
+      if (!data || data.length === 0) {
+        return {
+          ok: false,
+          savedPairs: [],
+          error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.LLAMADAS} (revisa políticas RLS).`,
+        };
+      }
+      if (!llamadasSchemaCache.validColumns && data.length > 0) {
+        llamadasSchemaCache.validColumns = new Set(
+          Object.keys(data[0] as Record<string, unknown>)
+        );
+      }
+      const savedPairs = (data as Record<string, unknown>[]).map((r, i) => {
+        const orig = records[i] || records[0];
+        return {
+          origId: orig.id,
+          saved: mergeDbRowWithInput(orig, r),
+        };
+      });
+      return { ok: true, savedPairs };
+    }
+
+    if (isRlsOrAuthError(error)) {
+      return {
+        ok: false,
+        savedPairs: [],
+        error: `Error de permisos en ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(error)}`,
+      };
+    }
+
+    const missingCol = extractMissingColumnFromError(error);
+    if (missingCol) {
+      llamadasSchemaCache.missingColumns.add(missingCol);
+      if (llamadasSchemaCache.validColumns) {
+        llamadasSchemaCache.validColumns.delete(missingCol);
+      }
+      if (
+        missingCol === 'sucursal_nombre' &&
+        !llamadasSchemaCache.missingColumns.has('sucursal')
+      ) {
+        llamadasSchemaCache.useAliasSucursal = true;
+      }
+      if (
+        missingCol === 'cliente_nombre' &&
+        !llamadasSchemaCache.missingColumns.has('cliente')
+      ) {
+        llamadasSchemaCache.useAliasCliente = true;
+      }
+      if (missingCol === 'id') {
+        llamadasSchemaCache.omitGeneratedId = true;
+        llamadasSchemaCache.useInsertInsteadOfUpsert = true;
+      }
+      continue;
+    }
+
+    const msgLower = (error.message || '').toLowerCase();
+    if (
+      error.code === '42P10' ||
+      msgLower.includes('on conflict') ||
+      msgLower.includes('no unique or exclusion constraint')
+    ) {
+      if (!llamadasSchemaCache.useInsertInsteadOfUpsert) {
+        llamadasSchemaCache.useInsertInsteadOfUpsert = true;
+        continue;
+      }
+    }
+
+    if (
+      error.code === '22P02' &&
+      (msgLower.includes('uuid') ||
+        msgLower.includes('bigint') ||
+        msgLower.includes('integer')) &&
+      !llamadasSchemaCache.omitGeneratedId
+    ) {
+      llamadasSchemaCache.omitGeneratedId = true;
+      llamadasSchemaCache.useInsertInsteadOfUpsert = true;
+      continue;
+    }
+
+    return {
+      ok: false,
+      savedPairs: [],
+      error: formatSupabaseError(error),
+    };
+  }
+
+  return {
+    ok: false,
+    savedPairs: [],
+    schemaFailed: true,
+    error: `No se pudieron compatibilizar las columnas de ${SUPABASE_TABLES.LLAMADAS}.`,
+  };
 }
 
 export async function saveLlamada(
   llamada: LlamadaSucursal,
   allLlamadas: LlamadaSucursal[]
-): Promise<ServiceResult> {
+): Promise<ServiceResult<LlamadaSucursal>> {
   const conn = requireConfiguredSupabase();
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
-    const payload = buildLlamadaPayload(llamada);
-    const { data, error } = await conn.client
-      .from(SUPABASE_TABLES.LLAMADAS)
-      .upsert(payload, { onConflict: 'id' })
-      .select();
-    if (error) {
+    await discoverLlamadasSchema();
+    const res = await executeLlamadasWriteChunk(conn.client, [llamada]);
+    if (!res.ok) {
       return {
         ok: false,
-        error: `Error en ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(error)}`,
+        error: `Error en ${SUPABASE_TABLES.LLAMADAS}: ${res.error}`,
       };
     }
-    if (!data || data.length === 0) {
-      return {
-        ok: false,
-        error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.LLAMADAS} (revisa políticas RLS).`,
-      };
-    }
-    writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
-    return { ok: true };
+    const saved = res.savedPairs[0]?.saved || llamada;
+    const nextList = allLlamadas.map((l) => (l.id === llamada.id ? saved : l));
+    writeLocal(STORAGE_KEYS.LLAMADAS, nextList);
+    return { ok: true, data: saved };
   } catch (err) {
     return {
       ok: false,
@@ -549,34 +992,78 @@ export async function saveLlamada(
 export async function saveLlamadasBatch(
   nuevasLlamadas: LlamadaSucursal[],
   allLlamadas: LlamadaSucursal[]
-): Promise<ServiceResult> {
-  if (nuevasLlamadas.length === 0) return { ok: true };
+): Promise<ServiceResult<LlamadaSucursal[]>> {
+  if (nuevasLlamadas.length === 0) return { ok: true, insertedCount: 0, data: [] };
   const conn = requireConfiguredSupabase();
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
+    await discoverLlamadasSchema();
     const chunkSize = 200;
+    const savedByOrigId = new Map<string, LlamadaSucursal>();
+    const allSaved: LlamadaSucursal[] = [];
+    const rowWarnings: string[] = [];
+
     for (let i = 0; i < nuevasLlamadas.length; i += chunkSize) {
-      const chunk = nuevasLlamadas.slice(i, i + chunkSize).map(buildLlamadaPayload);
-      const { data, error } = await conn.client
-        .from(SUPABASE_TABLES.LLAMADAS)
-        .upsert(chunk, { onConflict: 'id' })
-        .select();
-      if (error) {
+      const chunk = nuevasLlamadas.slice(i, i + chunkSize);
+      const res = await executeLlamadasWriteChunk(conn.client, chunk);
+
+      if (res.ok) {
+        for (const pair of res.savedPairs) {
+          savedByOrigId.set(pair.origId, pair.saved);
+          allSaved.push(pair.saved);
+        }
+        continue;
+      }
+
+      // If permissions/RLS or complete schema failure, abort clearly
+      if (
+        res.schemaFailed ||
+        (res.error && res.error.toLowerCase().includes('permisos')) ||
+        (res.error && res.error.toLowerCase().includes('rls'))
+      ) {
         return {
           ok: false,
-          error: `Error al importar en ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(error)}`,
+          error: `Error al importar en ${SUPABASE_TABLES.LLAMADAS}: ${res.error}`,
         };
       }
-      if (!data || data.length === 0) {
-        return {
-          ok: false,
-          error: `Supabase no confirmó la importación en ${SUPABASE_TABLES.LLAMADAS} (revisa RLS).`,
-        };
+
+      // Fallback row-by-row for this chunk so a single bad row doesn't stop the rest
+      for (const row of chunk) {
+        const singleRes = await executeLlamadasWriteChunk(conn.client, [row]);
+        if (singleRes.ok && singleRes.savedPairs.length > 0) {
+          const saved = singleRes.savedPairs[0].saved;
+          savedByOrigId.set(row.id, saved);
+          allSaved.push(saved);
+        } else {
+          rowWarnings.push(
+            `${row.cliente_nombre}: ${singleRes.error || 'omitido por formato incompatible'}`
+          );
+        }
       }
     }
-    writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
-    return { ok: true };
+
+    if (allSaved.length === 0) {
+      return {
+        ok: false,
+        error:
+          rowWarnings[0] ||
+          `No se pudo guardar ningún registro en ${SUPABASE_TABLES.LLAMADAS}.`,
+      };
+    }
+
+    const syncedList = allLlamadas.map((l) => savedByOrigId.get(l.id) || l);
+    writeLocal(STORAGE_KEYS.LLAMADAS, syncedList);
+
+    return {
+      ok: true,
+      insertedCount: allSaved.length,
+      data: allSaved,
+      warning:
+        rowWarnings.length > 0
+          ? `${rowWarnings.length} fila(s) omitida(s): ${rowWarnings.slice(0, 3).join(' | ')}`
+          : undefined,
+    };
   } catch (err) {
     return {
       ok: false,

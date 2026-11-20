@@ -228,9 +228,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     const list = scopedLlamadas.filter((item) => {
       if (q) {
         const matchText =
-          item.cliente_nombre.toLowerCase().includes(q) ||
-          item.contrato.toLowerCase().includes(q) ||
-          item.telefono.toLowerCase().includes(q);
+          (item.cliente_nombre || '').toLowerCase().includes(q) ||
+          (item.contrato || '').toLowerCase().includes(q) ||
+          (item.telefono || '').toLowerCase().includes(q);
         if (!matchText) return false;
       }
 
@@ -569,14 +569,16 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       const loteLabel = isCajera
         ? ` (Base ${dailyBatchSummary.nextLoteNum} de 3 del día)`
         : '';
+      const countSaved = res?.insertedCount ?? parsedImportRows.length;
+      const warnSuffix = res?.warning ? ` · Aviso: ${res.warning}` : '';
       setImportToast(
-        `${parsedImportRows.length} registro(s) sumados y guardados en llamadas_sucursal${loteLabel}.`
+        `${countSaved} registro(s) sumados y guardados en llamadas_sucursal${loteLabel}.${warnSuffix}`
       );
       setShowImportModal(false);
       setParsedImportRows([]);
       setImportWarnings([]);
       setImportFileName('');
-      setTimeout(() => setImportToast(null), 5000);
+      setTimeout(() => setImportToast(null), 6000);
     } finally {
       setImporting(false);
     }

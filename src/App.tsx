@@ -253,15 +253,16 @@ export default function App() {
   const handleImportLlamadas = async (
     nuevas: LlamadaSucursal[]
   ): Promise<ServiceResult> => {
-    if (nuevas.length === 0) return { ok: true };
-    const next = [...nuevas, ...llamadas];
-    const res = await saveLlamadasBatch(nuevas, next);
+    if (nuevas.length === 0) return { ok: true, insertedCount: 0 };
+    const provisional = [...nuevas, ...llamadas];
+    const res = await saveLlamadasBatch(nuevas, provisional);
     if (!res.ok) {
       if (res.error) setSyncError(`Supabase (${res.error})`);
       return res;
     }
-    setLlamadas(next);
-    return { ok: true };
+    const savedRows = Array.isArray(res.data) ? res.data : nuevas;
+    setLlamadas((prev) => [...savedRows, ...prev]);
+    return res;
   };
 
   const handleDeleteLlamada = async (id: string) => {
