@@ -198,11 +198,157 @@ export default function App() {
     setActiveSection('ranking');
   };
 
+  const resolvedCajeraSucursal = useMemo(() => {
+    if (currentUser?.rol !== 'cajera') return undefined;
+    const target = (currentUser.sucursal_id || '').trim().toLowerCase();
+    return (
+      sucursales.find((s) => s.id.toLowerCase() === target) ||
+      sucursales.find((s) => s.nombre.trim().toLowerCase() === target) ||
+      sucursales.find((s) => s.codigo.trim().toLowerCase() === target) ||
+      sucursales[0]
+    );
+  }, [currentUser, sucursales]);
+
   // Enforce strict role boundaries whenever user or section changes
   const effectiveSucursalId =
     currentUser?.rol === 'cajera'
-      ? currentUser.sucursal_id
+      ? resolvedCajeraSucursal?.id || currentUser.sucursal_id
       : selectedSucursalId;
+
+  const resolveSucursalForRecord = useCallback(
+    (sucId?: string, sucName?: string): Sucursal | undefined => {
+      if (currentUser?.rol === 'cajera' && resolvedCajeraSucursal) {
+        return resolvedCajeraSucursal;
+      }
+      const idNorm = (sucId || '').trim().toLowerCase();
+      const nameNorm = (sucName || '').trim().toLowerCase();
+      return (
+        sucursales.find((s) => s.id.toLowerCase() === idNorm) ||
+        sucursales.find((s) => s.nombre.trim().toLowerCase() === nameNorm) ||
+        sucursales.find((s) => s.nombre.trim().toLowerCase() === idNorm) ||
+        sucursales[0]
+      );
+    },
+    [currentUser, resolvedCajeraSucursal, sucursales]
+  );
+
+  const enrichActividadWithAuth = useCallback(
+    (act: ActividadDiaria): ActividadDiaria => {
+      const suc = resolveSucursalForRecord(
+        act.sucursal_id,
+        act.sucursal || act.sucursal_nombre
+      );
+      const safeSucNombre =
+        (
+          suc?.nombre ||
+          act.sucursal ||
+          act.sucursal_nombre ||
+          act.sucursal_id ||
+          'Sucursal'
+        ).trim() || 'Sucursal';
+      const isCaj = currentUser?.rol === 'cajera';
+      return {
+        ...act,
+        sucursal_id: suc?.id || act.sucursal_id || safeSucNombre,
+        sucursal_nombre: safeSucNombre,
+        sucursal: safeSucNombre,
+        cajera_id: isCaj
+          ? currentUser.id
+          : act.cajera_id || currentUser?.id || '',
+        cajera_nombre: isCaj
+          ? currentUser.nombre
+          : act.cajera_nombre ||
+            act.responsable ||
+            currentUser?.nombre ||
+            suc?.responsable_caja ||
+            '',
+        responsable: isCaj
+          ? currentUser.nombre
+          : act.responsable ||
+            act.cajera_nombre ||
+            currentUser?.nombre ||
+            suc?.responsable_caja ||
+            '',
+      };
+    },
+    [currentUser, resolveSucursalForRecord]
+  );
+
+  const enrichLlamadaWithAuth = useCallback(
+    (ll: LlamadaSucursal): LlamadaSucursal => {
+      const suc = resolveSucursalForRecord(
+        ll.sucursal_id,
+        ll.sucursal || ll.sucursal_nombre
+      );
+      const safeSucNombre =
+        (
+          suc?.nombre ||
+          ll.sucursal ||
+          ll.sucursal_nombre ||
+          ll.sucursal_id ||
+          'Sucursal'
+        ).trim() || 'Sucursal';
+      const isCaj = currentUser?.rol === 'cajera';
+      return {
+        ...ll,
+        sucursal_id: suc?.id || ll.sucursal_id || safeSucNombre,
+        sucursal_nombre: safeSucNombre,
+        sucursal: safeSucNombre,
+        cajera_id: isCaj
+          ? currentUser.id
+          : ll.cajera_id || currentUser?.id || '',
+        cajera_nombre: isCaj
+          ? currentUser.nombre
+          : ll.cajera_nombre ||
+            currentUser?.nombre ||
+            suc?.responsable_caja ||
+            '',
+      };
+    },
+    [currentUser, resolveSucursalForRecord]
+  );
+
+  const enrichGastoWithAuth = useCallback(
+    (reg: GastoYRefrendo): GastoYRefrendo => {
+      const suc = resolveSucursalForRecord(
+        reg.sucursal_id,
+        reg.sucursal || reg.sucursal_nombre
+      );
+      const safeSucNombre =
+        (
+          suc?.nombre ||
+          reg.sucursal ||
+          reg.sucursal_nombre ||
+          reg.sucursal_id ||
+          'Sucursal'
+        ).trim() || 'Sucursal';
+      const isCaj = currentUser?.rol === 'cajera';
+      return {
+        ...reg,
+        sucursal_id: suc?.id || reg.sucursal_id || safeSucNombre,
+        sucursal_nombre: safeSucNombre,
+        sucursal: safeSucNombre,
+        cajera_id: isCaj
+          ? currentUser.id
+          : reg.cajera_id || currentUser?.id || '',
+        cajera_nombre: isCaj
+          ? currentUser.nombre
+          : reg.cajera_nombre ||
+            reg.responsable ||
+            currentUser?.nombre ||
+            suc?.responsable_caja ||
+            '',
+        responsable: isCaj
+          ? currentUser.nombre
+          : reg.responsable ||
+            reg.cajera_nombre ||
+            currentUser?.nombre ||
+            suc?.responsable_caja ||
+            '',
+      };
+    },
+    [currentUser, resolveSucursalForRecord]
+  );
 
   const branchSummaries = useMemo(
     () =>
@@ -237,16 +383,18 @@ export default function App() {
   }, [branchSummaries]);
 
   const handleUpdateLlamada = async (updated: LlamadaSucursal) => {
-    const next = llamadas.map((l) => (l.id === updated.id ? updated : l));
+    const enriched = enrichLlamadaWithAuth(updated);
+    const next = llamadas.map((l) => (l.id === enriched.id ? enriched : l));
     setLlamadas(next);
-    const res = await saveLlamada(updated, next);
+    const res = await saveLlamada(enriched, next);
     if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
   const handleCreateLlamada = async (nueva: LlamadaSucursal) => {
-    const next = [nueva, ...llamadas];
+    const enriched = enrichLlamadaWithAuth(nueva);
+    const next = [enriched, ...llamadas];
     setLlamadas(next);
-    const res = await saveLlamada(nueva, next);
+    const res = await saveLlamada(enriched, next);
     if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
   };
 
@@ -254,13 +402,14 @@ export default function App() {
     nuevas: LlamadaSucursal[]
   ): Promise<ServiceResult> => {
     if (nuevas.length === 0) return { ok: true, insertedCount: 0 };
-    const provisional = [...nuevas, ...llamadas];
-    const res = await saveLlamadasBatch(nuevas, provisional);
+    const enrichedList = nuevas.map(enrichLlamadaWithAuth);
+    const provisional = [...enrichedList, ...llamadas];
+    const res = await saveLlamadasBatch(enrichedList, provisional);
     if (!res.ok) {
       if (res.error) setSyncError(`Supabase (${res.error})`);
       return res;
     }
-    const savedRows = Array.isArray(res.data) ? res.data : nuevas;
+    const savedRows = Array.isArray(res.data) ? res.data : enrichedList;
     setLlamadas((prev) => [...savedRows, ...prev]);
     return res;
   };
@@ -275,18 +424,19 @@ export default function App() {
   const handleUpdateActividad = async (
     updated: ActividadDiaria
   ): Promise<ServiceResult> => {
-    const exists = actividades.some((a) => a.id === updated.id);
+    const enriched = enrichActividadWithAuth(updated);
+    const exists = actividades.some((a) => a.id === enriched.id);
     const provisional = exists
-      ? actividades.map((a) => (a.id === updated.id ? updated : a))
-      : [updated, ...actividades];
-    const res = await saveActividad(updated, provisional);
+      ? actividades.map((a) => (a.id === enriched.id ? enriched : a))
+      : [enriched, ...actividades];
+    const res = await saveActividad(enriched, provisional);
     if (!res.ok) {
       if (res.error) setSyncError(res.error);
       return res;
     }
-    const saved = (res.data as ActividadDiaria | undefined) ?? updated;
+    const saved = (res.data as ActividadDiaria | undefined) ?? enriched;
     const synced = exists
-      ? actividades.map((a) => (a.id === updated.id ? saved : a))
+      ? actividades.map((a) => (a.id === enriched.id ? saved : a))
       : [saved, ...actividades];
     setActividades(synced);
     setSyncError(null);
@@ -296,13 +446,14 @@ export default function App() {
   const handleCreateActividad = async (
     nueva: ActividadDiaria
   ): Promise<ServiceResult> => {
-    const provisional = [nueva, ...actividades];
-    const res = await saveActividad(nueva, provisional);
+    const enriched = enrichActividadWithAuth(nueva);
+    const provisional = [enriched, ...actividades];
+    const res = await saveActividad(enriched, provisional);
     if (!res.ok) {
       if (res.error) setSyncError(res.error);
       return res;
     }
-    const saved = (res.data as ActividadDiaria | undefined) ?? nueva;
+    const saved = (res.data as ActividadDiaria | undefined) ?? enriched;
     setActividades((prev) => [saved, ...prev]);
     setSyncError(null);
     return res;
@@ -312,15 +463,16 @@ export default function App() {
     nuevas: ActividadDiaria[]
   ): Promise<ServiceResult> => {
     if (nuevas.length === 0) return { ok: true };
-    const provisional = [...nuevas, ...actividades];
-    const res = await saveActividadesBatch(nuevas, provisional);
+    const enrichedList = nuevas.map(enrichActividadWithAuth);
+    const provisional = [...enrichedList, ...actividades];
+    const res = await saveActividadesBatch(enrichedList, provisional);
     if (!res.ok) {
       if (res.error) setSyncError(res.error);
       return res;
     }
     const savedRows = Array.isArray(res.data)
       ? (res.data as ActividadDiaria[])
-      : nuevas;
+      : enrichedList;
     setActividades((prev) => [...savedRows, ...prev]);
     setSyncError(null);
     return res;
@@ -369,14 +521,20 @@ export default function App() {
     await handleUpdateActividad(updated);
   };
 
-  const handleCreateGastoORefrendo = async (nuevo: GastoYRefrendo) => {
-    const next = [nuevo, ...gastosYRefrendos];
-    const res = await saveGastoORefrendo(nuevo, next);
-    if (!res.ok && res.error) {
-      setSyncError(res.error);
-      return;
+  const handleCreateGastoORefrendo = async (
+    nuevo: GastoYRefrendo
+  ): Promise<ServiceResult> => {
+    const enriched = enrichGastoWithAuth(nuevo);
+    const provisional = [enriched, ...gastosYRefrendos];
+    const res = await saveGastoORefrendo(enriched, provisional);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
     }
-    setGastosYRefrendos(next);
+    const saved = (res.data as GastoYRefrendo | undefined) ?? enriched;
+    setGastosYRefrendos((prev) => [saved, ...prev]);
+    setSyncError(null);
+    return res;
   };
 
   const handleDeleteGastoORefrendo = async (registro: GastoYRefrendo) => {
@@ -695,7 +853,9 @@ export default function App() {
 
   const activeHeader = SECTION_TITLES[safeSection];
   const currentCajeraSucursal =
-    sucursales.find((s) => s.id === effectiveSucursalId) || sucursales[0];
+    resolvedCajeraSucursal ||
+    sucursales.find((s) => s.id === effectiveSucursalId) ||
+    sucursales[0];
   const currentCajeraMeta = metas.find(
     (m) => m.sucursal_id === currentCajeraSucursal?.id
   );
@@ -910,6 +1070,7 @@ export default function App() {
                     sucursales={sucursales}
                     selectedSucursalId={effectiveSucursalId}
                     userRole={currentUser.rol}
+                    currentUserId={currentUser.id}
                     currentUserName={currentUser.nombre}
                     opcionesReporte={catalogos.opciones_llamada}
                     onUpdateLlamada={handleUpdateLlamada}
@@ -959,6 +1120,8 @@ export default function App() {
                     sucursales={sucursales}
                     selectedSucursalId={effectiveSucursalId}
                     userRole={currentUser.rol}
+                    currentUserId={currentUser.id}
+                    currentUserName={currentUser.nombre}
                     fixedTab={
                       safeSection === 'refrendos'
                         ? 'refrendos'

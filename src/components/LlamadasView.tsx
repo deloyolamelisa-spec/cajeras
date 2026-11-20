@@ -40,6 +40,7 @@ interface LlamadasViewProps {
   sucursales: Sucursal[];
   selectedSucursalId: string;
   userRole: RolUsuario;
+  currentUserId?: string;
   currentUserName?: string;
   opcionesReporte: string[];
   onUpdateLlamada: (updated: LlamadaSucursal) => Promise<void>;
@@ -92,6 +93,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   sucursales,
   selectedSucursalId,
   userRole,
+  currentUserId,
   currentUserName,
   opcionesReporte,
   onUpdateLlamada,
@@ -306,6 +308,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       id: `ll-${Date.now()}`,
       sucursal_id: suc.id,
       sucursal_nombre: suc.nombre,
+      sucursal: suc.nombre,
       cliente_nombre: newForm.cliente_nombre.trim(),
       contrato:
         newForm.contrato.trim() ||
@@ -318,6 +321,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       estatus_auditoria: 'Sin auditar',
       observaciones_admin: isCajera ? '' : newForm.observaciones_admin.trim(),
       cajera_nombre: currentUserName || suc.responsable_caja,
+      cajera_id: currentUserId || '',
       llamada_registrada: true,
       fecha_registro: new Date().toISOString(),
     };
@@ -518,6 +522,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
           id: `ll-lote-${loteNum}__${todayStr}__${matchedSuc.id}__${batchStamp}-${idx}`,
           sucursal_id: matchedSuc.id,
           sucursal_nombre: matchedSuc.nombre,
+          sucursal: matchedSuc.nombre,
           cliente_nombre: cliente,
           contrato:
             contrato ||
@@ -532,6 +537,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
           cajera_nombre: isCajera
             ? currentUserName || matchedSuc.responsable_caja
             : matchedSuc.responsable_caja,
+          cajera_id: isCajera ? currentUserId || '' : '',
           llamada_registrada: false,
           fecha_registro: nowIso,
         });
@@ -1015,6 +1021,11 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                             if (!item.llamada_registrada) {
                               onUpdateLlamada({
                                 ...item,
+                                sucursal:
+                                  item.sucursal || item.sucursal_nombre,
+                                cajera_nombre:
+                                  currentUserName || item.cajera_nombre,
+                                cajera_id: currentUserId || item.cajera_id,
                                 llamada_registrada: true,
                               });
                             }
@@ -1032,6 +1043,11 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                             if (!item.llamada_registrada) {
                               onUpdateLlamada({
                                 ...item,
+                                sucursal:
+                                  item.sucursal || item.sucursal_nombre,
+                                cajera_nombre:
+                                  currentUserName || item.cajera_nombre,
+                                cajera_id: currentUserId || item.cajera_id,
                                 llamada_registrada: true,
                               });
                             }
@@ -1084,6 +1100,10 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                         onChange={(e) =>
                           onUpdateLlamada({
                             ...item,
+                            sucursal: item.sucursal || item.sucursal_nombre,
+                            cajera_nombre:
+                              currentUserName || item.cajera_nombre,
+                            cajera_id: currentUserId || item.cajera_id,
                             reporte_cajera: e.target
                               .value as ReporteCajeraOpcion,
                             llamada_registrada:

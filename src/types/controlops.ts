@@ -81,6 +81,7 @@ export interface LlamadaSucursal {
   id: string;
   sucursal_id: string;
   sucursal_nombre: string;
+  sucursal?: string;
   cliente_nombre: string;
   contrato: string;
   telefono: string;
@@ -91,6 +92,7 @@ export interface LlamadaSucursal {
   estatus_auditoria: EstatusAuditoriaLlamada;
   observaciones_admin: string;
   cajera_nombre: string;
+  cajera_id?: string;
   llamada_registrada: boolean;
   fecha_registro: string;
 }
@@ -101,6 +103,9 @@ export interface ActividadDiaria {
   id: string;
   sucursal_id: string;
   sucursal_nombre: string;
+  sucursal?: string;
+  cajera_nombre?: string;
+  cajera_id?: string;
   titulo: string;
   descripcion?: string;
   categoria: 'Caja' | 'Auditoría' | 'Expedientes' | 'Corte';
@@ -119,6 +124,9 @@ export interface GastoYRefrendo {
   id: string;
   sucursal_id: string;
   sucursal_nombre: string;
+  sucursal?: string;
+  cajera_nombre?: string;
+  cajera_id?: string;
   tipo: 'Gasto' | 'Refrendo';
   categoria: string;
   concepto: string;

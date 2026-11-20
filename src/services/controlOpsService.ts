@@ -466,12 +466,22 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
       actividades = readLocal(STORAGE_KEYS.ACTIVIDADES, INITIAL_ACTIVIDADES);
     }
 
-    const gastosYRefrendos =
-      !gastosRes.error && gastosRes.data
-        ? (gastosRes.data as GastoYRefrendo[])
-        : readLocal(STORAGE_KEYS.GASTOS_REFRENDOS, INITIAL_GASTOS_REFRENDOS);
+    let gastosYRefrendos: GastoYRefrendo[];
     if (!gastosRes.error && gastosRes.data) {
+      if (gastosRes.data.length > 0) {
+        gastosSchemaCache.validColumns = new Set(
+          Object.keys(gastosRes.data[0] as Record<string, unknown>)
+        );
+      }
+      gastosYRefrendos = (gastosRes.data as Record<string, unknown>[]).map(
+        (row) => normalizeGastoFromDb(row, sucursales)
+      );
       writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, gastosYRefrendos);
+    } else {
+      gastosYRefrendos = readLocal(
+        STORAGE_KEYS.GASTOS_REFRENDOS,
+        INITIAL_GASTOS_REFRENDOS
+      );
     }
 
     const horarios =
@@ -583,6 +593,7 @@ function normalizeLlamadaFromDb(
     id: idStr,
     sucursal_id: rawSucId || matchedSuc?.id || '',
     sucursal_nombre: rawSucName || matchedSuc?.nombre || 'Sucursal',
+    sucursal: rawSucName || matchedSuc?.nombre || 'Sucursal',
     cliente_nombre: String(row.cliente_nombre ?? row.cliente ?? 'Cliente'),
     contrato: String(row.contrato ?? ''),
     telefono: String(row.telefono ?? ''),
@@ -595,6 +606,8 @@ function normalizeLlamadaFromDb(
     cajera_nombre: String(
       row.cajera_nombre ?? matchedSuc?.responsable_caja ?? ''
     ),
+    cajera_id:
+      typeof row.cajera_id === 'string' ? row.cajera_id : undefined,
     llamada_registrada:
       row.llamada_registrada !== undefined && row.llamada_registrada !== null
         ? Boolean(row.llamada_registrada)
@@ -700,11 +713,15 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
       ? String(llamada.fecha_vencimiento).trim().slice(0, 10)
       : null;
 
+  const safeSucursalNombre =
+    (llamada.sucursal || llamada.sucursal_nombre || llamada.sucursal_id || 'Sucursal').trim() ||
+    'Sucursal';
+
   const candidateValues: Record<string, unknown> = {
     id: llamada.id,
-    sucursal_id: llamada.sucursal_id,
-    sucursal_nombre: llamada.sucursal_nombre,
-    sucursal: llamada.sucursal_nombre,
+    sucursal_id: llamada.sucursal_id || safeSucursalNombre,
+    sucursal_nombre: safeSucursalNombre,
+    sucursal: safeSucursalNombre,
     cliente_nombre: llamada.cliente_nombre,
     cliente: llamada.cliente_nombre,
     contrato: llamada.contrato,
@@ -716,11 +733,12 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
     estatus_auditoria: llamada.estatus_auditoria || 'Sin auditar',
     observaciones_admin: llamada.observaciones_admin ?? '',
     cajera_nombre: llamada.cajera_nombre ?? '',
+    cajera_id: llamada.cajera_id ?? '',
     llamada_registrada: Boolean(llamada.llamada_registrada),
     fecha_registro: llamada.fecha_registro || new Date().toISOString(),
   };
 
-  const { validColumns, missingColumns, useAliasSucursal, useAliasCliente, omitGeneratedId } =
+  const { validColumns, missingColumns, useAliasCliente, omitGeneratedId } =
     llamadasSchemaCache;
 
   const payload: Record<string, unknown> = {};
@@ -736,13 +754,13 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
     return payload;
   }
 
-  // Schema not yet discovered: send canonical columns excluding known missing ones,
-  // and map base aliases (sucursal / cliente) if canonical columns were rejected.
+  // Schema not yet discovered: send canonical columns plus sucursal & cajera_id,
+  // and map cliente alias if needed. Missing optional columns are stripped on retry.
   const orderedKeys = [
     'id',
     'sucursal_id',
     'sucursal_nombre',
-    ...(useAliasSucursal ? ['sucursal'] : []),
+    'sucursal',
     'cliente_nombre',
     ...(useAliasCliente ? ['cliente'] : []),
     'contrato',
@@ -754,6 +772,7 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
     'estatus_auditoria',
     'observaciones_admin',
     'cajera_nombre',
+    'cajera_id',
     'llamada_registrada',
     'fecha_registro',
   ];
@@ -1190,6 +1209,15 @@ function normalizeActividadFromDb(
     ),
     sucursal_id: rawSucId || matchedSuc?.id || '',
     sucursal_nombre: rawSucNombre || matchedSuc?.nombre || 'Sucursal',
+    sucursal: rawSucNombre || matchedSuc?.nombre || 'Sucursal',
+    cajera_nombre:
+      typeof row.cajera_nombre === 'string'
+        ? row.cajera_nombre
+        : typeof row.responsable === 'string'
+          ? row.responsable
+          : undefined,
+    cajera_id:
+      typeof row.cajera_id === 'string' ? row.cajera_id : undefined,
     titulo: String(row.titulo ?? 'Actividad'),
     descripcion:
       typeof row.descripcion === 'string' ? row.descripcion : undefined,
@@ -1201,7 +1229,7 @@ function normalizeActividadFromDb(
         ? row.categoria
         : 'Caja',
     responsable: String(
-      row.responsable ?? matchedSuc?.responsable_caja ?? ''
+      row.responsable ?? row.cajera_nombre ?? matchedSuc?.responsable_caja ?? ''
     ),
     fecha: row.fecha
       ? String(row.fecha).slice(0, 10)
@@ -1242,6 +1270,16 @@ function mergeActividadDbRowWithInput(
       dbRow.sucursal_nombre !== undefined || dbRow.sucursal !== undefined
         ? normalizedDb.sucursal_nombre
         : orig.sucursal_nombre,
+    sucursal:
+      dbRow.sucursal !== undefined || dbRow.sucursal_nombre !== undefined
+        ? normalizedDb.sucursal
+        : orig.sucursal || orig.sucursal_nombre,
+    cajera_nombre:
+      dbRow.cajera_nombre !== undefined
+        ? normalizedDb.cajera_nombre
+        : orig.cajera_nombre,
+    cajera_id:
+      dbRow.cajera_id !== undefined ? normalizedDb.cajera_id : orig.cajera_id,
     titulo: dbRow.titulo !== undefined ? normalizedDb.titulo : orig.titulo,
     descripcion:
       dbRow.descripcion !== undefined
@@ -1337,14 +1375,27 @@ async function discoverActividadesSchema(): Promise<void> {
 function buildActividadPayload(
   actividad: ActividadDiaria
 ): Record<string, unknown> {
+  const safeSucursalNombre =
+    (
+      actividad.sucursal ||
+      actividad.sucursal_nombre ||
+      actividad.sucursal_id ||
+      'Sucursal'
+    ).trim() || 'Sucursal';
+  const safeCajeraNombre =
+    (actividad.cajera_nombre || actividad.responsable || '').trim();
+
   const candidateValues: Record<string, unknown> = {
     id: actividad.id,
-    sucursal_id: actividad.sucursal_id,
-    sucursal_nombre: actividad.sucursal_nombre,
+    sucursal_id: actividad.sucursal_id || safeSucursalNombre,
+    sucursal_nombre: safeSucursalNombre,
+    sucursal: safeSucursalNombre,
+    cajera_nombre: safeCajeraNombre,
+    cajera_id: (actividad.cajera_id || '').trim(),
     titulo: actividad.titulo,
     descripcion: actividad.descripcion ?? '',
     categoria: actividad.categoria,
-    responsable: actividad.responsable ?? '',
+    responsable: actividad.responsable || safeCajeraNombre,
     fecha: actividad.fecha,
     dias_semana: actividad.dias_semana ?? [],
     hora_limite: actividad.hora_limite ?? null,
@@ -1717,32 +1768,368 @@ export async function deleteActividadesByCatalogTaskId(
   }
 }
 
+interface GastosSchemaCache {
+  validColumns: Set<string> | null;
+  missingColumns: Set<string>;
+  omitGeneratedId: boolean;
+  useInsertInsteadOfUpsert: boolean;
+  openApiChecked: boolean;
+}
+
+const gastosSchemaCache: GastosSchemaCache = {
+  validColumns: null,
+  missingColumns: new Set<string>(),
+  omitGeneratedId: false,
+  useInsertInsteadOfUpsert: false,
+  openApiChecked: false,
+};
+
+function normalizeGastoFromDb(
+  row: Record<string, unknown>,
+  sucursales: Sucursal[] = []
+): GastoYRefrendo {
+  const rawSucId = String(row.sucursal_id ?? '').trim();
+  const rawSucNombre = String(
+    row.sucursal_nombre ?? row.sucursal ?? ''
+  ).trim();
+  const matchedSuc =
+    sucursales.find((s) => s.id === rawSucId) ||
+    sucursales.find(
+      (s) => s.nombre.toLowerCase() === rawSucNombre.toLowerCase()
+    );
+
+  const safeSucNombre = rawSucNombre || matchedSuc?.nombre || 'Sucursal';
+
+  return {
+    id: String(
+      row.id ?? `gr-db-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    ),
+    sucursal_id: rawSucId || matchedSuc?.id || '',
+    sucursal_nombre: safeSucNombre,
+    sucursal: safeSucNombre,
+    cajera_nombre:
+      typeof row.cajera_nombre === 'string'
+        ? row.cajera_nombre
+        : typeof row.responsable === 'string'
+          ? row.responsable
+          : undefined,
+    cajera_id: typeof row.cajera_id === 'string' ? row.cajera_id : undefined,
+    tipo: row.tipo === 'Refrendo' ? 'Refrendo' : 'Gasto',
+    categoria: String(row.categoria ?? 'Operación de Sucursal'),
+    concepto: String(row.concepto ?? ''),
+    monto_real: Number(row.monto_real ?? 0) || 0,
+    presupuesto_limite: Number(row.presupuesto_limite ?? 0) || 0,
+    cantidad_refrendos: Number(row.cantidad_refrendos ?? 0) || 0,
+    meta_refrendos: Number(row.meta_refrendos ?? 0) || 0,
+    fecha: row.fecha
+      ? String(row.fecha).slice(0, 10)
+      : new Date().toISOString().slice(0, 10),
+    responsable: String(
+      row.responsable ?? row.cajera_nombre ?? matchedSuc?.responsable_caja ?? ''
+    ),
+    evidencia_url:
+      typeof row.evidencia_url === 'string' ? row.evidencia_url : null,
+    notas: typeof row.notas === 'string' ? row.notas : '',
+  };
+}
+
+function mergeGastoDbRowWithInput(
+  orig: GastoYRefrendo,
+  dbRow: Record<string, unknown>
+): GastoYRefrendo {
+  const normalizedDb = normalizeGastoFromDb(dbRow);
+  return {
+    ...orig,
+    id:
+      dbRow.id !== undefined && dbRow.id !== null
+        ? String(dbRow.id)
+        : orig.id,
+    sucursal_id:
+      dbRow.sucursal_id !== undefined && dbRow.sucursal_id !== null
+        ? normalizedDb.sucursal_id
+        : orig.sucursal_id,
+    sucursal_nombre:
+      dbRow.sucursal_nombre !== undefined || dbRow.sucursal !== undefined
+        ? normalizedDb.sucursal_nombre
+        : orig.sucursal_nombre,
+    sucursal:
+      dbRow.sucursal !== undefined || dbRow.sucursal_nombre !== undefined
+        ? normalizedDb.sucursal
+        : orig.sucursal || orig.sucursal_nombre,
+    cajera_nombre:
+      dbRow.cajera_nombre !== undefined
+        ? normalizedDb.cajera_nombre
+        : orig.cajera_nombre,
+    cajera_id:
+      dbRow.cajera_id !== undefined ? normalizedDb.cajera_id : orig.cajera_id,
+  };
+}
+
+async function discoverGastosSchema(): Promise<void> {
+  if (gastosSchemaCache.validColumns || gastosSchemaCache.openApiChecked) {
+    return;
+  }
+  gastosSchemaCache.openApiChecked = true;
+  if (!isSupabaseConfigured()) return;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/`, {
+      method: 'GET',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        Accept: 'application/openapi+json, application/json',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return;
+
+    const spec = (await res.json()) as {
+      definitions?: Record<
+        string,
+        {
+          properties?: Record<string, { type?: string; format?: string }>;
+        }
+      >;
+    };
+    const props =
+      spec?.definitions?.[SUPABASE_TABLES.GASTOS_REFRENDOS]?.properties;
+    if (props && Object.keys(props).length > 0) {
+      gastosSchemaCache.validColumns = new Set(Object.keys(props));
+      const idProp = props.id;
+      if (
+        idProp &&
+        (idProp.type === 'integer' ||
+          idProp.type === 'number' ||
+          idProp.format === 'uuid')
+      ) {
+        gastosSchemaCache.omitGeneratedId = true;
+      }
+    }
+  } catch {
+    // OpenAPI introspection is optional
+  }
+}
+
+function buildGastoPayload(registro: GastoYRefrendo): Record<string, unknown> {
+  const safeSucursalNombre =
+    (
+      registro.sucursal ||
+      registro.sucursal_nombre ||
+      registro.sucursal_id ||
+      'Sucursal'
+    ).trim() || 'Sucursal';
+  const safeCajeraNombre = (
+    registro.cajera_nombre ||
+    registro.responsable ||
+    ''
+  ).trim();
+
+  const candidateValues: Record<string, unknown> = {
+    id: registro.id,
+    sucursal_id: registro.sucursal_id || safeSucursalNombre,
+    sucursal_nombre: safeSucursalNombre,
+    sucursal: safeSucursalNombre,
+    cajera_nombre: safeCajeraNombre,
+    cajera_id: (registro.cajera_id || '').trim(),
+    tipo: registro.tipo,
+    categoria: registro.categoria,
+    concepto: registro.concepto,
+    monto_real: Number(registro.monto_real) || 0,
+    presupuesto_limite: Number(registro.presupuesto_limite) || 0,
+    cantidad_refrendos: Number(registro.cantidad_refrendos) || 0,
+    meta_refrendos: Number(registro.meta_refrendos) || 0,
+    fecha: registro.fecha,
+    responsable: registro.responsable || safeCajeraNombre,
+    evidencia_url: registro.evidencia_url ?? null,
+    notas: registro.notas ?? '',
+  };
+
+  const { validColumns, missingColumns, omitGeneratedId } = gastosSchemaCache;
+  const payload: Record<string, unknown> = {};
+  const isTempId = registro.id.startsWith('gr-');
+
+  if (validColumns && validColumns.size > 0) {
+    for (const [col, val] of Object.entries(candidateValues)) {
+      if (!validColumns.has(col) || missingColumns.has(col)) continue;
+      if (col === 'id' && omitGeneratedId && isTempId) continue;
+      payload[col] = val;
+    }
+    return payload;
+  }
+
+  for (const [col, val] of Object.entries(candidateValues)) {
+    if (missingColumns.has(col)) continue;
+    if (col === 'id' && omitGeneratedId && isTempId) continue;
+    payload[col] = val;
+  }
+
+  return payload;
+}
+
 export async function saveGastoORefrendo(
   registro: GastoYRefrendo,
   allRegistros: GastoYRefrendo[]
-): Promise<ServiceResult> {
+): Promise<ServiceResult<GastoYRefrendo>> {
   const conn = requireConfiguredSupabase();
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
-    const { data, error } = await conn.client
-      .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
-      .upsert(registro, { onConflict: 'id' })
-      .select();
-    if (error) {
+    await discoverGastosSchema();
+    let lastError: {
+      message?: string;
+      details?: string | null;
+      hint?: string | null;
+      code?: string;
+    } | null = null;
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const payload = buildGastoPayload(registro);
+      if (Object.keys(payload).length === 0) {
+        return {
+          ok: false,
+          error: lastError
+            ? `Error Supabase en ${SUPABASE_TABLES.GASTOS_REFRENDOS} — ${formatSupabaseError(lastError)}`
+            : `No quedaron columnas válidas para escribir en ${SUPABASE_TABLES.GASTOS_REFRENDOS}.`,
+        };
+      }
+
+      const hasIdInPayload =
+        (typeof payload.id === 'string' && payload.id.length > 0) ||
+        typeof payload.id === 'number';
+      const useInsert =
+        gastosSchemaCache.useInsertInsteadOfUpsert || !hasIdInPayload;
+
+      let data: unknown[] | null = null;
+      let error: {
+        message?: string;
+        details?: string | null;
+        hint?: string | null;
+        code?: string;
+      } | null = null;
+
+      if (useInsert && hasIdInPayload) {
+        const updatePayload = { ...payload };
+        const recordId = updatePayload.id;
+        delete updatePayload.id;
+        const updateRes = await conn.client
+          .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
+          .update(updatePayload)
+          .eq('id', recordId as string | number)
+          .select();
+        if (updateRes.error) {
+          error = updateRes.error;
+        } else if (updateRes.data && updateRes.data.length > 0) {
+          data = updateRes.data;
+        } else {
+          const insertRes = await conn.client
+            .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
+            .insert(payload)
+            .select();
+          data = insertRes.data;
+          error = insertRes.error;
+        }
+      } else {
+        const res = useInsert
+          ? await conn.client
+              .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
+              .insert(payload)
+              .select()
+          : await conn.client
+              .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
+              .upsert(payload, { onConflict: 'id' })
+              .select();
+        data = res.data;
+        error = res.error;
+      }
+
+      if (!error) {
+        if (!data || data.length === 0) {
+          return {
+            ok: false,
+            error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.GASTOS_REFRENDOS} (revisa RLS).`,
+          };
+        }
+        if (!gastosSchemaCache.validColumns && data.length > 0) {
+          gastosSchemaCache.validColumns = new Set(
+            Object.keys(data[0] as Record<string, unknown>)
+          );
+        }
+        const saved = mergeGastoDbRowWithInput(
+          registro,
+          data[0] as Record<string, unknown>
+        );
+        const syncedList = allRegistros.map((r) =>
+          r.id === registro.id ? saved : r
+        );
+        writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, syncedList);
+        return { ok: true, data: saved };
+      }
+
+      lastError = error;
+
+      if (isRlsOrAuthError(error)) {
+        return {
+          ok: false,
+          error: `Error Supabase en ${SUPABASE_TABLES.GASTOS_REFRENDOS} — ${formatSupabaseError(error)}`,
+        };
+      }
+
+      const missingCol = extractMissingColumnFromError(error);
+      if (
+        missingCol &&
+        Object.prototype.hasOwnProperty.call(payload, missingCol) &&
+        !gastosSchemaCache.missingColumns.has(missingCol)
+      ) {
+        gastosSchemaCache.missingColumns.add(missingCol);
+        if (gastosSchemaCache.validColumns) {
+          gastosSchemaCache.validColumns.delete(missingCol);
+        }
+        if (missingCol === 'id') {
+          gastosSchemaCache.omitGeneratedId = true;
+          gastosSchemaCache.useInsertInsteadOfUpsert = true;
+        }
+        continue;
+      }
+
+      const msgLower = (error.message || '').toLowerCase();
+      if (
+        (error.code === '42P10' ||
+          msgLower.includes('on conflict') ||
+          msgLower.includes('no unique or exclusion constraint')) &&
+        !gastosSchemaCache.useInsertInsteadOfUpsert
+      ) {
+        gastosSchemaCache.useInsertInsteadOfUpsert = true;
+        continue;
+      }
+
+      if (
+        error.code === '22P02' &&
+        (msgLower.includes('uuid') ||
+          msgLower.includes('bigint') ||
+          msgLower.includes('integer')) &&
+        !gastosSchemaCache.omitGeneratedId
+      ) {
+        gastosSchemaCache.omitGeneratedId = true;
+        gastosSchemaCache.useInsertInsteadOfUpsert = true;
+        continue;
+      }
+
       return {
         ok: false,
-        error: `Error en ${SUPABASE_TABLES.GASTOS_REFRENDOS}: ${formatSupabaseError(error)}`,
+        error: `Error Supabase en ${SUPABASE_TABLES.GASTOS_REFRENDOS} — ${formatSupabaseError(error)}`,
       };
     }
-    if (!data || data.length === 0) {
-      return {
-        ok: false,
-        error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.GASTOS_REFRENDOS} (revisa RLS).`,
-      };
-    }
-    writeLocal(STORAGE_KEYS.GASTOS_REFRENDOS, allRegistros);
-    return { ok: true };
+
+    return {
+      ok: false,
+      error: lastError
+        ? `Error Supabase en ${SUPABASE_TABLES.GASTOS_REFRENDOS} — ${formatSupabaseError(lastError)}`
+        : `Error inesperado al guardar en ${SUPABASE_TABLES.GASTOS_REFRENDOS}.`,
+    };
   } catch (err) {
     return {
       ok: false,

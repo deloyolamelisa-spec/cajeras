@@ -557,8 +557,25 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         return;
       }
 
+      const safeSucursalNombre =
+        (
+          sucursal.nombre ||
+          actividad.sucursal_nombre ||
+          actividad.sucursal ||
+          'Sucursal'
+        ).trim() || 'Sucursal';
+
       const updated: ActividadDiaria = {
         ...actividad,
+        sucursal_id: sucursal.id || actividad.sucursal_id,
+        sucursal_nombre: safeSucursalNombre,
+        sucursal: safeSucursalNombre,
+        cajera_id: currentUser.id,
+        cajera_nombre: currentUser.nombre,
+        responsable:
+          currentUser.nombre ||
+          actividad.responsable ||
+          sucursal.responsable_caja,
         estatus: 'Completada',
         hora_completada: getCurrentLocalHHMM(),
         fecha: todayStr,

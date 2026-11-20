@@ -16,7 +16,7 @@ import {
   Sucursal,
 } from '../types/controlops';
 import { formatMXN, formatPercent } from '../utils/calculations';
-import { uploadEvidenciaFoto } from '../services/controlOpsService';
+import { ServiceResult, uploadEvidenciaFoto } from '../services/controlOpsService';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface GastosRefrendosViewProps {
@@ -25,8 +25,10 @@ interface GastosRefrendosViewProps {
   sucursales: Sucursal[];
   selectedSucursalId: string;
   userRole: RolUsuario;
+  currentUserId?: string;
+  currentUserName?: string;
   fixedTab?: 'gastos' | 'refrendos';
-  onCreateRegistro: (nuevo: GastoYRefrendo) => Promise<void>;
+  onCreateRegistro: (nuevo: GastoYRefrendo) => Promise<ServiceResult | void>;
   onDeleteRegistro: (registro: GastoYRefrendo) => Promise<void>;
   onDeleteEvidenciaRegistro: (registro: GastoYRefrendo) => Promise<void>;
   openCreateModalExternal?: boolean;
@@ -39,6 +41,8 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
   sucursales,
   selectedSucursalId,
   userRole,
+  currentUserId,
+  currentUserName,
   fixedTab,
   onCreateRegistro,
   onDeleteRegistro,
@@ -48,6 +52,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
 }) => {
   const isCajera = userRole === 'cajera';
   const isCreador = userRole === 'creador';
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [subTab, setSubTab] = useState<'gastos' | 'refrendos' | 'bitacora'>(
     fixedTab ?? 'gastos'
   );
@@ -127,21 +132,37 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
     e.preventDefault();
     if (!form.concepto.trim()) return;
     setSaving(true);
+    setSaveError(null);
     try {
       const targetSucId =
         userRole === 'cajera' ? selectedSucursalId : form.sucursal_id;
       const suc =
         sucursales.find((s) => s.id === targetSucId) || sucursales[0];
+      const safeSucursalNombre = (suc?.nombre || 'Sucursal').trim() || 'Sucursal';
       let evidenciaUrl: string | null = null;
       if (receiptFile) {
-        const res = await uploadEvidenciaFoto(receiptFile, 'gastos', suc.id);
+        const res = await uploadEvidenciaFoto(
+          receiptFile,
+          'gastos',
+          suc?.id || targetSucId
+        );
+        if (!res.uploadedToSupabase || !res.url) {
+          setSaveError(
+            res.error ||
+              'No se pudo subir la foto del comprobante a Supabase Storage.'
+          );
+          return;
+        }
         evidenciaUrl = res.url;
       }
 
       const nuevo: GastoYRefrendo = {
         id: `gr-${Date.now()}`,
-        sucursal_id: suc.id,
-        sucursal_nombre: suc.nombre,
+        sucursal_id: suc?.id || targetSucId,
+        sucursal_nombre: safeSucursalNombre,
+        sucursal: safeSucursalNombre,
+        cajera_id: currentUserId || '',
+        cajera_nombre: currentUserName || suc?.responsable_caja || '',
         tipo: form.tipo,
         categoria: form.categoria,
         concepto: form.concepto.trim(),
@@ -153,11 +174,21 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
         meta_refrendos:
           form.tipo === 'Refrendo' ? Number(form.meta_refrendos) || 0 : 0,
         fecha: new Date().toISOString().slice(0, 10),
-        responsable: suc.responsable_caja,
+        responsable:
+          (isCajera && currentUserName) ||
+          currentUserName ||
+          suc?.responsable_caja ||
+          '',
         evidencia_url: evidenciaUrl,
         notas: form.notas.trim(),
       };
-      await onCreateRegistro(nuevo);
+      const saveRes = await onCreateRegistro(nuevo);
+      if (saveRes && saveRes.ok === false) {
+        setSaveError(
+          saveRes.error || 'No se pudo guardar el registro en Supabase.'
+        );
+        return;
+      }
       setForm({
         ...form,
         concepto: '',
@@ -172,6 +203,21 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
 
   return (
     <div className="space-y-6">
+      {saveError && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3 text-xs sm:text-sm font-medium text-[#BE123C] flex items-center justify-between gap-3"
+        >
+          <span>{saveError}</span>
+          <button
+            type="button"
+            onClick={() => setSaveError(null)}
+            className="font-bold underline shrink-0"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
       {/* Header & Sub-Navigation */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         {!fixedTab ? (
