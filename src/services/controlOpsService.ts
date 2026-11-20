@@ -1101,6 +1101,11 @@ export async function saveLlamadasBatch(
   }
 }
 
+function toDbFilterId(id: string): string | number {
+  const trimmed = id.trim();
+  return /^\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
+}
+
 export async function deleteLlamadaRecord(
   id: string,
   allLlamadas: LlamadaSucursal[]
@@ -1109,11 +1114,22 @@ export async function deleteLlamadaRecord(
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
+    await discoverLlamadasSchema();
+    if (llamadasSchemaCache.omitGeneratedId && isClientTempId(id)) {
+      writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
+      return { ok: true };
+    }
+
     const { error } = await conn.client
       .from(SUPABASE_TABLES.LLAMADAS)
       .delete()
-      .eq('id', id);
+      .eq('id', toDbFilterId(id));
     if (error) {
+      if (error.code === '22P02' && isClientTempId(id)) {
+        llamadasSchemaCache.omitGeneratedId = true;
+        writeLocal(STORAGE_KEYS.LLAMADAS, allLlamadas);
+        return { ok: true };
+      }
       return {
         ok: false,
         error: `Error al eliminar en ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(error)}`,
@@ -1501,7 +1517,7 @@ async function executeActividadesWriteChunk(
       const updateRes = await client
         .from(SUPABASE_TABLES.ACTIVIDADES)
         .update(singlePayload)
-        .eq('id', recordId as string | number)
+        .eq('id', toDbFilterId(String(recordId)))
         .select();
 
       if (updateRes.error) {
@@ -1700,15 +1716,26 @@ export async function deleteActividadRecord(
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
-    const { error } = await conn.client
-      .from(SUPABASE_TABLES.ACTIVIDADES)
-      .delete()
-      .eq('id', actividad.id);
-    if (error) {
-      return {
-        ok: false,
-        error: `Error al eliminar en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
-      };
+    await discoverActividadesSchema();
+    const shouldSkipDbDelete =
+      actividadesSchemaCache.omitGeneratedId &&
+      isClientTempActividadId(actividad.id);
+
+    if (!shouldSkipDbDelete) {
+      const { error } = await conn.client
+        .from(SUPABASE_TABLES.ACTIVIDADES)
+        .delete()
+        .eq('id', toDbFilterId(actividad.id));
+      if (error) {
+        if (error.code === '22P02' && isClientTempActividadId(actividad.id)) {
+          actividadesSchemaCache.omitGeneratedId = true;
+        } else {
+          return {
+            ok: false,
+            error: `Error al eliminar en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+          };
+        }
+      }
     }
     if (actividad.evidencia_url) {
       await deleteEvidenciaFoto(actividad.evidencia_url);
@@ -1728,24 +1755,71 @@ export async function deleteActividadRecord(
 
 export async function deleteActividadesByCatalogTaskId(
   taskId: string,
-  allActividades: ActividadDiaria[]
+  allActividades: ActividadDiaria[],
+  taskTitle?: string
 ): Promise<ServiceResult> {
   const conn = requireConfiguredSupabase();
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
+    await discoverActividadesSchema();
     const prefix = `act-cat-${taskId}__`;
-    const matching = allActividades.filter((a) => a.id.startsWith(prefix));
-    const { error } = await conn.client
-      .from(SUPABASE_TABLES.ACTIVIDADES)
-      .delete()
-      .like('id', `${prefix}%`);
+    const normalizedTitle = taskTitle?.trim().toLowerCase();
 
-    if (error) {
-      return {
-        ok: false,
-        error: `Error al limpiar registros de actividad en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
-      };
+    const matching = allActividades.filter((a) => {
+      if (a.id.startsWith(prefix)) return true;
+      if (
+        normalizedTitle &&
+        !a.id.startsWith('act-cat-') &&
+        a.titulo.trim().toLowerCase() === normalizedTitle
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    const getDbIdsToDelete = () =>
+      matching
+        .filter(
+          (a) =>
+            !(
+              actividadesSchemaCache.omitGeneratedId &&
+              isClientTempActividadId(a.id)
+            )
+        )
+        .map((a) => toDbFilterId(a.id));
+
+    let dbIds = getDbIdsToDelete();
+
+    if (dbIds.length > 0) {
+      const { error } = await conn.client
+        .from(SUPABASE_TABLES.ACTIVIDADES)
+        .delete()
+        .in('id', dbIds);
+
+      if (error) {
+        if (error.code === '22P02') {
+          actividadesSchemaCache.omitGeneratedId = true;
+          dbIds = getDbIdsToDelete();
+          if (dbIds.length > 0) {
+            const retryRes = await conn.client
+              .from(SUPABASE_TABLES.ACTIVIDADES)
+              .delete()
+              .in('id', dbIds);
+            if (retryRes.error) {
+              return {
+                ok: false,
+                error: `Error al limpiar registros de actividad en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(retryRes.error)}`,
+              };
+            }
+          }
+        } else {
+          return {
+            ok: false,
+            error: `Error al limpiar registros de actividad en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+          };
+        }
+      }
     }
 
     for (const act of matching) {
@@ -1754,7 +1828,8 @@ export async function deleteActividadesByCatalogTaskId(
       }
     }
 
-    const remaining = allActividades.filter((a) => !a.id.startsWith(prefix));
+    const matchingIds = new Set(matching.map((m) => m.id));
+    const remaining = allActividades.filter((a) => !matchingIds.has(a.id));
     writeLocal(STORAGE_KEYS.ACTIVIDADES, remaining);
     return { ok: true };
   } catch (err) {
@@ -2018,7 +2093,7 @@ export async function saveGastoORefrendo(
         const updateRes = await conn.client
           .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
           .update(updatePayload)
-          .eq('id', recordId as string | number)
+          .eq('id', toDbFilterId(String(recordId)))
           .select();
         if (updateRes.error) {
           error = updateRes.error;
@@ -2149,15 +2224,23 @@ export async function deleteGastoORefrendoRecord(
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
-    const { error } = await conn.client
-      .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
-      .delete()
-      .eq('id', registro.id);
-    if (error) {
-      return {
-        ok: false,
-        error: `Error al eliminar en ${SUPABASE_TABLES.GASTOS_REFRENDOS}: ${formatSupabaseError(error)}`,
-      };
+    await discoverGastosSchema();
+    const isTempId = registro.id.startsWith('gr-');
+    if (!(gastosSchemaCache.omitGeneratedId && isTempId)) {
+      const { error } = await conn.client
+        .from(SUPABASE_TABLES.GASTOS_REFRENDOS)
+        .delete()
+        .eq('id', toDbFilterId(registro.id));
+      if (error) {
+        if (error.code === '22P02' && isTempId) {
+          gastosSchemaCache.omitGeneratedId = true;
+        } else {
+          return {
+            ok: false,
+            error: `Error al eliminar en ${SUPABASE_TABLES.GASTOS_REFRENDOS}: ${formatSupabaseError(error)}`,
+          };
+        }
+      }
     }
     if (registro.evidencia_url) {
       await deleteEvidenciaFoto(registro.evidencia_url);

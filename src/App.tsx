@@ -735,6 +735,9 @@ export default function App() {
   const handleDeleteCatalogTask = async (
     taskId: string
   ): Promise<ServiceResult> => {
+    const deletedTask = catalogos.tareas_obligatorias.find(
+      (t) => t.id === taskId
+    );
     const nextCatalogos: CatalogosControlOps = {
       ...catalogos,
       id: catalogos.id || 'cat-global',
@@ -747,14 +750,28 @@ export default function App() {
 
     const cleanupRes = await deleteActividadesByCatalogTaskId(
       taskId,
-      actividades
+      actividades,
+      deletedTask?.titulo
     );
     if (!cleanupRes.ok) {
       if (cleanupRes.error) setSyncError(cleanupRes.error);
       return cleanupRes;
     }
     const prefix = `act-cat-${taskId}__`;
-    setActividades((prev) => prev.filter((a) => !a.id.startsWith(prefix)));
+    const normalizedTitle = deletedTask?.titulo.trim().toLowerCase();
+    setActividades((prev) =>
+      prev.filter((a) => {
+        if (a.id.startsWith(prefix)) return false;
+        if (
+          normalizedTitle &&
+          !a.id.startsWith('act-cat-') &&
+          a.titulo.trim().toLowerCase() === normalizedTitle
+        ) {
+          return false;
+        }
+        return true;
+      })
+    );
     return { ok: true };
   };
 
