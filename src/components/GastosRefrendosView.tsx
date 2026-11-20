@@ -22,6 +22,7 @@ import {
   formatPercent,
   getTodayLocalYYYYMMDD,
   parseMoneyInput,
+  roundMoney2,
 } from '../utils/calculations';
 import { ServiceResult, uploadEvidenciaFoto } from '../services/controlOpsService';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
@@ -186,6 +187,37 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
     if (selectedSucursalId === 'todas') return registros;
     return registros.filter((r) => r.sucursal_id === selectedSucursalId);
   }, [registros, selectedSucursalId]);
+
+  const periodRollup = useMemo(() => {
+    const monthPrefix = todayStr.slice(0, 7);
+    const gastosHoy = roundMoney2(
+      scopedRegistros
+        .filter((r) => r.tipo === 'Gasto' && r.fecha === todayStr)
+        .reduce((acc, r) => acc + (Number(r.monto_real) || 0), 0)
+    );
+    const gastosMes = roundMoney2(
+      scopedRegistros
+        .filter((r) => r.tipo === 'Gasto' && r.fecha?.startsWith(monthPrefix))
+        .reduce((acc, r) => acc + (Number(r.monto_real) || 0), 0)
+    );
+    const refrendosHoy = roundMoney2(
+      scopedRegistros
+        .filter((r) => r.tipo === 'Refrendo' && r.fecha === todayStr)
+        .reduce((acc, r) => acc + (Number(r.monto_real) || 0), 0)
+    );
+    const refrendosMes = roundMoney2(
+      scopedRegistros
+        .filter((r) => r.tipo === 'Refrendo' && r.fecha?.startsWith(monthPrefix))
+        .reduce((acc, r) => acc + (Number(r.monto_real) || 0), 0)
+    );
+    return {
+      gastosHoy,
+      gastosMes,
+      refrendosHoy,
+      refrendosMes,
+      monthPrefix,
+    };
+  }, [scopedRegistros, todayStr]);
 
   const maxChartCeiling = useMemo(() => {
     const vals = visibleSummaries.flatMap((s) => [
@@ -460,8 +492,14 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                   Gráfica comparativa: Gasto Real vs Techo Máximo
                 </h2>
                 <p className="text-xs text-[#7A6B93]">
-                  La línea vertical punteada indica el presupuesto límite de
-                  cada sucursal.
+                  Hoy ({todayStr}):{' '}
+                  <span className="font-mono-num font-bold text-[#1F172B]">
+                    {formatCurrencyClean(periodRollup.gastosHoy)}
+                  </span>{' '}
+                  · Acumulado del mes ({periodRollup.monthPrefix}):{' '}
+                  <span className="font-mono-num font-bold text-[#5B21B6]">
+                    {formatCurrencyClean(periodRollup.gastosMes)}
+                  </span>
                 </p>
               </div>
               <div className="flex items-center gap-4 text-xs text-[#55476E]">
@@ -749,7 +787,14 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                   Desempeño de refrendos por sucursal
                 </h2>
                 <p className="text-xs text-[#7A6B93]">
-                  Comparativa de operaciones renovadas respecto a la meta asignada.
+                  Hoy ({todayStr}):{' '}
+                  <span className="font-mono-num font-bold text-[#15803D]">
+                    {formatCurrencyClean(periodRollup.refrendosHoy)}
+                  </span>{' '}
+                  · Acumulado del mes ({periodRollup.monthPrefix}):{' '}
+                  <span className="font-mono-num font-bold text-[#DB2777]">
+                    {formatCurrencyClean(periodRollup.refrendosMes)}
+                  </span>
                 </p>
               </div>
               <TrendingUp className="h-5 w-5 text-[#DB2777]" />

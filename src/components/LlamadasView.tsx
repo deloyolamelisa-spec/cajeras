@@ -118,6 +118,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   ];
   const [searchQuery, setSearchQuery] = useState('');
   const [filterAuditoria, setFilterAuditoria] = useState<string>('todos');
+  const [filterFecha, setFilterFecha] = useState<'hoy' | 'todos'>(() =>
+    isCajera ? 'hoy' : 'todos'
+  );
   const [filterVencimiento, setFilterVencimiento] = useState<string>('todos');
   const [filterMonto, setFilterMonto] = useState<string>('todos');
   const [sortBy, setSortBy] = useState<string>('recientes');
@@ -218,16 +221,25 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   }, [scopedLlamadas, todayStr]);
 
   const metrics = useMemo(() => {
-    const registradas = scopedLlamadas.filter((l) => l.llamada_registrada).length;
-    const pendientes = scopedLlamadas.filter((l) => !l.llamada_registrada).length;
-    const verificadas = scopedLlamadas.filter(
+    const todayScoped = scopedLlamadas.filter(
+      (l) => getLlamadaLocalDate(l) === todayStr
+    );
+    const currentMonthPrefix = todayStr.slice(0, 7);
+    const registradas = todayScoped.filter((l) => l.llamada_registrada).length;
+    const pendientes = todayScoped.filter((l) => !l.llamada_registrada).length;
+    const verificadas = todayScoped.filter(
       (l) => l.estatus_auditoria === 'Verificada'
     ).length;
-    const falsas = scopedLlamadas.filter(
+    const falsas = todayScoped.filter(
       (l) => l.estatus_auditoria === 'Falsa'
     ).length;
-    const sinAuditar = scopedLlamadas.filter(
+    const sinAuditar = todayScoped.filter(
       (l) => l.estatus_auditoria === 'Sin auditar'
+    ).length;
+    const registradasMes = scopedLlamadas.filter(
+      (l) =>
+        l.llamada_registrada &&
+        getLlamadaLocalDate(l).startsWith(currentMonthPrefix)
     ).length;
 
     const metaDiaria =
@@ -243,15 +255,19 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       verificadas,
       falsas,
       sinAuditar,
+      registradasMes,
       metaDiaria,
       pct,
     };
-  }, [scopedLlamadas, selectedSucursalId, sucursales]);
+  }, [scopedLlamadas, selectedSucursalId, sucursales, todayStr]);
 
   const filteredLlamadas = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
 
     const list = scopedLlamadas.filter((item) => {
+      if (filterFecha === 'hoy' && getLlamadaLocalDate(item) !== todayStr) {
+        return false;
+      }
       if (q) {
         const matchText =
           (item.cliente_nombre || '').toLowerCase().includes(q) ||
@@ -301,11 +317,14 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     return list;
   }, [
     scopedLlamadas,
+    filterFecha,
+    todayStr,
     searchQuery,
     filterAuditoria,
     filterVencimiento,
     filterMonto,
     sortBy,
+    canAuditCalls,
   ]);
 
   const handleSaveObservation = async (item: LlamadaSucursal) => {
@@ -632,11 +651,14 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
               />
             </div>
             <p className="text-xs text-[#7A6B93] pt-0.5">
-              Meta diaria operativa: 30 llamadas por sucursal · Faltan{' '}
+              Meta diaria ({todayStr}): {metrics.metaDiaria} llamadas · Faltan{' '}
               <span className="font-mono-num font-semibold text-[#1F172B]">
                 {Math.max(0, metrics.metaDiaria - metrics.registradas)}
               </span>{' '}
-              para completar la meta del día.
+              hoy · Acumulado del mes:{' '}
+              <span className="font-mono-num font-semibold text-[#5B21B6]">
+                {metrics.registradasMes} llamadas
+              </span>
             </p>
           </div>
 
@@ -889,6 +911,16 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
               <option value="pendiente_marcar">Pendientes por marcar</option>
             </select>
           )}
+
+          <select
+            aria-label="Filtrar por fecha"
+            value={filterFecha}
+            onChange={(e) => setFilterFecha(e.target.value as 'hoy' | 'todos')}
+            className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#5B21B6] focus:outline-none focus:border-[#8B5CF6]"
+          >
+            <option value="hoy">Fecha: Solo hoy ({todayStr})</option>
+            <option value="todos">Fecha: Todo el historial</option>
+          </select>
 
           <select
             aria-label="Filtrar por vencimiento"

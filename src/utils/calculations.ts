@@ -772,6 +772,7 @@ export function computeBranchSummaries(
 ): BranchMetricSummary[] {
   const activas = sucursales.filter((s) => s.activa);
   const todayStr = getTodayLocalYYYYMMDD();
+  const currentMonthPrefix = todayStr.slice(0, 7);
   const monthPrefix =
     filterOptions?.monthPrefix && filterOptions.monthPrefix !== 'todos'
       ? filterOptions.monthPrefix
@@ -784,17 +785,23 @@ export function computeBranchSummaries(
   const rangeEnd =
     rawDesde && rawHasta && rawDesde > rawHasta ? rawDesde : rawHasta;
 
-  const matchesDate = (dateStr: string): boolean => {
-    if (hasRange) {
-      if (!dateStr) return false;
-      if (rangeStart && dateStr < rangeStart) return false;
-      if (rangeEnd && dateStr > rangeEnd) return false;
-      return true;
-    }
-    if (monthPrefix) {
-      return Boolean(dateStr && dateStr.startsWith(monthPrefix));
-    }
+  const matchesRange = (dateStr: string): boolean => {
+    if (!dateStr) return false;
+    if (rangeStart && dateStr < rangeStart) return false;
+    if (rangeEnd && dateStr > rangeEnd) return false;
     return true;
+  };
+
+  const matchesLlamadaDate = (dateStr: string): boolean => {
+    if (hasRange) return matchesRange(dateStr);
+    if (monthPrefix) return Boolean(dateStr && dateStr.startsWith(monthPrefix));
+    return dateStr === todayStr;
+  };
+
+  const matchesFinanceDate = (dateStr: string): boolean => {
+    if (hasRange) return matchesRange(dateStr);
+    if (monthPrefix) return Boolean(dateStr && dateStr.startsWith(monthPrefix));
+    return Boolean(dateStr && dateStr.startsWith(currentMonthPrefix));
   };
 
   const activityDates: string[] = (() => {
@@ -831,7 +838,7 @@ export function computeBranchSummaries(
 
     const llamadasSuc = llamadas.filter((l) => {
       if (l.sucursal_id !== sucursal.id) return false;
-      if (!matchesDate(getLlamadaLocalDate(l))) return false;
+      if (!matchesLlamadaDate(getLlamadaLocalDate(l))) return false;
       if (
         cajeraFilter &&
         l.cajera_nombre.trim().toLowerCase() !== cajeraFilter &&
@@ -855,10 +862,15 @@ export function computeBranchSummaries(
     ).length;
     const metaDiariaLlamadas =
       metaConfig?.meta_llamadas_diarias || sucursal.meta_llamadas_diarias || 30;
-    const metaLlamadas =
-      hasRange && rangeDaysCount > 1
-        ? metaDiariaLlamadas * rangeDaysCount
-        : metaDiariaLlamadas;
+    let metaLlamadas = metaDiariaLlamadas;
+    if (hasRange && rangeDaysCount > 1) {
+      metaLlamadas = metaDiariaLlamadas * rangeDaysCount;
+    } else if (!hasRange && monthPrefix.length === 7) {
+      const [yy, mm] = monthPrefix.split('-').map(Number);
+      const daysInMo =
+        yy && mm ? new Date(Date.UTC(yy, mm, 0)).getUTCDate() : 30;
+      metaLlamadas = metaDiariaLlamadas * daysInMo;
+    }
     const pctLlamadas =
       metaLlamadas > 0
         ? Math.min(100, (llamadasRegistradas / metaLlamadas) * 100)
@@ -900,7 +912,7 @@ export function computeBranchSummaries(
 
     const gastosSuc = gastosYRefrendos.filter((g) => {
       if (g.sucursal_id !== sucursal.id || g.tipo !== 'Gasto') return false;
-      if (!matchesDate(g.fecha || '')) return false;
+      if (!matchesFinanceDate(g.fecha || '')) return false;
       if (
         cajeraFilter &&
         g.responsable.trim().toLowerCase() !== cajeraFilter &&
@@ -928,7 +940,7 @@ export function computeBranchSummaries(
 
     const refrendosSuc = gastosYRefrendos.filter((g) => {
       if (g.sucursal_id !== sucursal.id || g.tipo !== 'Refrendo') return false;
-      if (!matchesDate(g.fecha || '')) return false;
+      if (!matchesFinanceDate(g.fecha || '')) return false;
       if (
         cajeraFilter &&
         g.responsable.trim().toLowerCase() !== cajeraFilter &&

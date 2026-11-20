@@ -246,7 +246,9 @@ export const RankingView: React.FC<RankingViewProps> = ({
         ? `${filterAnio}-${filterMes}`
         : filterAnio !== 'todos'
           ? filterAnio
-          : 'todos';
+          : filterMes !== 'todos'
+            ? `${todayStr.slice(0, 4)}-${filterMes}`
+            : undefined;
 
     const baseList =
       hasCustomFilter && sucursales.length > 0
@@ -279,6 +281,7 @@ export const RankingView: React.FC<RankingViewProps> = ({
     hasDateRange,
     fechaDesde,
     fechaHasta,
+    todayStr,
     sucursales,
     llamadas,
     actividades,
