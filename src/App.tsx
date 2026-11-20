@@ -54,7 +54,9 @@ import {
 } from './services/controlOpsService';
 import {
   computeBranchSummaries,
+  ensureBaseDailyCatalogTasks,
   getTodayDiaSemana,
+  isFixedBaseTask,
 } from './utils/calculations';
 import { isSupabaseConfigured } from './lib/supabaseConfig';
 import { INITIAL_CATALOGOS } from './data/mockData';
@@ -350,6 +352,19 @@ export default function App() {
     [currentUser, resolveSucursalForRecord]
   );
 
+  const guaranteedTareasCatalogo = useMemo(
+    () => ensureBaseDailyCatalogTasks(catalogos.tareas_obligatorias),
+    [catalogos.tareas_obligatorias]
+  );
+
+  const guaranteedCatalogos = useMemo<CatalogosControlOps>(
+    () => ({
+      ...catalogos,
+      tareas_obligatorias: guaranteedTareasCatalogo,
+    }),
+    [catalogos, guaranteedTareasCatalogo]
+  );
+
   const branchSummaries = useMemo(
     () =>
       computeBranchSummaries(
@@ -360,7 +375,7 @@ export default function App() {
         horarios,
         diaActivo,
         metas,
-        catalogos.tareas_obligatorias
+        guaranteedTareasCatalogo
       ),
     [
       sucursales,
@@ -370,7 +385,7 @@ export default function App() {
       horarios,
       diaActivo,
       metas,
-      catalogos.tareas_obligatorias,
+      guaranteedTareasCatalogo,
     ]
   );
 
@@ -382,12 +397,15 @@ export default function App() {
     return map;
   }, [branchSummaries]);
 
-  const handleUpdateLlamada = async (updated: LlamadaSucursal) => {
+  const handleUpdateLlamada = async (
+    updated: LlamadaSucursal
+  ): Promise<ServiceResult> => {
     const enriched = enrichLlamadaWithAuth(updated);
     const next = llamadas.map((l) => (l.id === enriched.id ? enriched : l));
     setLlamadas(next);
     const res = await saveLlamada(enriched, next);
     if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    return res;
   };
 
   const handleCreateLlamada = async (nueva: LlamadaSucursal) => {
@@ -717,17 +735,16 @@ export default function App() {
     tarea: TareaCatalogo,
     isNew = false
   ): Promise<ServiceResult> => {
-    const exists = catalogos.tareas_obligatorias.some((t) => t.id === tarea.id);
+    const baseList = ensureBaseDailyCatalogTasks(catalogos.tareas_obligatorias);
+    const exists = baseList.some((t) => t.id === tarea.id);
     const nextTasks =
       isNew || !exists
-        ? [...catalogos.tareas_obligatorias, tarea]
-        : catalogos.tareas_obligatorias.map((t) =>
-            t.id === tarea.id ? tarea : t
-          );
+        ? [...baseList, tarea]
+        : baseList.map((t) => (t.id === tarea.id ? tarea : t));
     const nextCatalogos: CatalogosControlOps = {
       ...catalogos,
       id: catalogos.id || 'cat-global',
-      tareas_obligatorias: nextTasks,
+      tareas_obligatorias: ensureBaseDailyCatalogTasks(nextTasks),
     };
     return handleSaveCatalogos(nextCatalogos);
   };
@@ -735,9 +752,16 @@ export default function App() {
   const handleDeleteCatalogTask = async (
     taskId: string
   ): Promise<ServiceResult> => {
-    const deletedTask = catalogos.tareas_obligatorias.find(
+    const deletedTask = guaranteedTareasCatalogo.find(
       (t) => t.id === taskId
     );
+    if (deletedTask && isFixedBaseTask(deletedTask)) {
+      return {
+        ok: false,
+        error:
+          'Las 9 actividades base diarias son fijas para las cajeras y no se pueden eliminar del catálogo.',
+      };
+    }
     const nextCatalogos: CatalogosControlOps = {
       ...catalogos,
       id: catalogos.id || 'cat-global',
@@ -1052,7 +1076,7 @@ export default function App() {
                       sucursal={currentCajeraSucursal}
                       metaSucursal={currentCajeraMeta}
                       actividades={actividades}
-                      tareasCatalogo={catalogos.tareas_obligatorias}
+                      tareasCatalogo={guaranteedTareasCatalogo}
                       llamadas={llamadas}
                       gastosYRefrendos={gastosYRefrendos}
                       horarios={horarios}
@@ -1076,8 +1100,9 @@ export default function App() {
                       horarios={horarios}
                       diaActivo={diaActivo}
                       metas={metas}
-                      tareasCatalogo={catalogos.tareas_obligatorias}
+                      tareasCatalogo={guaranteedTareasCatalogo}
                       usuarios={usuarios}
+                      onUpdateActividad={handleUpdateActividad}
                     />
                   )}
 
@@ -1112,7 +1137,7 @@ export default function App() {
                     selectedSucursalId={effectiveSucursalId}
                     diaActivo={diaActivo}
                     userRole={currentUser.rol}
-                    tareasCatalogo={catalogos.tareas_obligatorias}
+                    tareasCatalogo={guaranteedTareasCatalogo}
                     onChangeDiaActivo={setDiaActivo}
                     onSelectSucursal={setSelectedSucursalId}
                     onUpdateActividad={handleUpdateActividad}
@@ -1162,6 +1187,9 @@ export default function App() {
                     canEdit={currentUser.rol === 'creador'}
                     onUpdateHorario={handleUpdateHorario}
                     onApplyWeekdays={handleApplyWeekdays}
+                    tareasCatalogo={guaranteedTareasCatalogo}
+                    usuarios={usuarios}
+                    onSaveCatalogTask={handleSaveCatalogTask}
                   />
                 )}
 
@@ -1169,7 +1197,7 @@ export default function App() {
                   <AdminCatalogosView
                     sucursales={sucursales}
                     metas={metas}
-                    catalogos={catalogos}
+                    catalogos={guaranteedCatalogos}
                     usuarios={usuarios}
                     actividades={actividades}
                     currentUserId={currentUser.id}

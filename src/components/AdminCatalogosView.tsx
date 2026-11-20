@@ -30,7 +30,7 @@ import {
   ServiceResult,
 } from '../services/controlOpsService';
 import { getSupabaseConfigStatus } from '../lib/supabaseConfig';
-import { formatMXN } from '../utils/calculations';
+import { formatMXN, isFixedBaseTask } from '../utils/calculations';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface AdminCatalogosViewProps {
@@ -1136,6 +1136,7 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
             ) : (
               <div className="divide-y divide-[#F1ECF9] border border-[#EAE3F5] rounded-xl overflow-hidden">
                 {catalogos.tareas_obligatorias.map((t) => {
+                  const isBase = isFixedBaseTask(t);
                   const branchLabel =
                     !t.sucursal_id || t.sucursal_id === 'todas'
                       ? 'Todas las sucursales'
@@ -1152,15 +1153,22 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                       className="px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3 bg-white hover:bg-[#FCFAFE]"
                     >
                       <div className="min-w-0">
-                        <p
-                          className={`text-xs font-bold ${
-                            t.activa
-                              ? 'text-[#1F172B]'
-                              : 'text-[#9D8FB5] line-through'
-                          }`}
-                        >
-                          {t.titulo}
-                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p
+                            className={`text-xs font-bold ${
+                              t.activa
+                                ? 'text-[#1F172B]'
+                                : 'text-[#9D8FB5] line-through'
+                            }`}
+                          >
+                            {t.titulo}
+                          </p>
+                          {isBase && (
+                            <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-[#F3ECFC] text-[#5B21B6]">
+                              Fija diaria
+                            </span>
+                          )}
+                        </div>
                         {t.descripcion && (
                           <p className="text-[11px] text-[#55476E] mt-0.5">
                             {t.descripcion}
@@ -1233,17 +1241,23 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                           </label>
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => handleToggleTask(t)}
-                          className={`px-2 py-1 rounded-lg text-[11px] font-semibold ${
-                            t.activa
-                              ? 'bg-[#F0FDF4] text-[#15803D]'
-                              : 'bg-[#FAF8FC] text-[#8B7CA5]'
-                          }`}
-                        >
-                          {t.activa ? 'Activa' : 'Pausada'}
-                        </button>
+                        {!isBase ? (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleTask(t)}
+                            className={`px-2 py-1 rounded-lg text-[11px] font-semibold ${
+                              t.activa
+                                ? 'bg-[#F0FDF4] text-[#15803D]'
+                                : 'bg-[#FAF8FC] text-[#8B7CA5]'
+                            }`}
+                          >
+                            {t.activa ? 'Activa' : 'Pausada'}
+                          </button>
+                        ) : (
+                          <span className="px-2 py-1 rounded-lg text-[11px] font-semibold bg-[#F0FDF4] text-[#15803D]">
+                            Siempre activa
+                          </span>
+                        )}
 
                         <button
                           type="button"
@@ -1268,14 +1282,16 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                           <Pencil className="h-3.5 w-3.5" />
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() => setDeleteTaskTarget(t)}
-                          title="Eliminar actividad definitivamente"
-                          className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        {!isBase && (
+                          <button
+                            type="button"
+                            onClick={() => setDeleteTaskTarget(t)}
+                            title="Eliminar actividad definitivamente"
+                            className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   );

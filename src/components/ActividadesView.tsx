@@ -28,6 +28,7 @@ import {
   evaluarVencimientoActividad,
   extractCatalogTaskId,
   getTodayLocalYYYYMMDD,
+  isFixedBaseTask,
   resolveDailyTasksForBranch,
 } from '../utils/calculations';
 import { ServiceResult, uploadEvidenciaFoto } from '../services/controlOpsService';
@@ -927,20 +928,22 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                         >
                           <Pencil className="h-3.5 w-3.5" />
                         </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setConfirmAction({
-                              mode: 'delete_activity',
-                              actividad: act,
-                            })
-                          }
-                          title="Eliminar actividad"
-                          aria-label="Eliminar actividad"
-                          className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2] transition-colors"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        {!isFixedBaseTask(act) && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setConfirmAction({
+                                mode: 'delete_activity',
+                                actividad: act,
+                              })
+                            }
+                            title="Eliminar actividad"
+                            aria-label="Eliminar actividad"
+                            className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2] transition-colors"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1620,10 +1623,17 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
             if (confirmAction.mode === 'delete_activity') {
               const catId = extractCatalogTaskId(confirmAction.actividad.id);
               if (catId && onDeleteCatalogTask) {
-                await onDeleteCatalogTask(catId);
-                setUploadNotice(
-                  `Actividad "${confirmAction.actividad.titulo}" eliminada definitivamente de Supabase.`
-                );
+                const res = await onDeleteCatalogTask(catId);
+                if (res.ok) {
+                  setUploadNotice(
+                    `Actividad "${confirmAction.actividad.titulo}" eliminada definitivamente de Supabase.`
+                  );
+                } else {
+                  setUploadNotice(
+                    res.error ||
+                      `No se pudo eliminar "${confirmAction.actividad.titulo}".`
+                  );
+                }
               } else {
                 await onDeleteActividad(confirmAction.actividad);
               }

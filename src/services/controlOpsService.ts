@@ -29,6 +29,10 @@ import {
   INITIAL_USUARIOS,
   buildInitialHorarios,
 } from '../data/mockData';
+import {
+  calcularPuntualidadEnvio,
+  ensureBaseDailyCatalogTasks,
+} from '../utils/calculations';
 
 const STORAGE_KEYS = {
   LLAMADAS: 'controlops_llamadas_v1',
@@ -403,13 +407,21 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
     let catalogos: CatalogosControlOps;
     if (!catalogosRes.error && catalogosRes.data) {
       if (catalogosRes.data.length > 0) {
-        catalogos = catalogosRes.data[0] as CatalogosControlOps;
+        const rawCat = catalogosRes.data[0] as CatalogosControlOps;
+        catalogos = {
+          ...rawCat,
+          tareas_obligatorias: ensureBaseDailyCatalogTasks(
+            rawCat.tareas_obligatorias
+          ),
+        };
         writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
       } else {
         // Carga inicial única: insertar las 9 actividades base solo cuando catalogos_controlops está vacío
         const seedCatalog: CatalogosControlOps = {
           id: 'cat-global',
-          tareas_obligatorias: INITIAL_CATALOGOS.tareas_obligatorias,
+          tareas_obligatorias: ensureBaseDailyCatalogTasks(
+            INITIAL_CATALOGOS.tareas_obligatorias
+          ),
           opciones_llamada: INITIAL_CATALOGOS.opciones_llamada,
         };
         const { data: seededData, error: seedError } = await supabase
@@ -420,18 +432,36 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
           tableWarnings.push(
             `Seed ${SUPABASE_TABLES.CATALOGOS}: ${formatSupabaseError(seedError)}`
           );
-          catalogos = readLocal(STORAGE_KEYS.CATALOGOS, seedCatalog);
+          const localCat = readLocal(STORAGE_KEYS.CATALOGOS, seedCatalog);
+          catalogos = {
+            ...localCat,
+            tareas_obligatorias: ensureBaseDailyCatalogTasks(
+              localCat.tareas_obligatorias
+            ),
+          };
         } else {
-          catalogos =
+          const seededRow =
             seededData && seededData.length > 0
               ? (seededData[0] as CatalogosControlOps)
               : seedCatalog;
+          catalogos = {
+            ...seededRow,
+            tareas_obligatorias: ensureBaseDailyCatalogTasks(
+              seededRow.tareas_obligatorias
+            ),
+          };
           remoteCounts[SUPABASE_TABLES.CATALOGOS] = 1;
           writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
         }
       }
     } else {
-      catalogos = readLocal(STORAGE_KEYS.CATALOGOS, INITIAL_CATALOGOS);
+      const localCat = readLocal(STORAGE_KEYS.CATALOGOS, INITIAL_CATALOGOS);
+      catalogos = {
+        ...localCat,
+        tareas_obligatorias: ensureBaseDailyCatalogTasks(
+          localCat.tareas_obligatorias
+        ),
+      };
     }
 
     let llamadas: LlamadaSucursal[];
@@ -1219,6 +1249,37 @@ function normalizeActividadFromDb(
     ? (rawDias.filter((d) => typeof d === 'string') as ActividadDiaria['dias_semana'])
     : undefined;
 
+  const horaLimite =
+    typeof row.hora_limite === 'string' ? row.hora_limite : undefined;
+  const sinHorarioLimite =
+    row.sin_horario_limite !== undefined && row.sin_horario_limite !== null
+      ? Boolean(row.sin_horario_limite)
+      : undefined;
+  const horaCompletada =
+    typeof row.hora_completada === 'string' ? row.hora_completada : null;
+
+  const rawPunt = String(row.puntualidad ?? '');
+  const puntualidad: ActividadDiaria['puntualidad'] =
+    rawPunt === 'A tiempo' ||
+    rawPunt === 'A destiempo' ||
+    rawPunt === 'Sin horario límite' ||
+    rawPunt === 'Pendiente'
+      ? rawPunt
+      : calcularPuntualidadEnvio(
+          estatus,
+          horaCompletada,
+          horaLimite,
+          sinHorarioLimite
+        );
+
+  const rawVal = String(row.validacion_admin ?? '');
+  const validacion_admin: ActividadDiaria['validacion_admin'] =
+    rawVal === 'Aprobada' || rawVal === 'Rechazada' || rawVal === 'Pendiente'
+      ? rawVal
+      : estatus === 'Observada'
+        ? 'Rechazada'
+        : 'Pendiente';
+
   return {
     id: String(
       row.id ?? `act-db-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
@@ -1251,15 +1312,12 @@ function normalizeActividadFromDb(
       ? String(row.fecha).slice(0, 10)
       : new Date().toISOString().slice(0, 10),
     dias_semana: diasSemana,
-    hora_limite:
-      typeof row.hora_limite === 'string' ? row.hora_limite : undefined,
-    sin_horario_limite:
-      row.sin_horario_limite !== undefined && row.sin_horario_limite !== null
-        ? Boolean(row.sin_horario_limite)
-        : undefined,
-    hora_completada:
-      typeof row.hora_completada === 'string' ? row.hora_completada : null,
+    hora_limite: horaLimite,
+    sin_horario_limite: sinHorarioLimite,
+    hora_completada: horaCompletada,
     estatus,
+    puntualidad,
+    validacion_admin,
     evidencia_url:
       typeof row.evidencia_url === 'string' ? row.evidencia_url : null,
     observaciones:
@@ -1326,6 +1384,14 @@ function mergeActividadDbRowWithInput(
         : orig.hora_completada,
     estatus:
       dbRow.estatus !== undefined ? normalizedDb.estatus : orig.estatus,
+    puntualidad:
+      dbRow.puntualidad !== undefined
+        ? normalizedDb.puntualidad
+        : orig.puntualidad,
+    validacion_admin:
+      dbRow.validacion_admin !== undefined
+        ? normalizedDb.validacion_admin
+        : orig.validacion_admin,
     evidencia_url:
       dbRow.evidencia_url !== undefined
         ? normalizedDb.evidencia_url
@@ -1401,6 +1467,18 @@ function buildActividadPayload(
   const safeCajeraNombre =
     (actividad.cajera_nombre || actividad.responsable || '').trim();
 
+  const computedPuntualidad =
+    actividad.puntualidad ||
+    calcularPuntualidadEnvio(
+      actividad.estatus,
+      actividad.hora_completada,
+      actividad.hora_limite,
+      actividad.sin_horario_limite
+    );
+  const computedValidacion =
+    actividad.validacion_admin ||
+    (actividad.estatus === 'Observada' ? 'Rechazada' : 'Pendiente');
+
   const candidateValues: Record<string, unknown> = {
     id: actividad.id,
     sucursal_id: actividad.sucursal_id || safeSucursalNombre,
@@ -1418,6 +1496,8 @@ function buildActividadPayload(
     sin_horario_limite: Boolean(actividad.sin_horario_limite),
     hora_completada: actividad.hora_completada ?? null,
     estatus: actividad.estatus,
+    puntualidad: computedPuntualidad,
+    validacion_admin: computedValidacion,
     evidencia_url: actividad.evidencia_url ?? null,
     observaciones: actividad.observaciones ?? '',
   };

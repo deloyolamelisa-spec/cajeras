@@ -53,6 +53,11 @@ export interface MetaSucursal {
   techo_gasto_mensual: number;
 }
 
+export interface HorarioPersonalizado {
+  hora_limite?: string | null;
+  sin_horario_limite?: boolean;
+}
+
 export interface TareaCatalogo {
   id: string;
   titulo: string;
@@ -62,6 +67,8 @@ export interface TareaCatalogo {
   sin_horario_limite?: boolean;
   sucursal_id?: string;
   dias_semana?: DiaSemana[];
+  horarios_por_sucursal?: Record<string, HorarioPersonalizado>;
+  horarios_por_cajera?: Record<string, HorarioPersonalizado>;
   activa: boolean;
 }
 
@@ -99,6 +106,14 @@ export interface LlamadaSucursal {
 
 export type EstatusActividad = 'Pendiente' | 'Completada' | 'Observada';
 
+export type PuntualidadActividad =
+  | 'A tiempo'
+  | 'A destiempo'
+  | 'Sin horario límite'
+  | 'Pendiente';
+
+export type ValidacionAdminActividad = 'Pendiente' | 'Aprobada' | 'Rechazada';
+
 export interface ActividadDiaria {
   id: string;
   sucursal_id: string;
@@ -116,6 +131,8 @@ export interface ActividadDiaria {
   sin_horario_limite?: boolean;
   hora_completada: string | null;
   estatus: EstatusActividad;
+  puntualidad?: PuntualidadActividad;
+  validacion_admin?: ValidacionAdminActividad;
   evidencia_url: string | null;
   observaciones: string;
 }

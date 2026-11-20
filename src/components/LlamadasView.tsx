@@ -43,7 +43,7 @@ interface LlamadasViewProps {
   currentUserId?: string;
   currentUserName?: string;
   opcionesReporte: string[];
-  onUpdateLlamada: (updated: LlamadaSucursal) => Promise<void>;
+  onUpdateLlamada: (updated: LlamadaSucursal) => Promise<ServiceResult | void>;
   onCreateLlamada: (nueva: LlamadaSucursal) => Promise<void>;
   onImportLlamadas: (nuevas: LlamadaSucursal[]) => Promise<ServiceResult | void>;
   onDeleteLlamada: (id: string) => Promise<void>;
@@ -120,6 +120,10 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   const [sortBy, setSortBy] = useState<string>('recientes');
   const [draftObs, setDraftObs] = useState<Record<string, string>>({});
   const [savedToastId, setSavedToastId] = useState<string | null>(null);
+  const [registeringRowId, setRegisteringRowId] = useState<string | null>(null);
+  const [rowRegisterToastId, setRowRegisterToastId] = useState<string | null>(
+    null
+  );
   const [showNewModal, setShowNewModal] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<LlamadaSucursal | null>(
     null
@@ -1015,11 +1019,52 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                   >
                     {isCajera ? (
                       <>
+                        <button
+                          type="button"
+                          disabled={registeringRowId === item.id}
+                          onClick={async () => {
+                            if (item.llamada_registrada) return;
+                            setRegisteringRowId(item.id);
+                            await onUpdateLlamada({
+                              ...item,
+                              sucursal: item.sucursal || item.sucursal_nombre,
+                              cajera_nombre:
+                                currentUserName || item.cajera_nombre,
+                              cajera_id: currentUserId || item.cajera_id,
+                              llamada_registrada: true,
+                              fecha_registro:
+                                item.fecha_registro || new Date().toISOString(),
+                            });
+                            setRegisteringRowId(null);
+                            setRowRegisterToastId(item.id);
+                            setTimeout(
+                              () =>
+                                setRowRegisterToastId((prev) =>
+                                  prev === item.id ? null : prev
+                                ),
+                              2000
+                            );
+                          }}
+                          className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
+                            item.llamada_registrada
+                              ? 'bg-[#ECFDF5] text-[#15803D] border border-[#A7F3D0] cursor-default'
+                              : 'bg-[#7C3AED] hover:bg-[#6D28D9] text-white shadow-xs disabled:opacity-60'
+                          }`}
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          {registeringRowId === item.id
+                            ? 'Guardando...'
+                            : item.llamada_registrada
+                              ? rowRegisterToastId === item.id
+                                ? 'Guardada'
+                                : 'Llamada registrada'
+                              : 'Registrar llamada'}
+                        </button>
                         <a
                           href={`tel:${item.telefono}`}
                           onClick={() => {
                             if (!item.llamada_registrada) {
-                              onUpdateLlamada({
+                              void onUpdateLlamada({
                                 ...item,
                                 sucursal:
                                   item.sucursal || item.sucursal_nombre,
@@ -1041,7 +1086,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                           rel="noopener noreferrer"
                           onClick={() => {
                             if (!item.llamada_registrada) {
-                              onUpdateLlamada({
+                              void onUpdateLlamada({
                                 ...item,
                                 sucursal:
                                   item.sucursal || item.sucursal_nombre,

@@ -3,12 +3,15 @@ import {
   BranchMetricSummary,
   DiaSemana,
   GastoYRefrendo,
+  HorarioPersonalizado,
   HorarioSucursalDia,
   LlamadaSucursal,
   MetaSucursal,
+  PuntualidadActividad,
   Sucursal,
   TareaCatalogo,
 } from '../types/controlops';
+import { BASE_DAILY_TASKS } from '../data/mockData';
 
 export function formatMXN(amount: number, decimals = 0): string {
   return new Intl.NumberFormat('es-MX', {
@@ -291,15 +294,114 @@ export function extractCatalogTaskId(actividadId: string): string | null {
   return rest.slice(0, sepIdx);
 }
 
+export const BASE_TASK_ID_SET = new Set(BASE_DAILY_TASKS.map((t) => t.id));
+
+export function isFixedBaseTask(tarea: Pick<TareaCatalogo, 'id' | 'titulo'>): boolean {
+  if (BASE_TASK_ID_SET.has(tarea.id)) return true;
+  const norm = tarea.titulo.trim().toLowerCase();
+  return BASE_DAILY_TASKS.some((b) => b.titulo.trim().toLowerCase() === norm);
+}
+
+export function ensureBaseDailyCatalogTasks(
+  tareasCatalogo: TareaCatalogo[] = []
+): TareaCatalogo[] {
+  const safeInput = Array.isArray(tareasCatalogo) ? tareasCatalogo : [];
+  const usedInputIds = new Set<string>();
+
+  const mergedBase: TareaCatalogo[] = BASE_DAILY_TASKS.map((base) => {
+    const match =
+      safeInput.find((t) => t.id === base.id) ||
+      safeInput.find(
+        (t) =>
+          t.titulo.trim().toLowerCase() === base.titulo.trim().toLowerCase()
+      );
+    if (!match) return { ...base };
+    usedInputIds.add(match.id);
+    return {
+      ...base,
+      ...match,
+      id: base.id,
+      sucursal_id: 'todas',
+      dias_semana:
+        match.dias_semana && match.dias_semana.length > 0
+          ? match.dias_semana
+          : base.dias_semana,
+      activa: true, // Fixed daily base tasks never disappear from daily view
+    };
+  });
+
+  const extraCustom = safeInput.filter((t) => !usedInputIds.has(t.id));
+  return [...mergedBase, ...extraCustom];
+}
+
+export function resolveTareaHorarioForContext(
+  tarea: TareaCatalogo,
+  sucursalId: string,
+  cajeraContext?: { id?: string; nombre?: string }
+): HorarioPersonalizado {
+  const cajeraOverrides = tarea.horarios_por_cajera || {};
+  const byCajeraId = cajeraContext?.id
+    ? cajeraOverrides[cajeraContext.id]
+    : undefined;
+  const byCajeraNombre = cajeraContext?.nombre
+    ? cajeraOverrides[cajeraContext.nombre.trim().toLowerCase()] ||
+      cajeraOverrides[cajeraContext.nombre.trim()]
+    : undefined;
+
+  const cajeraCustom = byCajeraId || byCajeraNombre;
+  if (cajeraCustom) {
+    return {
+      sin_horario_limite: Boolean(cajeraCustom.sin_horario_limite),
+      hora_limite: cajeraCustom.sin_horario_limite
+        ? null
+        : cajeraCustom.hora_limite ?? tarea.hora_limite ?? null,
+    };
+  }
+
+  const branchCustom = tarea.horarios_por_sucursal?.[sucursalId];
+  if (branchCustom) {
+    return {
+      sin_horario_limite: Boolean(branchCustom.sin_horario_limite),
+      hora_limite: branchCustom.sin_horario_limite
+        ? null
+        : branchCustom.hora_limite ?? tarea.hora_limite ?? null,
+    };
+  }
+
+  return {
+    sin_horario_limite: Boolean(tarea.sin_horario_limite),
+    hora_limite: tarea.sin_horario_limite ? null : tarea.hora_limite ?? null,
+  };
+}
+
+export function calcularPuntualidadEnvio(
+  estatus: ActividadDiaria['estatus'],
+  horaCompletada: string | null | undefined,
+  horaLimite: string | null | undefined,
+  sinHorarioLimite?: boolean
+): PuntualidadActividad {
+  if (estatus !== 'Completada' && estatus !== 'Observada') {
+    return 'Pendiente';
+  }
+  if (sinHorarioLimite || !horaLimite) {
+    return 'Sin horario límite';
+  }
+  if (!horaCompletada) return 'A tiempo';
+  return horaCompletada > horaLimite ? 'A destiempo' : 'A tiempo';
+}
+
 export function resolveDailyTasksForBranch(
   sucursal: Sucursal,
   tareasCatalogo: TareaCatalogo[],
   actividades: ActividadDiaria[],
   diaActivo: DiaSemana,
-  fechaStr: string = getTodayLocalYYYYMMDD()
+  fechaStr: string = getTodayLocalYYYYMMDD(),
+  cajeraContext?: { id?: string; nombre?: string }
 ): ActividadDiaria[] {
-  const activeCatalogTasks = tareasCatalogo.filter(
-    (t) =>
+  const guaranteedCatalog = ensureBaseDailyCatalogTasks(tareasCatalogo);
+  const activeCatalogTasks = guaranteedCatalog.filter((t) => {
+    if (isFixedBaseTask(t)) return true; // 9 base tasks always appear every day
+    return (
       t.activa !== false &&
       (!t.sucursal_id ||
         t.sucursal_id === 'todas' ||
@@ -307,9 +409,10 @@ export function resolveDailyTasksForBranch(
       (!t.dias_semana ||
         t.dias_semana.length === 0 ||
         t.dias_semana.includes(diaActivo))
-  );
+    );
+  });
 
-  const catalogTaskIdSet = new Set(tareasCatalogo.map((t) => t.id));
+  const catalogTaskIdSet = new Set(guaranteedCatalog.map((t) => t.id));
   const branchActsOnDate = actividades.filter(
     (a) => a.sucursal_id === sucursal.id && a.fecha === fechaStr
   );
@@ -334,8 +437,21 @@ export function resolveDailyTasksForBranch(
             a.titulo.trim().toLowerCase() === tarea.titulo.trim().toLowerCase()
         );
 
+      const resolvedHorario = resolveTareaHorarioForContext(
+        tarea,
+        sucursal.id,
+        cajeraContext || {
+          id: match?.cajera_id,
+          nombre: match?.cajera_nombre || sucursal.responsable_caja,
+        }
+      );
+
       if (match) {
         usedRecordIds.add(match.id);
+        const effSinLimite = Boolean(resolvedHorario.sin_horario_limite);
+        const effHoraLimite = effSinLimite
+          ? null
+          : resolvedHorario.hora_limite ?? match.hora_limite ?? null;
         return {
           ...match,
           titulo: tarea.titulo,
@@ -348,13 +464,17 @@ export function resolveDailyTasksForBranch(
             tarea.dias_semana && tarea.dias_semana.length > 0
               ? tarea.dias_semana
               : match.dias_semana,
-          hora_limite: tarea.sin_horario_limite
-            ? null
-            : tarea.hora_limite ?? match.hora_limite ?? null,
-          sin_horario_limite:
-            tarea.sin_horario_limite !== undefined
-              ? Boolean(tarea.sin_horario_limite)
-              : Boolean(match.sin_horario_limite),
+          hora_limite: effHoraLimite,
+          sin_horario_limite: effSinLimite,
+          puntualidad:
+            match.puntualidad && match.puntualidad !== 'Pendiente'
+              ? match.puntualidad
+              : calcularPuntualidadEnvio(
+                  match.estatus,
+                  match.hora_completada,
+                  effHoraLimite,
+                  effSinLimite
+                ),
         };
       }
 
@@ -362,16 +482,23 @@ export function resolveDailyTasksForBranch(
         id: deterministicId,
         sucursal_id: sucursal.id,
         sucursal_nombre: sucursal.nombre,
+        sucursal: sucursal.nombre,
+        cajera_id: cajeraContext?.id,
+        cajera_nombre: cajeraContext?.nombre || sucursal.responsable_caja,
         titulo: tarea.titulo,
         descripcion: tarea.descripcion || '',
         categoria: tarea.categoria,
-        responsable: sucursal.responsable_caja,
+        responsable: cajeraContext?.nombre || sucursal.responsable_caja,
         fecha: fechaStr,
         dias_semana: tarea.dias_semana,
-        hora_limite: tarea.sin_horario_limite ? null : tarea.hora_limite ?? null,
-        sin_horario_limite: Boolean(tarea.sin_horario_limite),
+        hora_limite: resolvedHorario.sin_horario_limite
+          ? null
+          : resolvedHorario.hora_limite ?? null,
+        sin_horario_limite: Boolean(resolvedHorario.sin_horario_limite),
         hora_completada: null,
         estatus: 'Pendiente',
+        puntualidad: 'Pendiente',
+        validacion_admin: 'Pendiente',
         evidencia_url: null,
         observaciones: '',
       };
@@ -446,8 +573,11 @@ export function evaluarVencimientoActividad(
       ? horario?.hora_limite_corte || '18:30'
       : horario?.hora_limite_actividad || '09:00');
 
-  if (actividad.estatus === 'Completada') {
-    if (actividad.hora_completada && actividad.hora_completada > horaLimite) {
+  if (actividad.estatus === 'Completada' || actividad.estatus === 'Observada') {
+    if (
+      actividad.puntualidad === 'A destiempo' ||
+      (actividad.hora_completada && actividad.hora_completada > horaLimite)
+    ) {
       return {
         etiqueta: 'Completada con retraso',
         vencidaPorHora: false,
@@ -585,22 +715,13 @@ export function computeBranchSummaries(
       metaConfig?.meta_llamadas_diarias || sucursal.meta_llamadas_diarias || 30;
     const pctLlamadas = Math.min(100, (llamadasRegistradas / metaLlamadas) * 100);
 
-    const actividadesSuc =
-      tareasCatalogo.length > 0
-        ? resolveDailyTasksForBranch(
-            sucursal,
-            tareasCatalogo,
-            actividades,
-            diaActivo,
-            todayStr
-          )
-        : actividades.filter(
-            (a) =>
-              a.sucursal_id === sucursal.id &&
-              (!a.dias_semana ||
-                a.dias_semana.length === 0 ||
-                a.dias_semana.includes(diaActivo))
-          );
+    const actividadesSuc = resolveDailyTasksForBranch(
+      sucursal,
+      tareasCatalogo,
+      actividades,
+      diaActivo,
+      todayStr
+    );
     const horarioDia = horarios.find(
       (h) => h.sucursal_id === sucursal.id && h.dia === diaActivo
     );

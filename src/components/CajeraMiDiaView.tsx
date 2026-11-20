@@ -26,6 +26,7 @@ import {
   UsuarioControlOps,
 } from '../types/controlops';
 import {
+  calcularPuntualidadEnvio,
   evaluarVencimientoActividad,
   formatCurrencyClean,
   formatHora12h,
@@ -163,9 +164,18 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         tareasCatalogo,
         actividades,
         diaActivo,
-        todayStr
+        todayStr,
+        { id: currentUser.id, nombre: currentUser.nombre }
       ),
-    [sucursal, tareasCatalogo, actividades, diaActivo, todayStr]
+    [
+      sucursal,
+      tareasCatalogo,
+      actividades,
+      diaActivo,
+      todayStr,
+      currentUser.id,
+      currentUser.nombre,
+    ]
   );
 
   const branchLlamadas = useMemo(
@@ -386,7 +396,8 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         tareasCatalogo,
         actividades,
         diaSem,
-        dateStr
+        dateStr,
+        { id: currentUser.id, nombre: currentUser.nombre }
       );
       const actAsignadas = asignadasDiaList.length;
       const actCompletadas = asignadasDiaList.filter(
@@ -419,6 +430,8 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     tareasCatalogo,
     metaSucursal,
     sucursal,
+    currentUser.id,
+    currentUser.nombre,
   ]);
 
   const startWebcamStream = async () => {
@@ -565,6 +578,21 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
           'Sucursal'
         ).trim() || 'Sucursal';
 
+      const horaCompletada = getCurrentLocalHHMM();
+      const evalInfo = evaluarVencimientoActividad(
+        actividad,
+        horarioHoy,
+        horaCompletada
+      );
+      const effHoraLimite = evalInfo.horaLimite;
+      const effSinLimite = effHoraLimite === null;
+      const puntualidad = calcularPuntualidadEnvio(
+        'Completada',
+        horaCompletada,
+        effHoraLimite,
+        effSinLimite
+      );
+
       const updated: ActividadDiaria = {
         ...actividad,
         sucursal_id: sucursal.id || actividad.sucursal_id,
@@ -577,7 +605,11 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
           actividad.responsable ||
           sucursal.responsable_caja,
         estatus: 'Completada',
-        hora_completada: getCurrentLocalHHMM(),
+        hora_limite: effHoraLimite,
+        sin_horario_limite: effSinLimite,
+        hora_completada: horaCompletada,
+        puntualidad,
+        validacion_admin: 'Pendiente',
         fecha: todayStr,
         evidencia_url: res.url,
       };
@@ -595,7 +627,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
 
       setUploadFeedback({
         type: 'success',
-        message: `Evidencia de "${actividad.titulo}" guardada en Supabase.`,
+        message: `Evidencia de "${actividad.titulo}" guardada en Supabase (${puntualidad}${horaCompletada ? ` · ${formatHora12h(horaCompletada)}` : ''}).`,
       });
     } catch (err) {
       setUploadFeedback({
@@ -878,12 +910,16 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
             {tareasHoy.map((act) => {
               const evalInfo = evaluarVencimientoActividad(act, horarioHoy);
               const isCompleted = act.estatus === 'Completada';
-              const isVencida = !isCompleted && evalInfo.vencidaPorHora;
+              const isObservada = act.estatus === 'Observada';
+              const isVencida = !isCompleted && !isObservada && evalInfo.vencidaPorHora;
               const isUploading = uploadingId === act.id;
+              const isLateSubmission =
+                act.puntualidad === 'A destiempo' ||
+                evalInfo.etiqueta === 'Completada con retraso';
 
               const circleStyle = isCompleted
                 ? 'bg-[#ECFDF5] text-[#15803D]'
-                : isVencida
+                : isObservada || isVencida
                   ? 'bg-[#FFF1F2] text-[#E11D48]'
                   : 'bg-[#F3ECFC] text-[#7C3AED]';
 
@@ -899,6 +935,8 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                     >
                       {isCompleted ? (
                         <CheckCircle2 className="h-5 w-5" />
+                      ) : isObservada ? (
+                        <AlertCircle className="h-5 w-5" />
                       ) : (
                         <Clock className="h-5 w-5" />
                       )}
@@ -911,9 +949,13 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                         </h3>
                         <p className="text-xs sm:text-sm text-[#7A6B93] mt-0.5">
                           {act.descripcion ||
-                            act.observaciones ||
                             'Adjunta la evidencia fotográfica para completar esta tarea.'}
                         </p>
+                        {isObservada && act.observaciones && (
+                          <p className="text-xs font-medium text-[#BE123C] bg-[#FFF1F2] border border-[#FECDD3] rounded-lg px-2.5 py-1.5 mt-1.5">
+                            Observación de administración: {act.observaciones}
+                          </p>
+                        )}
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2">
@@ -931,6 +973,11 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                             <CheckCircle2 className="h-3 w-3" />
                             Completada
                           </span>
+                        ) : isObservada ? (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-[#FFF1F2] text-[#BE123C]">
+                            <AlertCircle className="h-3 w-3" />
+                            Observada (volver a subir)
+                          </span>
                         ) : isVencida ? (
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-[#FFF1F2] text-[#E11D48]">
                             <AlertCircle className="h-3 w-3" />
@@ -940,6 +987,29 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-[#FEF9C3] text-[#A16207]">
                             <Clock className="h-3 w-3" />
                             Pendiente
+                          </span>
+                        )}
+
+                        {/* Punctuality & Admin Validation Pills */}
+                        {(isCompleted || isObservada) && (
+                          <span
+                            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold ${
+                              isLateSubmission
+                                ? 'bg-[#FFF7ED] text-[#C2410C]'
+                                : 'bg-[#ECFDF5] text-[#15803D]'
+                            }`}
+                          >
+                            {isLateSubmission ? 'A destiempo' : 'A tiempo'}
+                            {act.hora_completada
+                              ? ` · ${formatHora12h(act.hora_completada)}`
+                              : ''}
+                          </span>
+                        )}
+
+                        {act.validacion_admin === 'Aprobada' && (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-[#EEF2FF] text-[#4338CA]">
+                            <CheckCircle2 className="h-3 w-3" />
+                            Validada
                           </span>
                         )}
 

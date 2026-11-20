@@ -4,9 +4,15 @@ import {
   ArrowUpRight,
   BellRing,
   CheckCircle2,
+  Clock,
+  Eye,
   Filter,
+  Image as ImageIcon,
   MinusCircle,
+  ShieldCheck,
   Trophy,
+  X,
+  XCircle,
 } from 'lucide-react';
 import {
   ActividadDiaria,
@@ -23,10 +29,17 @@ import {
   UsuarioControlOps,
 } from '../types/controlops';
 import {
+  calcularPuntualidadEnvio,
   computeBranchSummaries,
+  evaluarVencimientoActividad,
+  formatHora12h,
   formatMXN,
   formatPercent,
+  getDiaSemanaFromDate,
+  getTodayLocalYYYYMMDD,
+  resolveDailyTasksForBranch,
 } from '../utils/calculations';
+import { ServiceResult } from '../services/controlOpsService';
 
 type RankingCriterion =
   | 'consolidado'
@@ -34,6 +47,15 @@ type RankingCriterion =
   | 'gastos'
   | 'refrendos'
   | 'llamadas';
+
+type PanelTabId = 'resumen' | 'validaciones' | 'avance' | 'por_sucursal';
+type ValidacionFilter =
+  | 'enviadas'
+  | 'todas'
+  | 'a_tiempo'
+  | 'a_destiempo'
+  | 'aprobadas'
+  | 'observadas';
 
 interface RankingViewProps {
   summaries: BranchMetricSummary[];
@@ -50,6 +72,7 @@ interface RankingViewProps {
   metas?: MetaSucursal[];
   tareasCatalogo?: TareaCatalogo[];
   usuarios?: UsuarioControlOps[];
+  onUpdateActividad?: (updated: ActividadDiaria) => Promise<ServiceResult>;
 }
 
 const CRITERIA_TABS: { id: RankingCriterion; label: string }[] = [
@@ -91,15 +114,32 @@ export const RankingView: React.FC<RankingViewProps> = ({
   metas = [],
   tareasCatalogo = [],
   usuarios = [],
+  onUpdateActividad,
 }) => {
   const isCreador = userRole === 'creador';
   const now = useMemo(() => new Date(), []);
+  const todayStr = useMemo(() => getTodayLocalYYYYMMDD(), []);
+  const [panelTab, setPanelTab] = useState<PanelTabId>('resumen');
   const [criterion, setCriterion] = useState<RankingCriterion>('consolidado');
   const [filterMes, setFilterMes] = useState<string>('todos');
   const [filterAnio, setFilterAnio] = useState<string>(
     String(now.getFullYear())
   );
   const [filterCajera, setFilterCajera] = useState<string>('todas');
+  const [validacionFecha, setValidacionFecha] = useState<string>(todayStr);
+  const [validacionFilter, setValidacionFilter] =
+    useState<ValidacionFilter>('enviadas');
+  const [obsDrafts, setObsDrafts] = useState<Record<string, string>>({});
+  const [savingActId, setSavingActId] = useState<string | null>(null);
+  const [validationFeedback, setValidationFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [lightboxImg, setLightboxImg] = useState<{
+    url: string;
+    title: string;
+    subtitle: string;
+  } | null>(null);
 
   const yearOptions = useMemo(() => {
     const curr = now.getFullYear();
@@ -214,6 +254,206 @@ export const RankingView: React.FC<RankingViewProps> = ({
       promedioActividades,
     };
   }, [activeSummaries]);
+
+  const dailyComplianceRows = useMemo(() => {
+    const targetDate = validacionFecha || todayStr;
+    const targetDia = getDiaSemanaFromDate(targetDate);
+    const activeSucs = activeSummaries.map((s) => s.sucursal);
+
+    const rows: {
+      actividad: ActividadDiaria;
+      puntualidad: NonNullable<ActividadDiaria['puntualidad']>;
+      validacion: NonNullable<ActividadDiaria['validacion_admin']>;
+      horaLimiteEfectiva: string | null;
+      hasSubmission: boolean;
+    }[] = [];
+
+    for (const suc of activeSucs) {
+      const branchCajera = usuarios.find(
+        (u) => u.rol === 'cajera' && u.activo && u.sucursal_id === suc.id
+      );
+      const horarioSuc = horarios.find(
+        (h) => h.sucursal_id === suc.id && h.dia === targetDia
+      );
+      const resolved = resolveDailyTasksForBranch(
+        suc,
+        tareasCatalogo,
+        actividades,
+        targetDia,
+        targetDate,
+        branchCajera
+          ? { id: branchCajera.id, nombre: branchCajera.nombre }
+          : { nombre: suc.responsable_caja }
+      );
+
+      for (const act of resolved) {
+        if (filterCajera !== 'todas') {
+          const normFilter = filterCajera.trim().toLowerCase();
+          const cajName = (act.cajera_nombre || act.responsable || suc.responsable_caja || '')
+            .trim()
+            .toLowerCase();
+          if (cajName !== normFilter) continue;
+        }
+        const evalInfo = evaluarVencimientoActividad(act, horarioSuc);
+        const effSinLimite = Boolean(act.sin_horario_limite || evalInfo.horaLimite === null);
+        const effLimite = effSinLimite ? null : evalInfo.horaLimite;
+        const puntualidad =
+          act.puntualidad && act.puntualidad !== 'Pendiente'
+            ? act.puntualidad
+            : calcularPuntualidadEnvio(
+                act.estatus,
+                act.hora_completada,
+                effLimite,
+                effSinLimite
+              );
+        const validacion: NonNullable<ActividadDiaria['validacion_admin']> =
+          act.validacion_admin ||
+          (act.estatus === 'Observada' ? 'Rechazada' : 'Pendiente');
+        const hasSubmission =
+          act.estatus === 'Completada' ||
+          act.estatus === 'Observada' ||
+          Boolean(act.evidencia_url);
+
+        rows.push({
+          actividad: act,
+          puntualidad,
+          validacion,
+          horaLimiteEfectiva: effLimite,
+          hasSubmission,
+        });
+      }
+    }
+
+    return rows;
+  }, [
+    validacionFecha,
+    todayStr,
+    activeSummaries,
+    usuarios,
+    horarios,
+    tareasCatalogo,
+    actividades,
+    filterCajera,
+  ]);
+
+  const evidenceSummaryCounts = useMemo(() => {
+    const total = dailyComplianceRows.length;
+    const enviadas = dailyComplianceRows.filter((r) => r.hasSubmission).length;
+    const aTiempo = dailyComplianceRows.filter(
+      (r) => r.hasSubmission && r.puntualidad === 'A tiempo'
+    ).length;
+    const aDestiempo = dailyComplianceRows.filter(
+      (r) => r.hasSubmission && r.puntualidad === 'A destiempo'
+    ).length;
+    const porValidar = dailyComplianceRows.filter(
+      (r) => r.hasSubmission && r.validacion === 'Pendiente'
+    ).length;
+    const aprobadas = dailyComplianceRows.filter(
+      (r) => r.validacion === 'Aprobada'
+    ).length;
+    const observadas = dailyComplianceRows.filter(
+      (r) => r.actividad.estatus === 'Observada' || r.validacion === 'Rechazada'
+    ).length;
+    return {
+      total,
+      enviadas,
+      aTiempo,
+      aDestiempo,
+      porValidar,
+      aprobadas,
+      observadas,
+    };
+  }, [dailyComplianceRows]);
+
+  const filteredValidationRows = useMemo(() => {
+    return dailyComplianceRows.filter((r) => {
+      switch (validacionFilter) {
+        case 'enviadas':
+          return r.hasSubmission;
+        case 'a_tiempo':
+          return r.hasSubmission && r.puntualidad === 'A tiempo';
+        case 'a_destiempo':
+          return r.hasSubmission && r.puntualidad === 'A destiempo';
+        case 'aprobadas':
+          return r.validacion === 'Aprobada';
+        case 'observadas':
+          return (
+            r.actividad.estatus === 'Observada' || r.validacion === 'Rechazada'
+          );
+        case 'todas':
+        default:
+          return true;
+      }
+    });
+  }, [dailyComplianceRows, validacionFilter]);
+
+  const branchComplianceStats = useMemo(() => {
+    return activeSummaries.map((s) => {
+      const sucRows = dailyComplianceRows.filter(
+        (r) => r.actividad.sucursal_id === s.sucursal.id
+      );
+      const total = sucRows.length;
+      const completadas = sucRows.filter(
+        (r) => r.actividad.estatus === 'Completada'
+      ).length;
+      const aTiempo = sucRows.filter(
+        (r) => r.hasSubmission && r.puntualidad === 'A tiempo'
+      ).length;
+      const aDestiempo = sucRows.filter(
+        (r) => r.hasSubmission && r.puntualidad === 'A destiempo'
+      ).length;
+      const aprobadas = sucRows.filter(
+        (r) => r.validacion === 'Aprobada'
+      ).length;
+      const observadas = sucRows.filter(
+        (r) =>
+          r.actividad.estatus === 'Observada' || r.validacion === 'Rechazada'
+      ).length;
+      return {
+        summary: s,
+        total,
+        completadas,
+        aTiempo,
+        aDestiempo,
+        aprobadas,
+        observadas,
+      };
+    });
+  }, [activeSummaries, dailyComplianceRows]);
+
+  const handleValidateEvidence = async (
+    act: ActividadDiaria,
+    decision: 'Aprobada' | 'Rechazada'
+  ) => {
+    if (!onUpdateActividad) return;
+    setSavingActId(act.id);
+    setValidationFeedback(null);
+    const obsText = (obsDrafts[act.id] ?? act.observaciones ?? '').trim();
+    const next: ActividadDiaria = {
+      ...act,
+      estatus: decision === 'Aprobada' ? 'Completada' : 'Observada',
+      validacion_admin: decision,
+      observaciones: obsText,
+    };
+    const res = await onUpdateActividad(next);
+    setSavingActId(null);
+    if (!res.ok) {
+      setValidationFeedback({
+        type: 'error',
+        message:
+          res.error ||
+          `No se pudo guardar la validación de "${act.titulo}" en Supabase.`,
+      });
+      return;
+    }
+    setValidationFeedback({
+      type: 'success',
+      message:
+        decision === 'Aprobada'
+          ? `Evidencia "${act.titulo}" (${act.sucursal_nombre}) validada correctamente.`
+          : `Evidencia "${act.titulo}" (${act.sucursal_nombre}) marcada como Observada / Rechazada.`,
+    });
+  };
 
   const alertasRezago = useMemo(() => {
     const alerts: {
@@ -378,14 +618,46 @@ export const RankingView: React.FC<RankingViewProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Top Filters Bar (Mes / Año / Sucursal / Cajera) */}
-      <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs font-semibold text-[#5B21B6]">
-          <Filter className="h-4 w-4 text-[#DB2777]" />
-          <span>Filtros del Panel de control</span>
+      {/* Panel de control Navigation Tabs + Filters Bar */}
+      <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 space-y-3">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs font-semibold text-[#5B21B6]">
+            <Filter className="h-4 w-4 text-[#DB2777]" />
+            <span>Panel de control · Filtros</span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1 p-1 bg-[#F5F0FC] rounded-xl">
+            {(
+              [
+                { id: 'resumen', label: 'Resumen' },
+                {
+                  id: 'validaciones',
+                  label:
+                    evidenceSummaryCounts.porValidar > 0
+                      ? `Validaciones (${evidenceSummaryCounts.porValidar})`
+                      : `Validaciones (${evidenceSummaryCounts.enviadas})`,
+                },
+                { id: 'avance', label: 'Avance' },
+                { id: 'por_sucursal', label: 'Por sucursal' },
+              ] as { id: PanelTabId; label: string }[]
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setPanelTab(tab.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                  panelTab === tab.id
+                    ? 'bg-white text-[#5B21B6] shadow-xs'
+                    : 'text-[#6E5F87] hover:text-[#1F172B]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 flex-1 max-w-3xl">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 pt-2 border-t border-[#F1ECF9]">
           <select
             aria-label="Filtrar por mes"
             value={filterMes}
@@ -441,11 +713,20 @@ export const RankingView: React.FC<RankingViewProps> = ({
               </option>
             ))}
           </select>
+
+          <input
+            type="date"
+            aria-label="Fecha de cumplimiento y evidencias"
+            value={validacionFecha}
+            onChange={(e) => setValidacionFecha(e.target.value || todayStr)}
+            className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-mono-num text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+          />
         </div>
       </section>
 
-      {/* Top Executive KPI Strip */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+      {/* Top Executive KPI Strip (shown in Resumen & Avance) */}
+      {(panelTab === 'resumen' || panelTab === 'avance') && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <div className="bg-white rounded-2xl border border-[#EAE3F5] p-5">
           <p className="text-xs font-medium text-[#7A6B93]">
             Cumplimiento real de actividades hoy
@@ -520,8 +801,10 @@ export const RankingView: React.FC<RankingViewProps> = ({
           </div>
         </div>
       </div>
+      )}
 
-      {/* Real-time Lag Alerts Block */}
+      {/* Real-time Lag Alerts Block (shown in Resumen) */}
+      {panelTab === 'resumen' && (
       <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 space-y-3.5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -586,8 +869,10 @@ export const RankingView: React.FC<RankingViewProps> = ({
           </div>
         )}
       </section>
+      )}
 
-      {/* Comparative Criterion Selector & Bar Comparison */}
+      {/* Comparative Criterion Selector & Bar Comparison (Resumen & Por sucursal) */}
+      {(panelTab === 'resumen' || panelTab === 'por_sucursal') && (
       <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 md:p-6 space-y-5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
@@ -713,8 +998,345 @@ export const RankingView: React.FC<RankingViewProps> = ({
           })}
         </div>
       </section>
+      )}
 
-      {/* Consolidated Matrix Table */}
+      {/* Avance Detallado de Cumplimiento y Puntualidad (Avance & Resumen) */}
+      {(panelTab === 'avance' || panelTab === 'resumen') && (
+        <section className="bg-white rounded-2xl border border-[#EAE3F5] overflow-hidden">
+          <div className="px-6 py-4 border-b border-[#F1ECF9] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h2 className="font-display text-base font-bold text-[#1F172B]">
+                Avance diario de actividades y puntualidad ({validacionFecha})
+              </h2>
+              <p className="text-xs text-[#7A6B93] mt-0.5">
+                {evidenceSummaryCounts.enviadas} de {evidenceSummaryCounts.total} actividades enviadas ·{' '}
+                <span className="font-semibold text-[#15803D]">
+                  {evidenceSummaryCounts.aTiempo} a tiempo
+                </span>{' '}
+                ·{' '}
+                <span className="font-semibold text-[#C2410C]">
+                  {evidenceSummaryCounts.aDestiempo} a destiempo
+                </span>{' '}
+                ·{' '}
+                <span className="font-semibold text-[#4338CA]">
+                  {evidenceSummaryCounts.aprobadas} validadas
+                </span>
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPanelTab('validaciones')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#F3ECFC] text-[#5B21B6] hover:bg-[#E7DAFA] transition-colors self-start sm:self-auto"
+            >
+              <ShieldCheck className="h-3.5 w-3.5" />
+              Ir a Validaciones ({evidenceSummaryCounts.porValidar} pendientes)
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 p-5">
+            {branchComplianceStats.map((st) => {
+              const pctDone =
+                st.total > 0 ? Math.round((st.completadas / st.total) * 100) : 0;
+              return (
+                <div
+                  key={st.summary.sucursal.id}
+                  className="rounded-xl border border-[#EAE3F5] bg-[#FCFAFE] p-4 space-y-2.5"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h3 className="text-xs font-bold text-[#1F172B] truncate">
+                        {st.summary.sucursal.nombre}
+                      </h3>
+                      <p className="text-[11px] text-[#7A6B93] truncate">
+                        Cajera: {st.summary.sucursal.responsable_caja}
+                      </p>
+                    </div>
+                    <span className="font-mono-num text-xs font-bold text-[#5B21B6]">
+                      {st.completadas}/{st.total} ({pctDone}%)
+                    </span>
+                  </div>
+
+                  <div className="h-2 rounded-full bg-[#EFE9F8] overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-[#8B5CF6] to-[#EC4899]"
+                      style={{ width: `${pctDone}%` }}
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <span className="px-2 py-0.5 rounded-md bg-[#ECFDF5] text-[#15803D] font-semibold">
+                      {st.aTiempo} a tiempo
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-[#FFF7ED] text-[#C2410C] font-semibold">
+                      {st.aDestiempo} a destiempo
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-[#EEF2FF] text-[#4338CA] font-semibold">
+                      {st.aprobadas} aprobadas
+                    </span>
+                    {st.observadas > 0 && (
+                      <span className="px-2 py-0.5 rounded-md bg-[#FFF1F2] text-[#BE123C] font-semibold">
+                        {st.observadas} observadas
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Validaciones de Evidencias y Puntualidad (Validaciones & Resumen) */}
+      {(panelTab === 'validaciones' || panelTab === 'resumen') && (
+        <section className="bg-white rounded-2xl border border-[#EAE3F5] overflow-hidden">
+          <div className="px-6 py-4 border-b border-[#F1ECF9] flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-[#7C3AED]" />
+                <h2 className="font-display text-base font-bold text-[#1F172B]">
+                  Validación de evidencias y puntualidad ({validacionFecha})
+                </h2>
+              </div>
+              <p className="text-xs text-[#7A6B93] mt-0.5">
+                Revisa cada fotografía enviada por las sucursales, su hora de envío frente al límite activo (A tiempo / A destiempo) y valida u observa.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(
+                [
+                  {
+                    id: 'enviadas',
+                    label: `Enviadas (${evidenceSummaryCounts.enviadas})`,
+                  },
+                  {
+                    id: 'todas',
+                    label: `Todas (${evidenceSummaryCounts.total})`,
+                  },
+                  {
+                    id: 'a_tiempo',
+                    label: `A tiempo (${evidenceSummaryCounts.aTiempo})`,
+                  },
+                  {
+                    id: 'a_destiempo',
+                    label: `A destiempo (${evidenceSummaryCounts.aDestiempo})`,
+                  },
+                  {
+                    id: 'aprobadas',
+                    label: `Aprobadas (${evidenceSummaryCounts.aprobadas})`,
+                  },
+                  {
+                    id: 'observadas',
+                    label: `Observadas (${evidenceSummaryCounts.observadas})`,
+                  },
+                ] as { id: ValidacionFilter; label: string }[]
+              ).map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => setValidacionFilter(f.id)}
+                  className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors ${
+                    validacionFilter === f.id
+                      ? 'bg-[#F3ECFC] border-[#C4B5FD] text-[#5B21B6]'
+                      : 'bg-[#FAF8FC] border-[#EAE3F5] text-[#6E5F87] hover:text-[#1F172B]'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {validationFeedback && (
+            <div
+              role="alert"
+              className={`mx-5 mt-4 rounded-xl px-4 py-2.5 text-xs font-medium flex items-center justify-between gap-2 border ${
+                validationFeedback.type === 'error'
+                  ? 'bg-[#FFF1F2] border-[#FECDD3] text-[#BE123C]'
+                  : 'bg-[#ECFDF5] border-[#BBF7D0] text-[#15803D]'
+              }`}
+            >
+              <span>{validationFeedback.message}</span>
+              <button
+                type="button"
+                onClick={() => setValidationFeedback(null)}
+                className="font-bold underline shrink-0"
+              >
+                Cerrar
+              </button>
+            </div>
+          )}
+
+          {filteredValidationRows.length === 0 ? (
+            <div className="p-8 text-center text-xs text-[#7A6B93]">
+              No hay evidencias o actividades que coincidan con el filtro seleccionado para {validacionFecha}.
+            </div>
+          ) : (
+            <div className="divide-y divide-[#F3EEF9]">
+              {filteredValidationRows.map(
+                ({
+                  actividad: act,
+                  puntualidad,
+                  validacion,
+                  horaLimiteEfectiva,
+                  hasSubmission,
+                }) => {
+                  const isBusy = savingActId === act.id;
+                  const draftValue =
+                    obsDrafts[act.id] !== undefined
+                      ? obsDrafts[act.id]
+                      : act.observaciones || '';
+                  return (
+                    <div
+                      key={`${act.id}-${act.sucursal_id}`}
+                      className="p-4 sm:px-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4 hover:bg-[#FCFAFE]"
+                    >
+                      <div className="flex items-start gap-3.5 min-w-0 flex-1">
+                        {act.evidencia_url ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setLightboxImg({
+                                url: act.evidencia_url!,
+                                title: act.titulo,
+                                subtitle: `${act.sucursal_nombre} · ${act.cajera_nombre || act.responsable}`,
+                              })
+                            }
+                            className="relative h-16 w-16 rounded-xl overflow-hidden border border-[#E6DDF5] bg-[#FAF8FC] shrink-0 group"
+                            title="Ampliar fotografía de evidencia"
+                          >
+                            <img
+                              src={act.evidencia_url}
+                              alt={`Evidencia de ${act.titulo}`}
+                              className="h-full w-full object-cover group-hover:scale-105 transition-transform"
+                            />
+                            <span className="absolute inset-0 bg-[#1F172B]/30 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                              <Eye className="h-4 w-4 text-white" />
+                            </span>
+                          </button>
+                        ) : (
+                          <div className="h-16 w-16 rounded-xl border border-dashed border-[#DDD4EE] bg-[#FAF8FC] flex items-center justify-center text-[#9D8FB5] shrink-0">
+                            <ImageIcon className="h-5 w-5" />
+                          </div>
+                        )}
+
+                        <div className="min-w-0 space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-bold text-[#1F172B]">
+                              {act.titulo}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-[#F3ECFC] text-[#5B21B6]">
+                              {act.sucursal_nombre}
+                            </span>
+                            <span className="text-xs text-[#6E5F87]">
+                              Cajera: {act.cajera_nombre || act.responsable}
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#FAF8FC] border border-[#EAE3F5] text-[#55476E] font-mono-num">
+                              <Clock className="h-3 w-3 text-[#7C3AED]" />
+                              {horaLimiteEfectiva
+                                ? `Límite ${formatHora12h(horaLimiteEfectiva)}`
+                                : 'Sin horario límite'}
+                            </span>
+
+                            {act.hora_completada && (
+                              <span className="font-mono-num text-[#55476E]">
+                                Envío: <strong>{formatHora12h(act.hora_completada)}</strong>
+                              </span>
+                            )}
+
+                            <span
+                              className={`px-2 py-0.5 rounded-md font-semibold ${
+                                puntualidad === 'A tiempo'
+                                  ? 'bg-[#ECFDF5] text-[#15803D]'
+                                  : puntualidad === 'A destiempo'
+                                    ? 'bg-[#FFF7ED] text-[#C2410C]'
+                                    : puntualidad === 'Sin horario límite'
+                                      ? 'bg-[#F3ECFC] text-[#5B21B6]'
+                                      : 'bg-[#FEF9C3] text-[#A16207]'
+                              }`}
+                            >
+                              {puntualidad}
+                            </span>
+
+                            <span
+                              className={`px-2 py-0.5 rounded-md font-semibold ${
+                                validacion === 'Aprobada'
+                                  ? 'bg-[#EEF2FF] text-[#4338CA]'
+                                  : act.estatus === 'Observada' ||
+                                      validacion === 'Rechazada'
+                                    ? 'bg-[#FFF1F2] text-[#BE123C]'
+                                    : hasSubmission
+                                      ? 'bg-[#FEF9C3] text-[#A16207]'
+                                      : 'bg-[#FAF8FC] text-[#8B7CA5]'
+                              }`}
+                            >
+                              {validacion === 'Aprobada'
+                                ? 'Validada'
+                                : act.estatus === 'Observada' ||
+                                    validacion === 'Rechazada'
+                                  ? 'Observada / Rechazada'
+                                  : hasSubmission
+                                    ? 'Por validar'
+                                    : 'Sin evidencia'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {isCreador && onUpdateActividad && (
+                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 lg:w-[420px] shrink-0">
+                          <input
+                            type="text"
+                            value={draftValue}
+                            onChange={(e) =>
+                              setObsDrafts((prev) => ({
+                                ...prev,
+                                [act.id]: e.target.value,
+                              }))
+                            }
+                            placeholder="Observación para la cajera..."
+                            className="flex-1 px-3 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs text-[#1F172B] focus:outline-none focus:border-[#7C3AED] focus:bg-white"
+                          />
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              disabled={isBusy || !hasSubmission}
+                              onClick={() =>
+                                void handleValidateEvidence(act, 'Aprobada')
+                              }
+                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#ECFDF5] hover:bg-[#D1FAE5] text-[#15803D] border border-[#A7F3D0] disabled:opacity-45"
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              Validar
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                void handleValidateEvidence(act, 'Rechazada')
+                              }
+                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#FFF1F2] hover:bg-[#FFE4E6] text-[#BE123C] border border-[#FECDD3] disabled:opacity-45"
+                            >
+                              <XCircle className="h-3.5 w-3.5" />
+                              Observar
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Consolidated Matrix Table (Resumen & Por sucursal) */}
+      {(panelTab === 'resumen' || panelTab === 'por_sucursal') && (
       <section className="bg-white rounded-2xl border border-[#EAE3F5] overflow-hidden">
         <div className="px-6 py-4 border-b border-[#F1ECF9] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -885,6 +1507,46 @@ export const RankingView: React.FC<RankingViewProps> = ({
           </table>
         </div>
       </section>
+      )}
+
+      {/* Evidence Photo Lightbox */}
+      {lightboxImg && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/70 backdrop-blur-[2px]"
+          onClick={() => setLightboxImg(null)}
+        >
+          <div
+            className="max-w-2xl w-full bg-white rounded-2xl overflow-hidden shadow-2xl border border-[#E6DDF5]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#F1ECF9]">
+              <div className="min-w-0">
+                <p className="text-sm font-bold text-[#1F172B] truncate">
+                  {lightboxImg.title}
+                </p>
+                <p className="text-xs text-[#7A6B93] truncate">
+                  {lightboxImg.subtitle}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLightboxImg(null)}
+                className="p-1.5 rounded-lg text-[#6E5F87] hover:bg-[#F5F0FC]"
+                aria-label="Cerrar imagen"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="p-4 bg-[#FAF8FC] flex items-center justify-center max-h-[75vh]">
+              <img
+                src={lightboxImg.url}
+                alt={lightboxImg.title}
+                className="max-h-[68vh] w-auto rounded-xl object-contain"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
