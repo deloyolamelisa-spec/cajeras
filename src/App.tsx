@@ -56,6 +56,7 @@ import {
   computeBranchSummaries,
   ensureBaseDailyCatalogTasks,
   getTodayDiaSemana,
+  getTodayLocalYYYYMMDD,
   isFixedBaseTask,
 } from './utils/calculations';
 import { isSupabaseConfigured } from './lib/supabaseConfig';
@@ -108,7 +109,33 @@ export default function App() {
     const saved = getSavedSessionUser();
     return saved?.rol === 'cajera' ? saved.sucursal_id : 'todas';
   });
-  const [diaActivo, setDiaActivo] = useState<DiaSemana>(getTodayDiaSemana());
+  const [todayKey, setTodayKey] = useState<string>(() =>
+    getTodayLocalYYYYMMDD()
+  );
+  const [diaActivo, setDiaActivo] = useState<DiaSemana>(() =>
+    getTodayDiaSemana()
+  );
+
+  useEffect(() => {
+    const checkDateRollover = () => {
+      const latest = getTodayLocalYYYYMMDD();
+      setTodayKey((prev) => {
+        if (prev !== latest) {
+          setDiaActivo(getTodayDiaSemana());
+          return latest;
+        }
+        return prev;
+      });
+    };
+    const interval = window.setInterval(checkDateRollover, 30000);
+    window.addEventListener('focus', checkDateRollover);
+    document.addEventListener('visibilitychange', checkDateRollover);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', checkDateRollover);
+      document.removeEventListener('visibilitychange', checkDateRollover);
+    };
+  }, []);
 
   const [sucursales, setSucursales] = useState<Sucursal[]>([]);
   const [metas, setMetas] = useState<MetaSucursal[]>([]);
@@ -384,6 +411,7 @@ export default function App() {
       gastosYRefrendos,
       horarios,
       diaActivo,
+      todayKey,
       metas,
       guaranteedTareasCatalogo,
     ]
@@ -551,6 +579,29 @@ export default function App() {
     }
     const saved = (res.data as GastoYRefrendo | undefined) ?? enriched;
     setGastosYRefrendos((prev) => [saved, ...prev]);
+    setSyncError(null);
+    return res;
+  };
+
+  const handleUpdateGastoORefrendo = async (
+    updated: GastoYRefrendo
+  ): Promise<ServiceResult> => {
+    const enriched = enrichGastoWithAuth(updated);
+    const exists = gastosYRefrendos.some((r) => r.id === enriched.id);
+    const provisional = exists
+      ? gastosYRefrendos.map((r) => (r.id === enriched.id ? enriched : r))
+      : [enriched, ...gastosYRefrendos];
+    const res = await saveGastoORefrendo(enriched, provisional);
+    if (!res.ok) {
+      if (res.error) setSyncError(res.error);
+      return res;
+    }
+    const saved = (res.data as GastoYRefrendo | undefined) ?? enriched;
+    setGastosYRefrendos((prev) =>
+      exists
+        ? prev.map((r) => (r.id === enriched.id ? saved : r))
+        : [saved, ...prev]
+    );
     setSyncError(null);
     return res;
   };
@@ -1103,6 +1154,11 @@ export default function App() {
                       tareasCatalogo={guaranteedTareasCatalogo}
                       usuarios={usuarios}
                       onUpdateActividad={handleUpdateActividad}
+                      onSaveMeta={handleSaveMeta}
+                      onSaveSucursal={handleSaveSucursal}
+                      onCreateGastoORefrendo={handleCreateGastoORefrendo}
+                      onUpdateGastoORefrendo={handleUpdateGastoORefrendo}
+                      onDeleteGastoORefrendo={handleDeleteGastoORefrendo}
                     />
                   )}
 
@@ -1172,6 +1228,7 @@ export default function App() {
                           : undefined
                     }
                     onCreateRegistro={handleCreateGastoORefrendo}
+                    onUpdateRegistro={handleUpdateGastoORefrendo}
                     onDeleteRegistro={handleDeleteGastoORefrendo}
                     onDeleteEvidenciaRegistro={handleDeleteEvidenciaRegistro}
                     openCreateModalExternal={quickModal === 'gasto'}

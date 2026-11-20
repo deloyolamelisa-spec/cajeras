@@ -32,6 +32,8 @@ import {
 import {
   calcularPuntualidadEnvio,
   ensureBaseDailyCatalogTasks,
+  getTodayLocalYYYYMMDD,
+  roundMoney2,
 } from '../utils/calculations';
 
 const STORAGE_KEYS = {
@@ -569,7 +571,7 @@ const llamadasSchemaCache: LlamadasSchemaCache = {
 
 function computeSafeVencimiento(fechaVenc: string): EstatusVencimiento {
   if (!fechaVenc) return 'Al corriente';
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getTodayLocalYYYYMMDD();
   if (fechaVenc < todayStr) return 'Vencido';
   const today = new Date(`${todayStr}T00:00:00`);
   const due = new Date(`${fechaVenc.slice(0, 10)}T00:00:00`);
@@ -736,8 +738,7 @@ function isRlsOrAuthError(err: { code?: string; message?: string }): boolean {
 }
 
 function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> {
-  const monto = Number(llamada.monto_prestamo);
-  const safeMonto = Number.isFinite(monto) && monto >= 0 ? monto : 0;
+  const safeMonto = roundMoney2(llamada.monto_prestamo);
   const safeFechaVenc =
     llamada.fecha_vencimiento && String(llamada.fecha_vencimiento).trim()
       ? String(llamada.fecha_vencimiento).trim().slice(0, 10)
@@ -756,7 +757,7 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
     cliente: llamada.cliente_nombre,
     contrato: llamada.contrato,
     telefono: llamada.telefono,
-    monto_prestamo: safeMonto,
+    monto_prestamo: safeMonto >= 0 ? safeMonto : 0,
     estatus_vencimiento: llamada.estatus_vencimiento,
     fecha_vencimiento: safeFechaVenc,
     reporte_cajera: llamada.reporte_cajera || 'Sin reporte',
@@ -1310,7 +1311,7 @@ function normalizeActividadFromDb(
     ),
     fecha: row.fecha
       ? String(row.fecha).slice(0, 10)
-      : new Date().toISOString().slice(0, 10),
+      : getTodayLocalYYYYMMDD(),
     dias_semana: diasSemana,
     hora_limite: horaLimite,
     sin_horario_limite: sinHorarioLimite,
@@ -1972,13 +1973,13 @@ function normalizeGastoFromDb(
     tipo: row.tipo === 'Refrendo' ? 'Refrendo' : 'Gasto',
     categoria: String(row.categoria ?? 'Operación de Sucursal'),
     concepto: String(row.concepto ?? ''),
-    monto_real: Number(row.monto_real ?? 0) || 0,
-    presupuesto_limite: Number(row.presupuesto_limite ?? 0) || 0,
+    monto_real: roundMoney2(row.monto_real ?? 0),
+    presupuesto_limite: roundMoney2(row.presupuesto_limite ?? 0),
     cantidad_refrendos: Number(row.cantidad_refrendos ?? 0) || 0,
-    meta_refrendos: Number(row.meta_refrendos ?? 0) || 0,
+    meta_refrendos: roundMoney2(row.meta_refrendos ?? 0),
     fecha: row.fecha
       ? String(row.fecha).slice(0, 10)
-      : new Date().toISOString().slice(0, 10),
+      : getTodayLocalYYYYMMDD(),
     responsable: String(
       row.responsable ?? row.cajera_nombre ?? matchedSuc?.responsable_caja ?? ''
     ),
@@ -2083,8 +2084,9 @@ function buildGastoPayload(registro: GastoYRefrendo): Record<string, unknown> {
     ''
   ).trim();
 
+  const isTempId = registro.id.startsWith('gr-');
   const candidateValues: Record<string, unknown> = {
-    id: registro.id,
+    id: isTempId ? registro.id : toDbFilterId(registro.id),
     sucursal_id: registro.sucursal_id || safeSucursalNombre,
     sucursal_nombre: safeSucursalNombre,
     sucursal: safeSucursalNombre,
@@ -2093,11 +2095,11 @@ function buildGastoPayload(registro: GastoYRefrendo): Record<string, unknown> {
     tipo: registro.tipo,
     categoria: registro.categoria,
     concepto: registro.concepto,
-    monto_real: Number(registro.monto_real) || 0,
-    presupuesto_limite: Number(registro.presupuesto_limite) || 0,
+    monto_real: roundMoney2(registro.monto_real),
+    presupuesto_limite: roundMoney2(registro.presupuesto_limite),
     cantidad_refrendos: Number(registro.cantidad_refrendos) || 0,
-    meta_refrendos: Number(registro.meta_refrendos) || 0,
-    fecha: registro.fecha,
+    meta_refrendos: roundMoney2(registro.meta_refrendos),
+    fecha: registro.fecha || getTodayLocalYYYYMMDD(),
     responsable: registro.responsable || safeCajeraNombre,
     evidencia_url: registro.evidencia_url ?? null,
     notas: registro.notas ?? '',
@@ -2105,7 +2107,6 @@ function buildGastoPayload(registro: GastoYRefrendo): Record<string, unknown> {
 
   const { validColumns, missingColumns, omitGeneratedId } = gastosSchemaCache;
   const payload: Record<string, unknown> = {};
-  const isTempId = registro.id.startsWith('gr-');
 
   if (validColumns && validColumns.size > 0) {
     for (const [col, val] of Object.entries(candidateValues)) {
@@ -2430,16 +2431,20 @@ export async function saveHorariosBatch(
 }
 
 function buildSucursalPayload(sucursal: Sucursal) {
+  const metaLlam = Number(sucursal.meta_llamadas_diarias);
+  const metaAct = Number(sucursal.meta_actividades_diarias);
+  const metaRef = Number(sucursal.meta_refrendos_mensual);
+  const techo = Number(sucursal.techo_gasto_mensual);
   return {
     id: sucursal.id,
     nombre: sucursal.nombre.trim(),
     codigo: sucursal.codigo.trim(),
     ciudad: (sucursal.ciudad ?? '').trim(),
     responsable_caja: (sucursal.responsable_caja ?? '').trim(),
-    meta_llamadas_diarias: Number(sucursal.meta_llamadas_diarias) || 30,
-    meta_actividades_diarias: Number(sucursal.meta_actividades_diarias) || 5,
-    meta_refrendos_mensual: Number(sucursal.meta_refrendos_mensual) || 40,
-    techo_gasto_mensual: Number(sucursal.techo_gasto_mensual) || 0,
+    meta_llamadas_diarias: Number.isFinite(metaLlam) ? metaLlam : 30,
+    meta_actividades_diarias: Number.isFinite(metaAct) ? metaAct : 5,
+    meta_refrendos_mensual: Number.isFinite(metaRef) ? roundMoney2(metaRef) : 40,
+    techo_gasto_mensual: Number.isFinite(techo) ? roundMoney2(techo) : 0,
     activa: Boolean(sucursal.activa),
   };
 }
@@ -2598,13 +2603,17 @@ export async function saveMetaSucursal(
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
+    const metaLlam = Number(meta.meta_llamadas_diarias);
+    const metaAct = Number(meta.meta_actividades_diarias);
+    const metaRef = Number(meta.meta_refrendos_mensual);
+    const techo = Number(meta.techo_gasto_mensual);
     const payload = {
       id: meta.id,
       sucursal_id: meta.sucursal_id,
-      meta_llamadas_diarias: Number(meta.meta_llamadas_diarias) || 30,
-      meta_actividades_diarias: Number(meta.meta_actividades_diarias) || 5,
-      meta_refrendos_mensual: Number(meta.meta_refrendos_mensual) || 40,
-      techo_gasto_mensual: Number(meta.techo_gasto_mensual) || 0,
+      meta_llamadas_diarias: Number.isFinite(metaLlam) ? metaLlam : 30,
+      meta_actividades_diarias: Number.isFinite(metaAct) ? metaAct : 5,
+      meta_refrendos_mensual: Number.isFinite(metaRef) ? roundMoney2(metaRef) : 40,
+      techo_gasto_mensual: Number.isFinite(techo) ? roundMoney2(techo) : 0,
     };
     const { data, error } = await conn.client
       .from(SUPABASE_TABLES.METAS)

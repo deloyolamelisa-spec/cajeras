@@ -13,21 +13,49 @@ import {
 } from '../types/controlops';
 import { BASE_DAILY_TASKS } from '../data/mockData';
 
+export const MEXICO_TIMEZONE = 'America/Mexico_City';
+
+export function roundMoney2(value: unknown): number {
+  const num =
+    typeof value === 'string'
+      ? Number(value.replace(/[$,\s]/g, ''))
+      : Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.round((num + Number.EPSILON) * 100) / 100;
+}
+
+export function parseMoneyInput(value: unknown): number {
+  if (typeof value === 'number') {
+    return Number.isFinite(value)
+      ? Math.round((value + Number.EPSILON) * 100) / 100
+      : 0;
+  }
+  const cleaned = String(value ?? '')
+    .replace(/[$,\s]/g, '')
+    .trim();
+  if (!cleaned) return 0;
+  const num = Number(cleaned);
+  if (!Number.isFinite(num)) return 0;
+  return Math.round((num + Number.EPSILON) * 100) / 100;
+}
+
 export function formatMXN(amount: number, decimals = 0): string {
+  const safe = roundMoney2(amount);
   return new Intl.NumberFormat('es-MX', {
     style: 'currency',
     currency: 'MXN',
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
-  }).format(amount);
+  }).format(safe);
 }
 
 export function formatCurrencyClean(amount: number): string {
-  const rounded = Math.round((Number(amount) || 0) * 100) / 100;
+  const rounded = roundMoney2(amount);
+  const hasCents = Math.abs(rounded - Math.trunc(rounded)) > 0.0001;
   return new Intl.NumberFormat('es-MX', {
     style: 'currency',
     currency: 'MXN',
-    minimumFractionDigits: 0,
+    minimumFractionDigits: hasCents ? 2 : 0,
     maximumFractionDigits: 2,
   }).format(rounded);
 }
@@ -43,9 +71,66 @@ export function formatHora12h(hhmm: string | null | undefined): string {
   return `${h12}:${String(m).padStart(2, '0')} ${suffix}`;
 }
 
+export function getMexicoNowParts(date: Date = new Date()): {
+  year: number;
+  month: number;
+  day: number;
+  yyyyMmDd: string;
+  monthPrefix: string;
+  hhmm: string;
+  diaSemana: DiaSemana;
+} {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: MEXICO_TIMEZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = formatter.formatToParts(date);
+    const get = (type: Intl.DateTimeFormatPartTypes) =>
+      parts.find((p) => p.type === type)?.value || '';
+    const yStr = get('year');
+    const mStr = get('month');
+    const dStr = get('day');
+    let hStr = get('hour');
+    const minStr = get('minute');
+    if (hStr === '24') hStr = '00';
+    const yyyyMmDd = `${yStr}-${mStr}-${dStr}`;
+    return {
+      year: Number(yStr) || date.getFullYear(),
+      month: Number(mStr) || date.getMonth() + 1,
+      day: Number(dStr) || date.getDate(),
+      yyyyMmDd,
+      monthPrefix: `${yStr}-${mStr}`,
+      hhmm: `${hStr.padStart(2, '0')}:${minStr.padStart(2, '0')}`,
+      diaSemana: getDiaSemanaFromDate(yyyyMmDd),
+    };
+  } catch {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    const hh = String(date.getHours()).padStart(2, '0');
+    const mm = String(date.getMinutes()).padStart(2, '0');
+    const yyyyMmDd = `${y}-${m}-${d}`;
+    return {
+      year: y,
+      month: Number(m),
+      day: Number(d),
+      yyyyMmDd,
+      monthPrefix: `${y}-${m}`,
+      hhmm: `${hh}:${mm}`,
+      diaSemana: getDiaSemanaFromDate(yyyyMmDd),
+    };
+  }
+}
+
 export function getDiaSemanaFromDate(yyyyMmDd: string): DiaSemana {
   const [y, m, d] = yyyyMmDd.split('-').map(Number);
-  const dateObj = new Date(y, (m || 1) - 1, d || 1);
+  const dateObj = new Date(Date.UTC(y || 2026, (m || 1) - 1, d || 1, 12, 0, 0));
   const map: Record<number, DiaSemana> = {
     0: 'domingo',
     1: 'lunes',
@@ -55,7 +140,42 @@ export function getDiaSemanaFromDate(yyyyMmDd: string): DiaSemana {
     5: 'viernes',
     6: 'sabado',
   };
-  return map[dateObj.getDay()] ?? 'lunes';
+  return map[dateObj.getUTCDay()] ?? 'lunes';
+}
+
+export function formatMexicoDateLabel(yyyyMmDd: string): string {
+  const [y, m, d] = yyyyMmDd.split('-').map(Number);
+  const dateObj = new Date(Date.UTC(y || 2026, (m || 1) - 1, d || 1, 12, 0, 0));
+  const raw = dateObj.toLocaleDateString('es-MX', {
+    timeZone: MEXICO_TIMEZONE,
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+  });
+  return raw.charAt(0).toLowerCase() + raw.slice(1);
+}
+
+export function formatMexicoMonthYearUpper(yyyyMmDd: string): string {
+  const [y, m, d] = yyyyMmDd.split('-').map(Number);
+  const dateObj = new Date(Date.UTC(y || 2026, (m || 1) - 1, d || 1, 12, 0, 0));
+  return dateObj
+    .toLocaleDateString('es-MX', {
+      timeZone: MEXICO_TIMEZONE,
+      month: 'long',
+      year: 'numeric',
+    })
+    .replace(' de ', ' ')
+    .toUpperCase();
+}
+
+export function addDaysYYYYMMDD(yyyyMmDd: string, offsetDays: number): string {
+  const [y, m, d] = yyyyMmDd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y || 2026, (m || 1) - 1, d || 1, 12, 0, 0));
+  dt.setUTCDate(dt.getUTCDate() + offsetDays);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
 }
 
 export function formatPercent(value: number, decimals = 1): string {
@@ -74,32 +194,15 @@ export function sanitizePhoneForWhatsApp(phone: string): string {
 }
 
 export function getTodayDiaSemana(): DiaSemana {
-  const dayIndex = new Date().getDay();
-  const map: Record<number, DiaSemana> = {
-    0: 'domingo',
-    1: 'lunes',
-    2: 'martes',
-    3: 'miercoles',
-    4: 'jueves',
-    5: 'viernes',
-    6: 'sabado',
-  };
-  return map[dayIndex] ?? 'lunes';
+  return getMexicoNowParts().diaSemana;
 }
 
 export function getCurrentLocalHHMM(): string {
-  const now = new Date();
-  const hh = String(now.getHours()).padStart(2, '0');
-  const mm = String(now.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
+  return getMexicoNowParts().hhmm;
 }
 
 export function getTodayLocalYYYYMMDD(): string {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  return getMexicoNowParts().yyyyMmDd;
 }
 
 export function toLocalYYYYMMDD(dateInput?: string | Date | null): string {
@@ -109,18 +212,12 @@ export function toLocalYYYYMMDD(dateInput?: string | Date | null): string {
     if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
     const parsed = new Date(trimmed);
     if (!Number.isNaN(parsed.getTime())) {
-      const y = parsed.getFullYear();
-      const m = String(parsed.getMonth() + 1).padStart(2, '0');
-      const d = String(parsed.getDate()).padStart(2, '0');
-      return `${y}-${m}-${d}`;
+      return getMexicoNowParts(parsed).yyyyMmDd;
     }
     if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10);
   }
   if (dateInput instanceof Date && !Number.isNaN(dateInput.getTime())) {
-    const y = dateInput.getFullYear();
-    const m = String(dateInput.getMonth() + 1).padStart(2, '0');
-    const d = String(dateInput.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+    return getMexicoNowParts(dateInput).yyyyMmDd;
   }
   return getTodayLocalYYYYMMDD();
 }
@@ -646,6 +743,20 @@ export function calcularExcesoPresupuesto(
 export interface BranchSummaryFilterOptions {
   monthPrefix?: string; // 'YYYY-MM' or 'YYYY' or 'todos'
   cajeraNombre?: string; // 'todas' or exact/partial name
+  fechaDesde?: string; // 'YYYY-MM-DD'
+  fechaHasta?: string; // 'YYYY-MM-DD'
+}
+
+function enumerateDateRange(start: string, end: string, maxDays = 366): string[] {
+  if (!start || !end || start > end) return [];
+  const dates: string[] = [];
+  let cursor = start;
+  for (let i = 0; i < maxDays; i++) {
+    dates.push(cursor);
+    if (cursor >= end) break;
+    cursor = addDaysYYYYMMDD(cursor, 1);
+  }
+  return dates;
 }
 
 export function computeBranchSummaries(
@@ -665,6 +776,39 @@ export function computeBranchSummaries(
     filterOptions?.monthPrefix && filterOptions.monthPrefix !== 'todos'
       ? filterOptions.monthPrefix
       : '';
+  const rawDesde = (filterOptions?.fechaDesde || '').trim();
+  const rawHasta = (filterOptions?.fechaHasta || '').trim();
+  const hasRange = Boolean(rawDesde || rawHasta);
+  const rangeStart =
+    rawDesde && rawHasta && rawDesde > rawHasta ? rawHasta : rawDesde;
+  const rangeEnd =
+    rawDesde && rawHasta && rawDesde > rawHasta ? rawDesde : rawHasta;
+
+  const matchesDate = (dateStr: string): boolean => {
+    if (hasRange) {
+      if (!dateStr) return false;
+      if (rangeStart && dateStr < rangeStart) return false;
+      if (rangeEnd && dateStr > rangeEnd) return false;
+      return true;
+    }
+    if (monthPrefix) {
+      return Boolean(dateStr && dateStr.startsWith(monthPrefix));
+    }
+    return true;
+  };
+
+  const activityDates: string[] = (() => {
+    if (!hasRange) return [todayStr];
+    if (rangeStart && rangeEnd) {
+      const capEnd = rangeEnd > todayStr && rangeStart <= todayStr ? todayStr : rangeEnd;
+      const list = enumerateDateRange(rangeStart, capEnd);
+      return list.length > 0 ? list : [rangeStart];
+    }
+    return [rangeStart || rangeEnd || todayStr];
+  })();
+
+  const rangeDaysCount = Math.max(1, activityDates.length);
+
   const cajeraFilter =
     filterOptions?.cajeraNombre && filterOptions.cajeraNombre !== 'todas'
       ? filterOptions.cajeraNombre.trim().toLowerCase()
@@ -687,9 +831,7 @@ export function computeBranchSummaries(
 
     const llamadasSuc = llamadas.filter((l) => {
       if (l.sucursal_id !== sucursal.id) return false;
-      if (monthPrefix && !getLlamadaLocalDate(l).startsWith(monthPrefix)) {
-        return false;
-      }
+      if (!matchesDate(getLlamadaLocalDate(l))) return false;
       if (
         cajeraFilter &&
         l.cajera_nombre.trim().toLowerCase() !== cajeraFilter &&
@@ -711,33 +853,54 @@ export function computeBranchSummaries(
     const llamadasSinAuditar = llamadasSuc.filter(
       (l) => l.estatus_auditoria === 'Sin auditar'
     ).length;
-    const metaLlamadas =
+    const metaDiariaLlamadas =
       metaConfig?.meta_llamadas_diarias || sucursal.meta_llamadas_diarias || 30;
-    const pctLlamadas = Math.min(100, (llamadasRegistradas / metaLlamadas) * 100);
+    const metaLlamadas =
+      hasRange && rangeDaysCount > 1
+        ? metaDiariaLlamadas * rangeDaysCount
+        : metaDiariaLlamadas;
+    const pctLlamadas =
+      metaLlamadas > 0
+        ? Math.min(100, (llamadasRegistradas / metaLlamadas) * 100)
+        : 0;
 
-    const actividadesSuc = resolveDailyTasksForBranch(
-      sucursal,
-      tareasCatalogo,
-      actividades,
-      diaActivo,
-      todayStr
-    );
-    const horarioDia = horarios.find(
-      (h) => h.sucursal_id === sucursal.id && h.dia === diaActivo
-    );
-    const actividadesCompletadas = actividadesSuc.filter(
-      (a) => a.estatus === 'Completada'
-    ).length;
-    const actividadesTotal = actividadesSuc.length;
-    const actividadesVencidas = actividadesSuc.filter(
-      (a) => evaluarVencimientoActividad(a, horarioDia).vencidaPorHora
-    ).length;
+    let actividadesCompletadas = 0;
+    let actividadesTotal = 0;
+    let actividadesVencidas = 0;
+
+    for (const targetDate of activityDates) {
+      const diaTarget = hasRange ? getDiaSemanaFromDate(targetDate) : diaActivo;
+      const actividadesSuc = resolveDailyTasksForBranch(
+        sucursal,
+        tareasCatalogo,
+        actividades,
+        diaTarget,
+        targetDate
+      );
+      const horarioDia = horarios.find(
+        (h) => h.sucursal_id === sucursal.id && h.dia === diaTarget
+      );
+      actividadesTotal += actividadesSuc.length;
+      actividadesCompletadas += actividadesSuc.filter(
+        (a) => a.estatus === 'Completada'
+      ).length;
+      actividadesVencidas += actividadesSuc.filter((a) => {
+        if (targetDate < todayStr) {
+          return a.estatus !== 'Completada' && !a.sin_horario_limite;
+        }
+        if (targetDate > todayStr) {
+          return false;
+        }
+        return evaluarVencimientoActividad(a, horarioDia).vencidaPorHora;
+      }).length;
+    }
+
     const pctActividades =
       actividadesTotal > 0 ? (actividadesCompletadas / actividadesTotal) * 100 : 0;
 
     const gastosSuc = gastosYRefrendos.filter((g) => {
       if (g.sucursal_id !== sucursal.id || g.tipo !== 'Gasto') return false;
-      if (monthPrefix && !(g.fecha || '').startsWith(monthPrefix)) return false;
+      if (!matchesDate(g.fecha || '')) return false;
       if (
         cajeraFilter &&
         g.responsable.trim().toLowerCase() !== cajeraFilter &&
@@ -747,15 +910,17 @@ export function computeBranchSummaries(
       }
       return true;
     });
-    const gastoRealTotal = gastosSuc.reduce((acc, g) => acc + g.monto_real, 0);
-    const sumaTechosGasto = gastosSuc.reduce(
-      (acc, g) => acc + g.presupuesto_limite,
-      0
+    const gastoRealTotal = roundMoney2(
+      gastosSuc.reduce((acc, g) => acc + (Number(g.monto_real) || 0), 0)
     );
-    const gastoPresupuestoTotal =
-      metaConfig?.techo_gasto_mensual ||
-      sucursal.techo_gasto_mensual ||
-      sumaTechosGasto;
+    const sumaTechosGasto = roundMoney2(
+      gastosSuc.reduce((acc, g) => acc + (Number(g.presupuesto_limite) || 0), 0)
+    );
+    const gastoPresupuestoTotal = roundMoney2(
+      metaConfig?.techo_gasto_mensual ??
+        sucursal.techo_gasto_mensual ??
+        sumaTechosGasto
+    );
     const gastoCalc = calcularExcesoPresupuesto(
       gastoRealTotal,
       gastoPresupuestoTotal
@@ -763,7 +928,7 @@ export function computeBranchSummaries(
 
     const refrendosSuc = gastosYRefrendos.filter((g) => {
       if (g.sucursal_id !== sucursal.id || g.tipo !== 'Refrendo') return false;
-      if (monthPrefix && !(g.fecha || '').startsWith(monthPrefix)) return false;
+      if (!matchesDate(g.fecha || '')) return false;
       if (
         cajeraFilter &&
         g.responsable.trim().toLowerCase() !== cajeraFilter &&
@@ -774,17 +939,24 @@ export function computeBranchSummaries(
       return true;
     });
     const refrendosRealizados = refrendosSuc.reduce(
-      (acc, r) => acc + (r.cantidad_refrendos || 0),
+      (acc, r) => acc + (Number(r.cantidad_refrendos) || 0),
       0
     );
-    const refrendosMeta =
-      metaConfig?.meta_refrendos_mensual ||
-      sucursal.meta_refrendos_mensual ||
-      refrendosSuc.reduce((acc, r) => acc + (r.meta_refrendos || 0), 0) ||
-      40;
-    const montoRefrendos = refrendosSuc.reduce((acc, r) => acc + r.monto_real, 0);
+    const refrendosMetaRaw =
+      metaConfig?.meta_refrendos_mensual ??
+      sucursal.meta_refrendos_mensual ??
+      (refrendosSuc.reduce((acc, r) => acc + (Number(r.meta_refrendos) || 0), 0) ||
+        40);
+    const refrendosMeta = roundMoney2(refrendosMetaRaw);
+    const montoRefrendos = roundMoney2(
+      refrendosSuc.reduce((acc, r) => acc + (Number(r.monto_real) || 0), 0)
+    );
     const pctRefrendos =
-      refrendosMeta > 0 ? (refrendosRealizados / refrendosMeta) * 100 : 0;
+      refrendosMeta > 0
+        ? refrendosMeta >= 500
+          ? (montoRefrendos / refrendosMeta) * 100
+          : (refrendosRealizados / refrendosMeta) * 100
+        : 0;
 
     const scoreGasto = gastoCalc.excedido
       ? Math.max(0, 100 - gastoCalc.excesoPorcentaje * 2)
@@ -810,7 +982,7 @@ export function computeBranchSummaries(
       pctActividades,
       gastoRealTotal,
       gastoPresupuestoTotal,
-      excesoDinero: gastoCalc.excesoDinero,
+      excesoDinero: roundMoney2(gastoCalc.excesoDinero),
       excesoPorcentaje: gastoCalc.excesoPorcentaje,
       pctUsoPresupuesto: gastoCalc.porcentajeUso,
       excedioPresupuesto: gastoCalc.excedido,

@@ -1,7 +1,8 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  Pencil,
   Plus,
   TrendingUp,
   Upload,
@@ -15,7 +16,13 @@ import {
   RolUsuario,
   Sucursal,
 } from '../types/controlops';
-import { formatMXN, formatPercent } from '../utils/calculations';
+import {
+  formatCurrencyClean,
+  formatMXN,
+  formatPercent,
+  getTodayLocalYYYYMMDD,
+  parseMoneyInput,
+} from '../utils/calculations';
 import { ServiceResult, uploadEvidenciaFoto } from '../services/controlOpsService';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
@@ -29,6 +36,7 @@ interface GastosRefrendosViewProps {
   currentUserName?: string;
   fixedTab?: 'gastos' | 'refrendos';
   onCreateRegistro: (nuevo: GastoYRefrendo) => Promise<ServiceResult | void>;
+  onUpdateRegistro?: (updated: GastoYRefrendo) => Promise<ServiceResult | void>;
   onDeleteRegistro: (registro: GastoYRefrendo) => Promise<void>;
   onDeleteEvidenciaRegistro: (registro: GastoYRefrendo) => Promise<void>;
   openCreateModalExternal?: boolean;
@@ -45,6 +53,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
   currentUserName,
   fixedTab,
   onCreateRegistro,
+  onUpdateRegistro,
   onDeleteRegistro,
   onDeleteEvidenciaRegistro,
   openCreateModalExternal = false,
@@ -52,6 +61,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
 }) => {
   const isCajera = userRole === 'cajera';
   const isCreador = userRole === 'creador';
+  const canMutateModal = isCajera || isCreador;
   const [saveError, setSaveError] = useState<string | null>(null);
   const [subTab, setSubTab] = useState<'gastos' | 'refrendos' | 'bitacora'>(
     fixedTab ?? 'gastos'
@@ -70,6 +80,28 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  const [todayStr, setTodayStr] = useState<string>(() =>
+    getTodayLocalYYYYMMDD()
+  );
+
+  useEffect(() => {
+    const syncToday = () => {
+      const latest = getTodayLocalYYYYMMDD();
+      setTodayStr((prev) => (prev === latest ? prev : latest));
+    };
+    const interval = window.setInterval(syncToday, 30000);
+    window.addEventListener('focus', syncToday);
+    document.addEventListener('visibilitychange', syncToday);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', syncToday);
+      document.removeEventListener('visibilitychange', syncToday);
+    };
+  }, []);
+
+  const [editingRegistro, setEditingRegistro] =
+    useState<GastoYRefrendo | null>(null);
+
   const defaultSucursal =
     selectedSucursalId === 'todas'
       ? sucursales[0]?.id || 'suc-centro'
@@ -86,22 +118,57 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
     presupuesto_limite: '1500',
     cantidad_refrendos: '5',
     meta_refrendos: '45',
+    fecha: todayStr,
     notas: '',
   });
 
   const openCreateModal = () => {
-    if (fixedTab) {
-      setForm((prev) => ({
-        ...prev,
-        tipo: fixedTab === 'refrendos' ? 'Refrendo' : 'Gasto',
-      }));
-    }
+    setEditingRegistro(null);
+    const preferredTipo: 'Gasto' | 'Refrendo' =
+      fixedTab === 'refrendos' || activeTab === 'refrendos'
+        ? 'Refrendo'
+        : 'Gasto';
+    setForm((prev) => ({
+      ...prev,
+      sucursal_id:
+        selectedSucursalId === 'todas'
+          ? sucursales[0]?.id || 'suc-centro'
+          : selectedSucursalId,
+      tipo: preferredTipo,
+      concepto: '',
+      monto_real: '',
+      presupuesto_limite: prev.presupuesto_limite || '0',
+      cantidad_refrendos: preferredTipo === 'Refrendo' ? '1' : '0',
+      fecha: getTodayLocalYYYYMMDD(),
+      notas: '',
+    }));
+    setReceiptFile(null);
     setShowNewModal(true);
   };
 
-  const isModalOpen = isCajera && (showNewModal || openCreateModalExternal);
+  const openEditModal = (registro: GastoYRefrendo) => {
+    if (!isCreador) return;
+    setEditingRegistro(registro);
+    setForm({
+      sucursal_id: registro.sucursal_id,
+      tipo: registro.tipo,
+      categoria: registro.categoria || 'Operación de Sucursal',
+      concepto: registro.concepto,
+      monto_real: String(registro.monto_real ?? 0),
+      presupuesto_limite: String(registro.presupuesto_limite ?? 0),
+      cantidad_refrendos: String(registro.cantidad_refrendos ?? 0),
+      meta_refrendos: String(registro.meta_refrendos ?? 0),
+      fecha: registro.fecha || getTodayLocalYYYYMMDD(),
+      notas: registro.notas || '',
+    });
+    setReceiptFile(null);
+    setShowNewModal(true);
+  };
+
+  const isModalOpen = canMutateModal && (showNewModal || openCreateModalExternal);
   const closeModal = () => {
     setShowNewModal(false);
+    setEditingRegistro(null);
     onCloseCreateModalExternal?.();
   };
 
@@ -139,7 +206,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
       const suc =
         sucursales.find((s) => s.id === targetSucId) || sucursales[0];
       const safeSucursalNombre = (suc?.nombre || 'Sucursal').trim() || 'Sucursal';
-      let evidenciaUrl: string | null = null;
+      let evidenciaUrl: string | null = editingRegistro?.evidencia_url ?? null;
       if (receiptFile) {
         const res = await uploadEvidenciaFoto(
           receiptFile,
@@ -156,6 +223,42 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
         evidenciaUrl = res.url;
       }
 
+      const safeFecha = isCreador
+        ? form.fecha || getTodayLocalYYYYMMDD()
+        : getTodayLocalYYYYMMDD();
+
+      if (editingRegistro && onUpdateRegistro) {
+        const updated: GastoYRefrendo = {
+          ...editingRegistro,
+          sucursal_id: suc?.id || targetSucId,
+          sucursal_nombre: safeSucursalNombre,
+          sucursal: safeSucursalNombre,
+          tipo: form.tipo,
+          categoria: form.categoria,
+          concepto: form.concepto.trim(),
+          monto_real: parseMoneyInput(form.monto_real),
+          presupuesto_limite:
+            form.tipo === 'Gasto' ? parseMoneyInput(form.presupuesto_limite) : 0,
+          cantidad_refrendos:
+            form.tipo === 'Refrendo' ? Number(form.cantidad_refrendos) || 0 : 0,
+          meta_refrendos:
+            form.tipo === 'Refrendo' ? parseMoneyInput(form.meta_refrendos) : 0,
+          fecha: safeFecha,
+          evidencia_url: evidenciaUrl,
+          notas: form.notas.trim(),
+        };
+        const updRes = await onUpdateRegistro(updated);
+        if (updRes && updRes.ok === false) {
+          setSaveError(
+            updRes.error || 'No se pudo actualizar el registro en Supabase.'
+          );
+          return;
+        }
+        setReceiptFile(null);
+        closeModal();
+        return;
+      }
+
       const nuevo: GastoYRefrendo = {
         id: `gr-${Date.now()}`,
         sucursal_id: suc?.id || targetSucId,
@@ -166,14 +269,14 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
         tipo: form.tipo,
         categoria: form.categoria,
         concepto: form.concepto.trim(),
-        monto_real: Number(form.monto_real) || 0,
+        monto_real: parseMoneyInput(form.monto_real),
         presupuesto_limite:
-          form.tipo === 'Gasto' ? Number(form.presupuesto_limite) || 0 : 0,
+          form.tipo === 'Gasto' ? parseMoneyInput(form.presupuesto_limite) : 0,
         cantidad_refrendos:
           form.tipo === 'Refrendo' ? Number(form.cantidad_refrendos) || 0 : 0,
         meta_refrendos:
-          form.tipo === 'Refrendo' ? Number(form.meta_refrendos) || 0 : 0,
-        fecha: new Date().toISOString().slice(0, 10),
+          form.tipo === 'Refrendo' ? parseMoneyInput(form.meta_refrendos) : 0,
+        fecha: safeFecha,
         responsable:
           (isCajera && currentUserName) ||
           currentUserName ||
@@ -271,22 +374,24 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
           </div>
         )}
 
-        {isCajera ? (
+        {canMutateModal ? (
           <button
             type="button"
             onClick={openCreateModal}
             className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap"
           >
             <Plus className="h-4 w-4" />
-            {fixedTab === 'refrendos'
-              ? 'Registrar refrendo'
-              : fixedTab === 'gastos'
-                ? 'Registrar gasto'
-                : 'Registrar gasto o refrendo'}
+            {isCreador
+              ? 'Agregar / Ajustar monto'
+              : fixedTab === 'refrendos'
+                ? 'Registrar refrendo'
+                : fixedTab === 'gastos'
+                  ? 'Registrar gasto'
+                  : 'Registrar gasto o refrendo'}
           </button>
         ) : (
           <span className="px-3 py-1.5 rounded-xl text-xs font-medium bg-[#FAF7FE] text-[#6D28D9] border border-[#EAE3F5] w-fit">
-            {isCreador ? 'Control y Depuración de Registros' : 'Modo Auditoría'}
+            Modo Auditoría
           </span>
         )}
       </div>
@@ -321,13 +426,13 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                         {s.sucursal.nombre}
                       </p>
                       <p className="text-xs text-[#6E5F87] font-mono-num">
-                        Real: {formatMXN(s.gastoRealTotal)} vs Límite:{' '}
-                        {formatMXN(s.gastoPresupuestoTotal)}
+                        Real: {formatCurrencyClean(s.gastoRealTotal)} vs Límite:{' '}
+                        {formatCurrencyClean(s.gastoPresupuestoTotal)}
                       </p>
                     </div>
                     <div className="text-right font-mono-num">
                       <p className="text-sm font-bold text-[#BE123C]">
-                        +{formatMXN(s.excesoDinero)}
+                        +{formatCurrencyClean(s.excesoDinero)}
                       </p>
                       <p className="text-xs font-semibold text-[#E11D48]">
                         +{formatPercent(s.excesoPorcentaje)} excedido
@@ -389,7 +494,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                       </span>
                       <div className="font-mono-num flex items-center gap-3">
                         <span className="text-[#6E5F87]">
-                          Techo: {formatMXN(s.gastoPresupuestoTotal)}
+                          Techo: {formatCurrencyClean(s.gastoPresupuestoTotal)}
                         </span>
                         <span
                           className={`font-bold ${
@@ -398,10 +503,10 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                               : 'text-[#15803D]'
                           }`}
                         >
-                          Real: {formatMXN(s.gastoRealTotal)}
+                          Real: {formatCurrencyClean(s.gastoRealTotal)}
                           {s.excedioPresupuesto
-                            ? ` (+${formatMXN(s.excesoDinero)} / +${formatPercent(s.excesoPorcentaje)})`
-                            : ` (Margen ${formatMXN(s.gastoPresupuestoTotal - s.gastoRealTotal)})`}
+                            ? ` (+${formatCurrencyClean(s.excesoDinero)} / +${formatPercent(s.excesoPorcentaje)})`
+                            : ` (Margen ${formatCurrencyClean(s.gastoPresupuestoTotal - s.gastoRealTotal)})`}
                         </span>
                       </div>
                     </div>
@@ -420,7 +525,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                       />
                       {/* Budget Ceiling Marker */}
                       <div
-                        title={`Techo máximo: ${formatMXN(s.gastoPresupuestoTotal)}`}
+                        title={`Techo máximo: ${formatCurrencyClean(s.gastoPresupuestoTotal)}`}
                         className="absolute top-0 bottom-0 w-0.5 bg-[#1F172B] z-10"
                         style={{
                           left: `${Math.min(99, Math.max(1, limitPct))}%`,
@@ -532,7 +637,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                     <th className="py-3 px-4 text-right">Monto Real</th>
                     <th className="py-3 px-4">Comprobante</th>
                     {isCreador && (
-                      <th className="py-3 px-4 text-right">Eliminar</th>
+                      <th className="py-3 px-4 text-right">Acciones</th>
                     )}
                   </tr>
                 </thead>
@@ -558,7 +663,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                           </div>
                         </td>
                         <td className="py-3 px-4 text-right font-mono-num font-bold text-[#1F172B]">
-                          {formatMXN(r.monto_real)}
+                          {formatMXN(r.monto_real, 2)}
                         </td>
                         <td className="py-3 px-4">
                           {r.evidencia_url ? (
@@ -598,7 +703,18 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                           )}
                         </td>
                         {isCreador && (
-                          <td className="py-3 px-4 text-right">
+                          <td className="py-3 px-4 text-right whitespace-nowrap space-x-1">
+                            {onUpdateRegistro && (
+                              <button
+                                type="button"
+                                onClick={() => openEditModal(r)}
+                                title="Editar monto o datos"
+                                aria-label="Editar registro"
+                                className="p-1.5 rounded-lg text-[#5B21B6] hover:bg-[#F3ECFC]"
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() =>
@@ -671,14 +787,25 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                       </div>
 
                       <div className="flex items-baseline justify-between font-mono-num">
-                        <span className="text-lg font-bold text-[#1F172B]">
-                          {s.refrendosRealizados}{' '}
-                          <span className="text-xs font-normal text-[#8B7CA5]">
-                            / {s.refrendosMeta} refrendos
+                        {s.refrendosMeta >= 500 ? (
+                          <span className="text-base sm:text-lg font-bold text-[#1F172B]">
+                            {formatCurrencyClean(s.montoRefrendos)}{' '}
+                            <span className="text-xs font-normal text-[#8B7CA5]">
+                              / {formatCurrencyClean(s.refrendosMeta)}
+                            </span>
                           </span>
-                        </span>
+                        ) : (
+                          <span className="text-lg font-bold text-[#1F172B]">
+                            {s.refrendosRealizados}{' '}
+                            <span className="text-xs font-normal text-[#8B7CA5]">
+                              / {s.refrendosMeta} refrendos
+                            </span>
+                          </span>
+                        )}
                         <span className="text-sm font-semibold text-[#BE185D]">
-                          {formatMXN(s.montoRefrendos, 2)}
+                          {s.refrendosMeta >= 500
+                            ? `${s.refrendosRealizados} op.`
+                            : formatCurrencyClean(s.montoRefrendos)}
                         </span>
                       </div>
 
@@ -715,6 +842,9 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                     <th className="py-3 px-4">Concepto</th>
                     <th className="py-3 px-4 text-right">Cantidad</th>
                     <th className="py-3 px-4 text-right">Monto ($)</th>
+                    {isCreador && (
+                      <th className="py-3 px-4 text-right">Acciones</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#F3EEF9] text-sm">
@@ -744,6 +874,35 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                         <td className="py-3 px-4 text-right font-mono-num font-bold text-[#1F172B]">
                           {formatMXN(r.monto_real, 2)}
                         </td>
+                        {isCreador && (
+                          <td className="py-3 px-4 text-right whitespace-nowrap space-x-1">
+                            {onUpdateRegistro && (
+                              <button
+                                type="button"
+                                onClick={() => openEditModal(r)}
+                                title="Editar monto o datos"
+                                aria-label="Editar refrendo"
+                                className="p-1.5 rounded-lg text-[#5B21B6] hover:bg-[#F3ECFC]"
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDeleteTarget({
+                                  mode: 'record',
+                                  registro: r,
+                                })
+                              }
+                              title="Eliminar registro de refrendo"
+                              aria-label="Eliminar refrendo"
+                              className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </td>
+                        )}
                       </tr>
                     ))}
                 </tbody>
@@ -772,7 +931,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                   <th className="py-3 px-4">Evidencia</th>
                   <th className="py-3 px-4">Notas</th>
                   {isCreador && (
-                    <th className="py-3 px-4 text-right">Eliminar</th>
+                    <th className="py-3 px-4 text-right">Acciones</th>
                   )}
                 </tr>
               </thead>
@@ -805,12 +964,12 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                       <div className="text-xs text-[#8B7CA5]">{r.categoria}</div>
                     </td>
                     <td className="py-3 px-4 text-right font-mono-num font-bold text-[#1F172B]">
-                      {formatMXN(r.monto_real)}
+                      {formatMXN(r.monto_real, 2)}
                     </td>
                     <td className="py-3 px-4 text-right font-mono-num text-xs text-[#6E5F87]">
                       {r.tipo === 'Gasto'
-                        ? `Techo ${formatMXN(r.presupuesto_limite)}`
-                        : `${r.cantidad_refrendos}/${r.meta_refrendos} ref.`}
+                        ? `Techo ${formatCurrencyClean(r.presupuesto_limite)}`
+                        : `${r.cantidad_refrendos}/${formatCurrencyClean(r.meta_refrendos)}`}
                     </td>
                     <td className="py-3 px-4">
                       {r.evidencia_url ? (
@@ -851,7 +1010,18 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                       {r.notas || '—'}
                     </td>
                     {isCreador && (
-                      <td className="py-3 px-4 text-right">
+                      <td className="py-3 px-4 text-right whitespace-nowrap space-x-1">
+                        {onUpdateRegistro && (
+                          <button
+                            type="button"
+                            onClick={() => openEditModal(r)}
+                            title="Editar registro"
+                            aria-label="Editar registro"
+                            className="p-1.5 rounded-lg text-[#5B21B6] hover:bg-[#F3ECFC]"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() =>
@@ -882,7 +1052,9 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
           <div className="w-full max-w-lg rounded-2xl bg-white border border-[#E6DDF5] shadow-xl overflow-hidden">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[#F1ECF9]">
               <h3 className="font-display text-base font-bold text-[#1F172B]">
-                Registrar movimiento en gastos_y_refrendos
+                {editingRegistro
+                  ? 'Editar monto / registro en gastos_y_refrendos'
+                  : 'Registrar movimiento en gastos_y_refrendos'}
               </h3>
               <button
                 type="button"
@@ -894,7 +1066,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
             </div>
 
             <form onSubmit={handleSubmit} className="p-6 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+              <div className={`grid gap-3 ${isCreador ? 'grid-cols-3' : 'grid-cols-2'}`}>
                 <div>
                   <label className="block text-xs font-medium text-[#55476E] mb-1">
                     Tipo de movimiento
@@ -939,6 +1111,23 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                       ))}
                   </select>
                 </div>
+
+                {isCreador && (
+                  <div>
+                    <label className="block text-xs font-medium text-[#55476E] mb-1">
+                      Fecha (MX)
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={form.fecha}
+                      onChange={(e) =>
+                        setForm({ ...form, fecha: e.target.value })
+                      }
+                      className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm font-mono-num"
+                    />
+                  </div>
+                )}
               </div>
 
               <div>
@@ -969,7 +1158,9 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                   <input
                     type="number"
                     min="0"
+                    step="0.01"
                     required
+                    placeholder="Ej. 1808484.55"
                     value={form.monto_real}
                     onChange={(e) =>
                       setForm({ ...form, monto_real: e.target.value })
@@ -986,7 +1177,9 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                     <input
                       type="number"
                       min="0"
+                      step="0.01"
                       required
+                      placeholder="Ej. 294878.63"
                       value={form.presupuesto_limite}
                       onChange={(e) =>
                         setForm({ ...form, presupuesto_limite: e.target.value })
@@ -1002,6 +1195,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                     <input
                       type="number"
                       min="0"
+                      step="1"
                       required
                       value={form.cantidad_refrendos}
                       onChange={(e) =>

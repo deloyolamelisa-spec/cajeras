@@ -1,15 +1,21 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowUpRight,
   BellRing,
+  CalendarRange,
   CheckCircle2,
   Clock,
   Eye,
   Filter,
   Image as ImageIcon,
   MinusCircle,
+  Pencil,
+  Plus,
+  Save,
   ShieldCheck,
+  SlidersHorizontal,
+  Trash2,
   Trophy,
   X,
   XCircle,
@@ -32,12 +38,14 @@ import {
   calcularPuntualidadEnvio,
   computeBranchSummaries,
   evaluarVencimientoActividad,
+  formatCurrencyClean,
   formatHora12h,
-  formatMXN,
   formatPercent,
   getDiaSemanaFromDate,
   getTodayLocalYYYYMMDD,
+  parseMoneyInput,
   resolveDailyTasksForBranch,
+  roundMoney2,
 } from '../utils/calculations';
 import { ServiceResult } from '../services/controlOpsService';
 
@@ -73,6 +81,11 @@ interface RankingViewProps {
   tareasCatalogo?: TareaCatalogo[];
   usuarios?: UsuarioControlOps[];
   onUpdateActividad?: (updated: ActividadDiaria) => Promise<ServiceResult>;
+  onSaveMeta?: (meta: MetaSucursal) => Promise<ServiceResult>;
+  onSaveSucursal?: (suc: Sucursal, isNew?: boolean) => Promise<ServiceResult>;
+  onCreateGastoORefrendo?: (nuevo: GastoYRefrendo) => Promise<ServiceResult>;
+  onUpdateGastoORefrendo?: (updated: GastoYRefrendo) => Promise<ServiceResult>;
+  onDeleteGastoORefrendo?: (registro: GastoYRefrendo) => Promise<void>;
 }
 
 const CRITERIA_TABS: { id: RankingCriterion; label: string }[] = [
@@ -115,18 +128,53 @@ export const RankingView: React.FC<RankingViewProps> = ({
   tareasCatalogo = [],
   usuarios = [],
   onUpdateActividad,
+  onSaveMeta,
+  onSaveSucursal,
+  onCreateGastoORefrendo,
+  onUpdateGastoORefrendo,
+  onDeleteGastoORefrendo,
 }) => {
   const isCreador = userRole === 'creador';
-  const now = useMemo(() => new Date(), []);
-  const todayStr = useMemo(() => getTodayLocalYYYYMMDD(), []);
+  const [todayStr, setTodayStr] = useState<string>(() =>
+    getTodayLocalYYYYMMDD()
+  );
+
   const [panelTab, setPanelTab] = useState<PanelTabId>('resumen');
   const [criterion, setCriterion] = useState<RankingCriterion>('consolidado');
   const [filterMes, setFilterMes] = useState<string>('todos');
-  const [filterAnio, setFilterAnio] = useState<string>(
-    String(now.getFullYear())
+  const [filterAnio, setFilterAnio] = useState<string>(() =>
+    getTodayLocalYYYYMMDD().slice(0, 4)
   );
   const [filterCajera, setFilterCajera] = useState<string>('todas');
-  const [validacionFecha, setValidacionFecha] = useState<string>(todayStr);
+  const [fechaDesde, setFechaDesde] = useState<string>('');
+  const [fechaHasta, setFechaHasta] = useState<string>('');
+  const [validacionFecha, setValidacionFecha] = useState<string>(() =>
+    getTodayLocalYYYYMMDD()
+  );
+
+  useEffect(() => {
+    const syncToday = () => {
+      const latest = getTodayLocalYYYYMMDD();
+      setTodayStr((prev) => {
+        if (prev !== latest) {
+          setValidacionFecha((vf) => (vf === prev ? latest : vf));
+          return latest;
+        }
+        return prev;
+      });
+    };
+    const interval = window.setInterval(syncToday, 30000);
+    window.addEventListener('focus', syncToday);
+    document.addEventListener('visibilitychange', syncToday);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', syncToday);
+      document.removeEventListener('visibilitychange', syncToday);
+    };
+  }, []);
+
+  const hasDateRange = Boolean(fechaDesde || fechaHasta);
+
   const [validacionFilter, setValidacionFilter] =
     useState<ValidacionFilter>('enviadas');
   const [obsDrafts, setObsDrafts] = useState<Record<string, string>>({});
@@ -141,10 +189,39 @@ export const RankingView: React.FC<RankingViewProps> = ({
     subtitle: string;
   } | null>(null);
 
+  // Creator Direct Adjustment Modal state
+  const [adjustModalBranchId, setAdjustModalBranchId] = useState<string | null>(
+    null
+  );
+  const [adjustTab, setAdjustTab] = useState<'metas' | 'montos'>('metas');
+  const [adjustMetaForm, setAdjustMetaForm] = useState({
+    meta_llamadas_diarias: '30',
+    meta_actividades_diarias: '9',
+    meta_refrendos_mensual: '40',
+    techo_gasto_mensual: '0',
+  });
+  const [adjustRecordForm, setAdjustRecordForm] = useState({
+    editingId: '' as string,
+    tipo: 'Refrendo' as 'Refrendo' | 'Gasto',
+    concepto: '',
+    monto_real: '',
+    presupuesto_limite: '0',
+    cantidad_refrendos: '1',
+    fecha: getTodayLocalYYYYMMDD(),
+    notas: '',
+  });
+  const [targetAccumRefrendos, setTargetAccumRefrendos] = useState<string>('');
+  const [targetAccumGastos, setTargetAccumGastos] = useState<string>('');
+  const [adjustFeedback, setAdjustFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [savingAdjust, setSavingAdjust] = useState(false);
+
   const yearOptions = useMemo(() => {
-    const curr = now.getFullYear();
+    const curr = Number(todayStr.slice(0, 4)) || 2026;
     return ['todos', String(curr - 1), String(curr), String(curr + 1)];
-  }, [now]);
+  }, [todayStr]);
 
   const cajeraOptions = useMemo(() => {
     const names = new Set<string>();
@@ -161,7 +238,8 @@ export const RankingView: React.FC<RankingViewProps> = ({
     const hasCustomFilter =
       filterMes !== 'todos' ||
       filterAnio !== 'todos' ||
-      filterCajera !== 'todas';
+      filterCajera !== 'todas' ||
+      hasDateRange;
 
     const monthPrefix =
       filterAnio !== 'todos' && filterMes !== 'todos'
@@ -184,6 +262,8 @@ export const RankingView: React.FC<RankingViewProps> = ({
             {
               monthPrefix,
               cajeraNombre: filterCajera,
+              fechaDesde: fechaDesde || undefined,
+              fechaHasta: fechaHasta || undefined,
             }
           )
         : summaries;
@@ -196,6 +276,9 @@ export const RankingView: React.FC<RankingViewProps> = ({
     filterMes,
     filterAnio,
     filterCajera,
+    hasDateRange,
+    fechaDesde,
+    fechaHasta,
     sucursales,
     llamadas,
     actividades,
@@ -218,13 +301,20 @@ export const RankingView: React.FC<RankingViewProps> = ({
       (acc, s) => acc + s.refrendosRealizados,
       0
     );
-    const metaRefrendos = activeSummaries.reduce(
-      (acc, s) => acc + s.refrendosMeta,
-      0
+    const metaRefrendos = roundMoney2(
+      activeSummaries.reduce((acc, s) => acc + s.refrendosMeta, 0)
     );
-    const montoRefrendos = activeSummaries.reduce(
-      (acc, s) => acc + s.montoRefrendos,
-      0
+    const montoRefrendos = roundMoney2(
+      activeSummaries.reduce((acc, s) => acc + s.montoRefrendos, 0)
+    );
+    const totalGastosReal = roundMoney2(
+      activeSummaries.reduce((acc, s) => acc + s.gastoRealTotal, 0)
+    );
+    const totalGastosTecho = roundMoney2(
+      activeSummaries.reduce((acc, s) => acc + s.gastoPresupuestoTotal, 0)
+    );
+    const hasMonetaryRefrendoMeta = activeSummaries.some(
+      (s) => s.refrendosMeta >= 500
     );
     const excedidas = activeSummaries.filter((s) => s.excedioPresupuesto).length;
     const dentroLimite = activeSummaries.length - excedidas;
@@ -247,6 +337,9 @@ export const RankingView: React.FC<RankingViewProps> = ({
       totalRefrendos,
       metaRefrendos,
       montoRefrendos,
+      totalGastosReal,
+      totalGastosTecho,
+      hasMonetaryRefrendoMeta,
       excedidas,
       dentroLimite,
       totalActividadesCompletadas,
@@ -475,7 +568,7 @@ export const RankingView: React.FC<RankingViewProps> = ({
           sucursalNombre: item.sucursal.nombre,
           cajera: item.sucursal.responsable_caja,
           tipo: 'Techo de gasto excedido',
-          detalle: `Exceso de ${formatMXN(item.excesoDinero)} (+${formatPercent(item.excesoPorcentaje)}) sobre límite`,
+          detalle: `Exceso de ${formatCurrencyClean(item.excesoDinero)} (+${formatPercent(item.excesoPorcentaje)}) sobre límite`,
           severity: 'danger',
           targetSection: 'gastos',
         });
@@ -487,7 +580,7 @@ export const RankingView: React.FC<RankingViewProps> = ({
           sucursalNombre: item.sucursal.nombre,
           cajera: item.sucursal.responsable_caja,
           tipo: 'Actividades fuera de horario',
-          detalle: `${item.actividadesVencidas} actividad(es) vencida(s) hoy sin evidencia`,
+          detalle: `${item.actividadesVencidas} actividad(es) vencida(s) ${hasDateRange ? 'en el rango' : 'hoy'} sin evidencia`,
           severity: 'danger',
           targetSection: 'actividades',
         });
@@ -511,7 +604,10 @@ export const RankingView: React.FC<RankingViewProps> = ({
           sucursalNombre: item.sucursal.nombre,
           cajera: item.sucursal.responsable_caja,
           tipo: 'Rezago en refrendos',
-          detalle: `${item.refrendosRealizados}/${item.refrendosMeta} (${formatPercent(item.pctRefrendos, 0)} de meta)`,
+          detalle:
+            item.refrendosMeta >= 500
+              ? `${formatCurrencyClean(item.montoRefrendos)}/${formatCurrencyClean(item.refrendosMeta)} (${formatPercent(item.pctRefrendos, 0)} de meta)`
+              : `${item.refrendosRealizados}/${item.refrendosMeta} (${formatPercent(item.pctRefrendos, 0)} de meta)`,
           severity: 'warn',
           targetSection: 'gastos',
         });
@@ -519,7 +615,7 @@ export const RankingView: React.FC<RankingViewProps> = ({
     }
 
     return alerts;
-  }, [activeSummaries]);
+  }, [activeSummaries, hasDateRange]);
 
   const sortedSummaries = useMemo(() => {
     const copy = [...activeSummaries];
@@ -554,8 +650,8 @@ export const RankingView: React.FC<RankingViewProps> = ({
           pct: s.pctActividades,
           display:
             s.actividadesTotal > 0
-              ? `${s.actividadesCompletadas}/${s.actividadesTotal} hoy (${formatPercent(s.pctActividades, 1)})`
-              : '0/0 hoy (Sin asignadas)',
+              ? `${s.actividadesCompletadas}/${s.actividadesTotal} ${hasDateRange ? 'en rango' : 'hoy'} (${formatPercent(s.pctActividades, 1)})`
+              : '0/0 (Sin asignadas)',
           status:
             s.actividadesTotal === 0
               ? 'Sin asignadas'
@@ -576,15 +672,18 @@ export const RankingView: React.FC<RankingViewProps> = ({
         return {
           pct: Math.min(100, s.pctUsoPresupuesto),
           display: s.excedioPresupuesto
-            ? `${formatMXN(s.gastoRealTotal)} / ${formatMXN(s.gastoPresupuestoTotal)} (+${formatPercent(s.excesoPorcentaje)})`
-            : `${formatMXN(s.gastoRealTotal)} / ${formatMXN(s.gastoPresupuestoTotal)} (${formatPercent(s.pctUsoPresupuesto, 0)})`,
+            ? `${formatCurrencyClean(s.gastoRealTotal)} / ${formatCurrencyClean(s.gastoPresupuestoTotal)} (+${formatPercent(s.excesoPorcentaje)})`
+            : `${formatCurrencyClean(s.gastoRealTotal)} / ${formatCurrencyClean(s.gastoPresupuestoTotal)} (${formatPercent(s.pctUsoPresupuesto, 0)})`,
           status: s.excedioPresupuesto ? 'Techo excedido' : 'Dentro del límite',
           tone: s.excedioPresupuesto ? 'danger' : 'good',
         };
       case 'refrendos':
         return {
           pct: Math.min(100, s.pctRefrendos),
-          display: `${s.refrendosRealizados}/${s.refrendosMeta} · ${formatMXN(s.montoRefrendos)}`,
+          display:
+            s.refrendosMeta >= 500
+              ? `${formatCurrencyClean(s.montoRefrendos)} / ${formatCurrencyClean(s.refrendosMeta)} (${s.refrendosRealizados} op.)`
+              : `${s.refrendosRealizados}/${s.refrendosMeta} · ${formatCurrencyClean(s.montoRefrendos)}`,
           status: s.pctRefrendos >= 100 ? 'Meta alcanzada' : 'No llegó a meta',
           tone: s.pctRefrendos >= 100 ? 'good' : 'warn',
         };
@@ -661,7 +760,13 @@ export const RankingView: React.FC<RankingViewProps> = ({
           <select
             aria-label="Filtrar por mes"
             value={filterMes}
-            onChange={(e) => setFilterMes(e.target.value)}
+            onChange={(e) => {
+              setFilterMes(e.target.value);
+              if (e.target.value !== 'todos') {
+                setFechaDesde('');
+                setFechaHasta('');
+              }
+            }}
             className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
           >
             {MESES_OPTIONS.map((m) => (
@@ -674,7 +779,13 @@ export const RankingView: React.FC<RankingViewProps> = ({
           <select
             aria-label="Filtrar por año"
             value={filterAnio}
-            onChange={(e) => setFilterAnio(e.target.value)}
+            onChange={(e) => {
+              setFilterAnio(e.target.value);
+              if (e.target.value !== 'todos') {
+                setFechaDesde('');
+                setFechaHasta('');
+              }
+            }}
             className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
           >
             {yearOptions.map((y) => (
@@ -722,6 +833,127 @@ export const RankingView: React.FC<RankingViewProps> = ({
             className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-mono-num text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
           />
         </div>
+
+        {/* Date Range Selector (Desde — Hasta) & Creator Direct Adjust */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 pt-2 border-t border-[#F1ECF9]">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#5B21B6]">
+              <CalendarRange className="h-3.5 w-3.5 text-[#7C3AED]" />
+              Rango de fechas:
+            </span>
+            <label className="inline-flex items-center gap-1.5 text-[11px] text-[#6E5F87]">
+              <span>Desde</span>
+              <input
+                type="date"
+                aria-label="Fecha desde"
+                value={fechaDesde}
+                onChange={(e) => setFechaDesde(e.target.value)}
+                className="px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-mono-num text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+              />
+            </label>
+            <label className="inline-flex items-center gap-1.5 text-[11px] text-[#6E5F87]">
+              <span>Hasta</span>
+              <input
+                type="date"
+                aria-label="Fecha hasta"
+                value={fechaHasta}
+                onChange={(e) => setFechaHasta(e.target.value)}
+                className="px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-mono-num text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                setFechaDesde(todayStr);
+                setFechaHasta(todayStr);
+              }}
+              className="px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] hover:bg-[#F3ECFC] text-[11px] font-semibold text-[#5B21B6]"
+            >
+              Hoy
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setFechaDesde(`${todayStr.slice(0, 7)}-01`);
+                setFechaHasta(todayStr);
+              }}
+              className="px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] hover:bg-[#F3ECFC] text-[11px] font-semibold text-[#5B21B6]"
+            >
+              Este mes
+            </button>
+            {hasDateRange && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFechaDesde('');
+                  setFechaHasta('');
+                }}
+                className="px-2.5 py-1.5 rounded-xl border border-[#FECDD3] bg-[#FFF1F2] text-[11px] font-semibold text-[#BE123C]"
+              >
+                Limpiar rango
+              </button>
+            )}
+          </div>
+
+          {isCreador && activeSummaries.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                const targetSum =
+                  selectedSucursalId !== 'todas'
+                    ? activeSummaries.find(
+                        (s) => s.sucursal.id === selectedSucursalId
+                      ) || activeSummaries[0]
+                    : activeSummaries[0];
+                if (!targetSum) return;
+                const m = metas.find(
+                  (mt) => mt.sucursal_id === targetSum.sucursal.id
+                );
+                setAdjustFeedback(null);
+                setAdjustTab('metas');
+                setAdjustMetaForm({
+                  meta_llamadas_diarias: String(
+                    m?.meta_llamadas_diarias ??
+                      targetSum.sucursal.meta_llamadas_diarias ??
+                      30
+                  ),
+                  meta_actividades_diarias: String(
+                    m?.meta_actividades_diarias ??
+                      targetSum.sucursal.meta_actividades_diarias ??
+                      9
+                  ),
+                  meta_refrendos_mensual: String(
+                    m?.meta_refrendos_mensual ??
+                      targetSum.sucursal.meta_refrendos_mensual ??
+                      40
+                  ),
+                  techo_gasto_mensual: String(
+                    m?.techo_gasto_mensual ??
+                      targetSum.sucursal.techo_gasto_mensual ??
+                      0
+                  ),
+                });
+                setTargetAccumRefrendos(String(targetSum.montoRefrendos));
+                setTargetAccumGastos(String(targetSum.gastoRealTotal));
+                setAdjustRecordForm({
+                  editingId: '',
+                  tipo: 'Refrendo',
+                  concepto: '',
+                  monto_real: '',
+                  presupuesto_limite: String(targetSum.gastoPresupuestoTotal),
+                  cantidad_refrendos: '1',
+                  fecha: fechaHasta || todayStr,
+                  notas: '',
+                });
+                setAdjustModalBranchId(targetSum.sucursal.id);
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors self-start lg:self-auto"
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+              Ajustar montos / metas
+            </button>
+          )}
+        </div>
       </section>
 
       {/* Top Executive KPI Strip (shown in Resumen & Avance) */}
@@ -729,7 +961,9 @@ export const RankingView: React.FC<RankingViewProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <div className="bg-white rounded-2xl border border-[#EAE3F5] p-5">
           <p className="text-xs font-medium text-[#7A6B93]">
-            Cumplimiento real de actividades hoy
+            {hasDateRange
+              ? 'Cumplimiento de actividades (rango)'
+              : 'Cumplimiento real de actividades hoy'}
           </p>
           <div className="mt-2 flex items-baseline justify-between">
             <span className="font-display text-2xl font-bold text-[#1F172B] tabular-nums">
@@ -737,7 +971,7 @@ export const RankingView: React.FC<RankingViewProps> = ({
             </span>
             <span className="font-mono-num text-xs text-[#6E5F87]">
               {totals.totalActividadesCompletadas}/
-              {totals.totalActividadesAsignadas} hoy
+              {totals.totalActividadesAsignadas} {hasDateRange ? 'rango' : 'hoy'}
             </span>
           </div>
         </div>
@@ -746,19 +980,25 @@ export const RankingView: React.FC<RankingViewProps> = ({
           <p className="text-xs font-medium text-[#7A6B93]">
             Techo de gasto por sucursal
           </p>
-          <div className="mt-2 flex items-baseline justify-between">
+          <div className="mt-2 flex items-baseline justify-between gap-2">
             <span className="font-display text-2xl font-bold text-[#1F172B] tabular-nums">
               {totals.dentroLimite}/{activeSummaries.length}
             </span>
-            <span
-              className={`text-xs font-medium ${
-                totals.excedidas > 0 ? 'text-[#BE123C]' : 'text-[#15803D]'
-              }`}
-            >
-              {totals.excedidas > 0
-                ? `${totals.excedidas} excedieron techo`
-                : 'Todas dentro del límite'}
-            </span>
+            <div className="text-right">
+              <span
+                className={`block text-xs font-medium ${
+                  totals.excedidas > 0 ? 'text-[#BE123C]' : 'text-[#15803D]'
+                }`}
+              >
+                {totals.excedidas > 0
+                  ? `${totals.excedidas} excedieron techo`
+                  : 'Todas dentro del límite'}
+              </span>
+              <span className="font-mono-num text-[11px] text-[#6E5F87]">
+                {formatCurrencyClean(totals.totalGastosReal)} /{' '}
+                {formatCurrencyClean(totals.totalGastosTecho)}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -766,22 +1006,37 @@ export const RankingView: React.FC<RankingViewProps> = ({
           <p className="text-xs font-medium text-[#7A6B93]">
             Refrendos acumulados
           </p>
-          <div className="mt-2 flex items-baseline justify-between">
-            <span className="font-display text-2xl font-bold text-[#1F172B] tabular-nums">
-              {totals.totalRefrendos}
-              <span className="text-sm font-normal text-[#8B7CA5]">
-                /{totals.metaRefrendos}
-              </span>
-            </span>
-            <span className="font-mono-num text-xs font-medium text-[#6D28D9]">
-              {formatMXN(totals.montoRefrendos)}
-            </span>
+          <div className="mt-2 flex items-baseline justify-between gap-2">
+            {totals.hasMonetaryRefrendoMeta ? (
+              <>
+                <span className="font-display text-xl sm:text-2xl font-bold text-[#1F172B] tabular-nums truncate">
+                  {formatCurrencyClean(totals.montoRefrendos)}
+                </span>
+                <span className="font-mono-num text-xs font-medium text-[#6D28D9] shrink-0">
+                  Meta {formatCurrencyClean(totals.metaRefrendos)}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="font-display text-2xl font-bold text-[#1F172B] tabular-nums">
+                  {totals.totalRefrendos}
+                  <span className="text-sm font-normal text-[#8B7CA5]">
+                    /{totals.metaRefrendos}
+                  </span>
+                </span>
+                <span className="font-mono-num text-xs font-medium text-[#6D28D9]">
+                  {formatCurrencyClean(totals.montoRefrendos)}
+                </span>
+              </>
+            )}
           </div>
         </div>
 
         <div className="bg-white rounded-2xl border border-[#EAE3F5] p-5">
           <p className="text-xs font-medium text-[#7A6B93]">
-            Avance diario de llamadas
+            {hasDateRange
+              ? 'Avance de llamadas (rango)'
+              : 'Avance diario de llamadas'}
           </p>
           <div className="mt-2 flex items-baseline justify-between">
             <span className="font-display text-2xl font-bold text-[#1F172B] tabular-nums">
@@ -1417,15 +1672,15 @@ export const RankingView: React.FC<RankingViewProps> = ({
 
                     <td className="py-3.5 px-4 text-right tabular-nums">
                       <div className="font-mono-num font-medium text-[#1F172B]">
-                        {formatMXN(item.gastoRealTotal)}
+                        {formatCurrencyClean(item.gastoRealTotal)}
                         <span className="text-xs text-[#8B7CA5]">
                           {' '}
-                          / {formatMXN(item.gastoPresupuestoTotal)}
+                          / {formatCurrencyClean(item.gastoPresupuestoTotal)}
                         </span>
                       </div>
                       {item.excedioPresupuesto ? (
                         <div className="text-xs font-semibold text-[#BE123C]">
-                          +{formatMXN(item.excesoDinero)} (+
+                          +{formatCurrencyClean(item.excesoDinero)} (+
                           {formatPercent(item.excesoPorcentaje)}) excedido
                         </div>
                       ) : (
@@ -1438,7 +1693,9 @@ export const RankingView: React.FC<RankingViewProps> = ({
 
                     <td className="py-3.5 px-4 text-right tabular-nums">
                       <div className="font-mono-num font-medium text-[#1F172B]">
-                        {item.refrendosRealizados}/{item.refrendosMeta}
+                        {item.refrendosMeta >= 500
+                          ? `${formatCurrencyClean(item.montoRefrendos)} / ${formatCurrencyClean(item.refrendosMeta)}`
+                          : `${item.refrendosRealizados}/${item.refrendosMeta}`}
                       </div>
                       <div
                         className={`text-xs ${
@@ -1485,20 +1742,77 @@ export const RankingView: React.FC<RankingViewProps> = ({
                       )}
                     </td>
 
-                    <td className="py-3.5 px-4 text-right">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onSelectSucursal(item.sucursal.id);
-                          onNavigateSection(
-                            item.excedioPresupuesto ? 'gastos' : 'llamadas'
-                          );
-                        }}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-[#6D28D9] hover:bg-[#F3ECFC] transition-colors whitespace-nowrap"
-                      >
-                        Auditar
-                        <ArrowUpRight className="h-3.5 w-3.5" />
-                      </button>
+                    <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                      <div className="inline-flex items-center gap-1">
+                        {isCreador && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const m = metas.find(
+                                (mt) => mt.sucursal_id === item.sucursal.id
+                              );
+                              setAdjustFeedback(null);
+                              setAdjustTab('montos');
+                              setAdjustMetaForm({
+                                meta_llamadas_diarias: String(
+                                  m?.meta_llamadas_diarias ??
+                                    item.sucursal.meta_llamadas_diarias ??
+                                    30
+                                ),
+                                meta_actividades_diarias: String(
+                                  m?.meta_actividades_diarias ??
+                                    item.sucursal.meta_actividades_diarias ??
+                                    9
+                                ),
+                                meta_refrendos_mensual: String(
+                                  m?.meta_refrendos_mensual ??
+                                    item.sucursal.meta_refrendos_mensual ??
+                                    40
+                                ),
+                                techo_gasto_mensual: String(
+                                  m?.techo_gasto_mensual ??
+                                    item.sucursal.techo_gasto_mensual ??
+                                    0
+                                ),
+                              });
+                              setTargetAccumRefrendos(
+                                String(item.montoRefrendos)
+                              );
+                              setTargetAccumGastos(String(item.gastoRealTotal));
+                              setAdjustRecordForm({
+                                editingId: '',
+                                tipo: 'Refrendo',
+                                concepto: '',
+                                monto_real: '',
+                                presupuesto_limite: String(
+                                  item.gastoPresupuestoTotal
+                                ),
+                                cantidad_refrendos: '1',
+                                fecha: fechaHasta || todayStr,
+                                notas: '',
+                              });
+                              setAdjustModalBranchId(item.sucursal.id);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-[#5B21B6] bg-[#F3ECFC] hover:bg-[#E7DAFA] transition-colors"
+                          >
+                            <SlidersHorizontal className="h-3.5 w-3.5" />
+                            Ajustar
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelectSucursal(item.sucursal.id);
+                            onNavigateSection(
+                              item.excedioPresupuesto ? 'gastos' : 'llamadas'
+                            );
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-[#6D28D9] hover:bg-[#F3ECFC] transition-colors whitespace-nowrap"
+                        >
+                          Auditar
+                          <ArrowUpRight className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -1508,6 +1822,703 @@ export const RankingView: React.FC<RankingViewProps> = ({
         </div>
       </section>
       )}
+
+      {/* Creator Direct Adjustment Modal (Metas, Techos & Acumulados/Montos) */}
+      {isCreador && adjustModalBranchId && (() => {
+        const branchSummary =
+          activeSummaries.find((s) => s.sucursal.id === adjustModalBranchId) ||
+          summaries.find((s) => s.sucursal.id === adjustModalBranchId);
+        const branchObj =
+          branchSummary?.sucursal ||
+          sucursales.find((s) => s.id === adjustModalBranchId);
+        if (!branchObj) return null;
+
+        const branchMovements = gastosYRefrendos
+          .filter((r) => {
+            if (r.sucursal_id !== branchObj.id) return false;
+            if (fechaDesde && (r.fecha || '') < fechaDesde) return false;
+            if (fechaHasta && (r.fecha || '') > fechaHasta) return false;
+            return true;
+          })
+          .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+
+        const handleSaveBranchMetas = async (e: React.FormEvent) => {
+          e.preventDefault();
+          if (!onSaveMeta || !onSaveSucursal) return;
+          setSavingAdjust(true);
+          setAdjustFeedback(null);
+          try {
+            const existingMeta = metas.find(
+              (m) => m.sucursal_id === branchObj.id
+            );
+            const nextMeta: MetaSucursal = {
+              id: existingMeta?.id || `meta-${branchObj.id}`,
+              sucursal_id: branchObj.id,
+              meta_llamadas_diarias:
+                Number(adjustMetaForm.meta_llamadas_diarias) || 30,
+              meta_actividades_diarias:
+                Number(adjustMetaForm.meta_actividades_diarias) || 9,
+              meta_refrendos_mensual: parseMoneyInput(
+                adjustMetaForm.meta_refrendos_mensual
+              ),
+              techo_gasto_mensual: parseMoneyInput(
+                adjustMetaForm.techo_gasto_mensual
+              ),
+            };
+            const resM = await onSaveMeta(nextMeta);
+            if (!resM.ok) {
+              setAdjustFeedback({
+                type: 'error',
+                message: resM.error || 'No se pudo guardar en metas_sucursal.',
+              });
+              return;
+            }
+            const resS = await onSaveSucursal({
+              ...branchObj,
+              meta_llamadas_diarias: nextMeta.meta_llamadas_diarias,
+              meta_actividades_diarias: nextMeta.meta_actividades_diarias,
+              meta_refrendos_mensual: nextMeta.meta_refrendos_mensual,
+              techo_gasto_mensual: nextMeta.techo_gasto_mensual,
+            });
+            if (!resS.ok) {
+              setAdjustFeedback({
+                type: 'error',
+                message: resS.error || 'No se pudo guardar en sucursales_config.',
+              });
+              return;
+            }
+            setAdjustFeedback({
+              type: 'success',
+              message: `Metas y techo actualizados en Supabase para ${branchObj.nombre}.`,
+            });
+          } finally {
+            setSavingAdjust(false);
+          }
+        };
+
+        const handleApplyAccumulatedTarget = async (
+          tipo: 'Refrendo' | 'Gasto'
+        ) => {
+          if (!onCreateGastoORefrendo) return;
+          const currentSum =
+            tipo === 'Refrendo'
+              ? branchSummary?.montoRefrendos || 0
+              : branchSummary?.gastoRealTotal || 0;
+          const desired = parseMoneyInput(
+            tipo === 'Refrendo' ? targetAccumRefrendos : targetAccumGastos
+          );
+          const delta = roundMoney2(desired - currentSum);
+          if (Math.abs(delta) < 0.01) {
+            setAdjustFeedback({
+              type: 'success',
+              message: `El acumulado de ${tipo.toLowerCase()}s ya coincide con ${formatCurrencyClean(desired)}.`,
+            });
+            return;
+          }
+          setSavingAdjust(true);
+          setAdjustFeedback(null);
+          try {
+            const adj: GastoYRefrendo = {
+              id: `gr-${Date.now()}`,
+              sucursal_id: branchObj.id,
+              sucursal_nombre: branchObj.nombre,
+              sucursal: branchObj.nombre,
+              cajera_nombre: branchObj.responsable_caja || 'Administración',
+              tipo,
+              categoria: 'Ajuste administrativo',
+              concepto: `Ajuste directo acumulado (${formatCurrencyClean(currentSum)} → ${formatCurrencyClean(desired)})`,
+              monto_real: delta,
+              presupuesto_limite:
+                tipo === 'Gasto'
+                  ? parseMoneyInput(adjustMetaForm.techo_gasto_mensual)
+                  : 0,
+              cantidad_refrendos: 0,
+              meta_refrendos:
+                tipo === 'Refrendo'
+                  ? parseMoneyInput(adjustMetaForm.meta_refrendos_mensual)
+                  : 0,
+              fecha: fechaHasta || todayStr,
+              responsable: 'Creador / Administrador',
+              evidencia_url: null,
+              notas: 'Ajuste aplicado desde Panel de control',
+            };
+            const res = await onCreateGastoORefrendo(adj);
+            if (!res.ok) {
+              setAdjustFeedback({
+                type: 'error',
+                message: res.error || 'No se pudo aplicar el ajuste acumulado.',
+              });
+              return;
+            }
+            setAdjustFeedback({
+              type: 'success',
+              message: `Acumulado de ${tipo.toLowerCase()}s ajustado a ${formatCurrencyClean(desired)} en Supabase.`,
+            });
+          } finally {
+            setSavingAdjust(false);
+          }
+        };
+
+        const handleSaveMovementRecord = async (e: React.FormEvent) => {
+          e.preventDefault();
+          if (!adjustRecordForm.concepto.trim()) return;
+          setSavingAdjust(true);
+          setAdjustFeedback(null);
+          try {
+            const existingRec = adjustRecordForm.editingId
+              ? branchMovements.find((r) => r.id === adjustRecordForm.editingId)
+              : undefined;
+            const payloadRec: GastoYRefrendo = {
+              ...(existingRec || {
+                id: `gr-${Date.now()}`,
+                sucursal_id: branchObj.id,
+                sucursal_nombre: branchObj.nombre,
+                sucursal: branchObj.nombre,
+                cajera_nombre: branchObj.responsable_caja || 'Administración',
+                categoria: 'Operación de Sucursal',
+                responsable: 'Creador / Administrador',
+                evidencia_url: null,
+              }),
+              tipo: adjustRecordForm.tipo,
+              concepto: adjustRecordForm.concepto.trim(),
+              monto_real: parseMoneyInput(adjustRecordForm.monto_real),
+              presupuesto_limite:
+                adjustRecordForm.tipo === 'Gasto'
+                  ? parseMoneyInput(adjustRecordForm.presupuesto_limite)
+                  : 0,
+              cantidad_refrendos:
+                adjustRecordForm.tipo === 'Refrendo'
+                  ? Number(adjustRecordForm.cantidad_refrendos) || 0
+                  : 0,
+              meta_refrendos:
+                adjustRecordForm.tipo === 'Refrendo'
+                  ? parseMoneyInput(adjustMetaForm.meta_refrendos_mensual)
+                  : 0,
+              fecha: adjustRecordForm.fecha || todayStr,
+              notas: adjustRecordForm.notas.trim(),
+            };
+
+            const res =
+              existingRec && onUpdateGastoORefrendo
+                ? await onUpdateGastoORefrendo(payloadRec)
+                : onCreateGastoORefrendo
+                  ? await onCreateGastoORefrendo(payloadRec)
+                  : { ok: false, error: 'Operación no disponible' };
+
+            if (!res.ok) {
+              setAdjustFeedback({
+                type: 'error',
+                message: res.error || 'No se pudo guardar el movimiento.',
+              });
+              return;
+            }
+            setAdjustRecordForm({
+              editingId: '',
+              tipo: adjustRecordForm.tipo,
+              concepto: '',
+              monto_real: '',
+              presupuesto_limite: adjustMetaForm.techo_gasto_mensual,
+              cantidad_refrendos: '1',
+              fecha: fechaHasta || todayStr,
+              notas: '',
+            });
+            setAdjustFeedback({
+              type: 'success',
+              message: existingRec
+                ? 'Registro actualizado en Supabase.'
+                : 'Movimiento registrado en Supabase.',
+            });
+          } finally {
+            setSavingAdjust(false);
+          }
+        };
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/50 backdrop-blur-[2px]"
+            onClick={() => setAdjustModalBranchId(null)}
+          >
+            <div
+              className="w-full max-w-3xl max-h-[90vh] flex flex-col rounded-2xl bg-white border border-[#E6DDF5] shadow-2xl overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between px-6 py-4 border-b border-[#F1ECF9]">
+                <div>
+                  <h3 className="font-display text-base font-bold text-[#1F172B]">
+                    Ajuste directo · {branchObj.nombre}
+                  </h3>
+                  <p className="text-xs text-[#7A6B93]">
+                    Modifica montos registrados, acumulados, metas o techos directamente en Supabase.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAdjustModalBranchId(null)}
+                  className="p-1.5 rounded-lg text-[#6E5F87] hover:bg-[#F5F0FC]"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="px-6 pt-3 border-b border-[#F1ECF9] flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-1 p-1 bg-[#F5F0FC] rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setAdjustTab('montos')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${
+                      adjustTab === 'montos'
+                        ? 'bg-white text-[#5B21B6] shadow-xs'
+                        : 'text-[#6E5F87]'
+                    }`}
+                  >
+                    Montos y Acumulados
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAdjustTab('metas')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${
+                      adjustTab === 'metas'
+                        ? 'bg-white text-[#5B21B6] shadow-xs'
+                        : 'text-[#6E5F87]'
+                    }`}
+                  >
+                    Metas y Techo de gasto
+                  </button>
+                </div>
+
+                <select
+                  value={branchObj.id}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    const nextSum = activeSummaries.find(
+                      (s) => s.sucursal.id === nextId
+                    );
+                    const nextSuc = sucursales.find((s) => s.id === nextId);
+                    const nextM = metas.find((mt) => mt.sucursal_id === nextId);
+                    setAdjustFeedback(null);
+                    setAdjustModalBranchId(nextId);
+                    setAdjustMetaForm({
+                      meta_llamadas_diarias: String(
+                        nextM?.meta_llamadas_diarias ??
+                          nextSuc?.meta_llamadas_diarias ??
+                          30
+                      ),
+                      meta_actividades_diarias: String(
+                        nextM?.meta_actividades_diarias ??
+                          nextSuc?.meta_actividades_diarias ??
+                          9
+                      ),
+                      meta_refrendos_mensual: String(
+                        nextM?.meta_refrendos_mensual ??
+                          nextSuc?.meta_refrendos_mensual ??
+                          40
+                      ),
+                      techo_gasto_mensual: String(
+                        nextM?.techo_gasto_mensual ??
+                          nextSuc?.techo_gasto_mensual ??
+                          0
+                      ),
+                    });
+                    setTargetAccumRefrendos(
+                      String(nextSum?.montoRefrendos ?? 0)
+                    );
+                    setTargetAccumGastos(String(nextSum?.gastoRealTotal ?? 0));
+                  }}
+                  className="px-3 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#5B21B6]"
+                >
+                  {sucursales
+                    .filter((s) => s.activa)
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.nombre}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div className="p-6 overflow-y-auto space-y-5">
+                {adjustFeedback && (
+                  <div
+                    role="alert"
+                    className={`rounded-xl px-4 py-2.5 text-xs font-medium flex items-center justify-between gap-2 border ${
+                      adjustFeedback.type === 'error'
+                        ? 'bg-[#FFF1F2] border-[#FECDD3] text-[#BE123C]'
+                        : 'bg-[#ECFDF5] border-[#BBF7D0] text-[#15803D]'
+                    }`}
+                  >
+                    <span>{adjustFeedback.message}</span>
+                    <button
+                      type="button"
+                      onClick={() => setAdjustFeedback(null)}
+                      className="font-bold underline shrink-0"
+                    >
+                      Cerrar
+                    </button>
+                  </div>
+                )}
+
+                {adjustTab === 'metas' ? (
+                  <form onSubmit={handleSaveBranchMetas} className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-medium text-[#55476E] mb-1">
+                          Meta refrendos/mes ($ o cantidad)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={adjustMetaForm.meta_refrendos_mensual}
+                          onChange={(e) =>
+                            setAdjustMetaForm({
+                              ...adjustMetaForm,
+                              meta_refrendos_mensual: e.target.value,
+                            })
+                          }
+                          placeholder="Ej. 1808484.55"
+                          className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm font-mono-num"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-[#55476E] mb-1">
+                          Techo máximo de gasto ($)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={adjustMetaForm.techo_gasto_mensual}
+                          onChange={(e) =>
+                            setAdjustMetaForm({
+                              ...adjustMetaForm,
+                              techo_gasto_mensual: e.target.value,
+                            })
+                          }
+                          placeholder="Ej. 294878.63"
+                          className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm font-mono-num"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-[#55476E] mb-1">
+                          Meta llamadas/día
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={adjustMetaForm.meta_llamadas_diarias}
+                          onChange={(e) =>
+                            setAdjustMetaForm({
+                              ...adjustMetaForm,
+                              meta_llamadas_diarias: e.target.value,
+                            })
+                          }
+                          className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm font-mono-num"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-[#55476E] mb-1">
+                          Meta actividades/día
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={adjustMetaForm.meta_actividades_diarias}
+                          onChange={(e) =>
+                            setAdjustMetaForm({
+                              ...adjustMetaForm,
+                              meta_actividades_diarias: e.target.value,
+                            })
+                          }
+                          className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] text-sm font-mono-num"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end pt-2">
+                      <button
+                        type="submit"
+                        disabled={savingAdjust}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        {savingAdjust
+                          ? 'Guardando...'
+                          : 'Guardar metas y techo en Supabase'}
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="space-y-5">
+                    {/* Direct Accumulated Value Adjustment */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="rounded-xl border border-[#EAE3F5] bg-[#FAF8FC] p-3.5 space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-semibold text-[#1F172B]">
+                            Acumulado Refrendos
+                          </span>
+                          <span className="font-mono-num text-[#6D28D9] font-bold">
+                            Actual:{' '}
+                            {formatCurrencyClean(
+                              branchSummary?.montoRefrendos ?? 0
+                            )}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={targetAccumRefrendos}
+                            onChange={(e) =>
+                              setTargetAccumRefrendos(e.target.value)
+                            }
+                            placeholder="Ej. 1808484.55"
+                            className="flex-1 px-2.5 py-1.5 rounded-lg border border-[#E6DDF5] bg-white text-xs font-mono-num"
+                          />
+                          <button
+                            type="button"
+                            disabled={savingAdjust}
+                            onClick={() =>
+                              void handleApplyAccumulatedTarget('Refrendo')
+                            }
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
+                          >
+                            Aplicar
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-[#EAE3F5] bg-[#FAF8FC] p-3.5 space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-semibold text-[#1F172B]">
+                            Acumulado Gastos
+                          </span>
+                          <span className="font-mono-num text-[#BE185D] font-bold">
+                            Actual:{' '}
+                            {formatCurrencyClean(
+                              branchSummary?.gastoRealTotal ?? 0
+                            )}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={targetAccumGastos}
+                            onChange={(e) =>
+                              setTargetAccumGastos(e.target.value)
+                            }
+                            placeholder="Ej. 294878.63"
+                            className="flex-1 px-2.5 py-1.5 rounded-lg border border-[#E6DDF5] bg-white text-xs font-mono-num"
+                          />
+                          <button
+                            type="button"
+                            disabled={savingAdjust}
+                            onClick={() =>
+                              void handleApplyAccumulatedTarget('Gasto')
+                            }
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#DB2777] hover:bg-[#BE185D] text-white disabled:opacity-50"
+                          >
+                            Aplicar
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Add or Edit Individual Movement */}
+                    <form
+                      onSubmit={handleSaveMovementRecord}
+                      className="rounded-xl border border-[#EAE3F5] p-4 space-y-3 bg-white"
+                    >
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-xs font-bold text-[#1F172B]">
+                          {adjustRecordForm.editingId
+                            ? 'Editando movimiento seleccionado'
+                            : 'Agregar movimiento o ajuste manual'}
+                        </h4>
+                        {adjustRecordForm.editingId && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAdjustRecordForm({
+                                editingId: '',
+                                tipo: 'Refrendo',
+                                concepto: '',
+                                monto_real: '',
+                                presupuesto_limite:
+                                  adjustMetaForm.techo_gasto_mensual,
+                                cantidad_refrendos: '1',
+                                fecha: fechaHasta || todayStr,
+                                notas: '',
+                              })
+                            }
+                            className="text-[11px] font-semibold text-[#6E5F87] hover:underline"
+                          >
+                            Cancelar edición
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                        <select
+                          value={adjustRecordForm.tipo}
+                          onChange={(e) =>
+                            setAdjustRecordForm({
+                              ...adjustRecordForm,
+                              tipo: e.target.value as 'Refrendo' | 'Gasto',
+                            })
+                          }
+                          className="px-2.5 py-1.5 rounded-lg border border-[#E6DDF5] text-xs font-semibold"
+                        >
+                          <option value="Refrendo">Refrendo</option>
+                          <option value="Gasto">Gasto</option>
+                        </select>
+                        <input
+                          type="date"
+                          value={adjustRecordForm.fecha}
+                          onChange={(e) =>
+                            setAdjustRecordForm({
+                              ...adjustRecordForm,
+                              fecha: e.target.value,
+                            })
+                          }
+                          className="px-2.5 py-1.5 rounded-lg border border-[#E6DDF5] text-xs font-mono-num"
+                        />
+                        <input
+                          type="number"
+                          step="0.01"
+                          required
+                          placeholder="Monto ($)"
+                          value={adjustRecordForm.monto_real}
+                          onChange={(e) =>
+                            setAdjustRecordForm({
+                              ...adjustRecordForm,
+                              monto_real: e.target.value,
+                            })
+                          }
+                          className="px-2.5 py-1.5 rounded-lg border border-[#E6DDF5] text-xs font-mono-num"
+                        />
+                        <input
+                          type="text"
+                          required
+                          placeholder="Concepto *"
+                          value={adjustRecordForm.concepto}
+                          onChange={(e) =>
+                            setAdjustRecordForm({
+                              ...adjustRecordForm,
+                              concepto: e.target.value,
+                            })
+                          }
+                          className="px-2.5 py-1.5 rounded-lg border border-[#E6DDF5] text-xs"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="submit"
+                          disabled={savingAdjust}
+                          className="inline-flex items-center gap-1 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
+                        >
+                          {adjustRecordForm.editingId ? (
+                            <Save className="h-3.5 w-3.5" />
+                          ) : (
+                            <Plus className="h-3.5 w-3.5" />
+                          )}
+                          {adjustRecordForm.editingId
+                            ? 'Actualizar registro'
+                            : 'Guardar movimiento'}
+                        </button>
+                      </div>
+                    </form>
+
+                    {/* Existing Branch Movements List */}
+                    <div className="border border-[#EAE3F5] rounded-xl overflow-hidden">
+                      <div className="px-4 py-2.5 bg-[#FAF8FC] border-b border-[#F1ECF9] text-xs font-bold text-[#1F172B]">
+                        Movimientos en el periodo ({branchMovements.length})
+                      </div>
+                      {branchMovements.length === 0 ? (
+                        <p className="p-4 text-xs text-[#7A6B93] text-center">
+                          Sin movimientos registrados en el rango actual.
+                        </p>
+                      ) : (
+                        <div className="max-h-52 overflow-y-auto divide-y divide-[#F3EEF9]">
+                          {branchMovements.map((mov) => (
+                            <div
+                              key={mov.id}
+                              className="px-4 py-2.5 flex items-center justify-between gap-3 text-xs hover:bg-[#FCFAFE]"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={`font-semibold ${
+                                      mov.tipo === 'Refrendo'
+                                        ? 'text-[#BE185D]'
+                                        : 'text-[#6D28D9]'
+                                    }`}
+                                  >
+                                    {mov.tipo}
+                                  </span>
+                                  <span className="font-mono-num text-[#8B7CA5]">
+                                    {mov.fecha}
+                                  </span>
+                                  <span className="font-medium text-[#1F172B] truncate">
+                                    {mov.concepto}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="font-mono-num font-bold text-[#1F172B]">
+                                  {formatCurrencyClean(mov.monto_real)}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setAdjustRecordForm({
+                                      editingId: mov.id,
+                                      tipo: mov.tipo,
+                                      concepto: mov.concepto,
+                                      monto_real: String(mov.monto_real),
+                                      presupuesto_limite: String(
+                                        mov.presupuesto_limite
+                                      ),
+                                      cantidad_refrendos: String(
+                                        mov.cantidad_refrendos
+                                      ),
+                                      fecha: mov.fecha,
+                                      notas: mov.notas || '',
+                                    })
+                                  }
+                                  title="Editar este monto"
+                                  className="p-1 rounded-lg text-[#5B21B6] hover:bg-[#F3ECFC]"
+                                >
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </button>
+                                {onDeleteGastoORefrendo && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void onDeleteGastoORefrendo(mov)
+                                    }
+                                    title="Eliminar movimiento"
+                                    className="p-1 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Evidence Photo Lightbox */}
       {lightboxImg && (

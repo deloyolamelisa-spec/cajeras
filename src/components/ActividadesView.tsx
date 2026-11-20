@@ -27,6 +27,7 @@ import { DIAS_SEMANA } from '../data/mockData';
 import {
   evaluarVencimientoActividad,
   extractCatalogTaskId,
+  getCurrentLocalHHMM,
   getTodayLocalYYYYMMDD,
   isFixedBaseTask,
   resolveDailyTasksForBranch,
@@ -381,7 +382,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
         evidenciaUrl = res.url;
       }
 
-      const nowTime = new Date().toTimeString().slice(0, 5);
+      const nowTime = getCurrentLocalHHMM();
       const nueva: ActividadDiaria = {
         id: `act-${Date.now()}`,
         sucursal_id: suc.id,
@@ -389,7 +390,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
         titulo: newForm.titulo.trim(),
         categoria: newForm.categoria,
         responsable: suc.responsable_caja,
-        fecha: new Date().toISOString().slice(0, 10),
+        fecha: getTodayLocalYYYYMMDD(),
         hora_completada: newForm.estatus === 'Completada' ? nowTime : null,
         estatus: newForm.estatus,
         evidencia_url: evidenciaUrl,
@@ -794,7 +795,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                   <button
                     type="button"
                     onClick={() =>
-                      setFilterFecha(new Date().toISOString().slice(0, 10))
+                      setFilterFecha(getTodayLocalYYYYMMDD())
                     }
                     className="px-2.5 py-1.5 rounded-xl text-xs font-medium text-[#5B21B6] bg-[#FAF7FE] border border-[#E6DDF5]"
                   >

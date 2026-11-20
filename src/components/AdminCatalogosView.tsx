@@ -30,7 +30,11 @@ import {
   ServiceResult,
 } from '../services/controlOpsService';
 import { getSupabaseConfigStatus } from '../lib/supabaseConfig';
-import { formatMXN, isFixedBaseTask } from '../utils/calculations';
+import {
+  formatCurrencyClean,
+  isFixedBaseTask,
+  parseMoneyInput,
+} from '../utils/calculations';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface AdminCatalogosViewProps {
@@ -145,6 +149,9 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   const [metaDrafts, setMetaDrafts] = useState<Record<string, MetaSucursal>>(
     {}
   );
+  const [metaNumericText, setMetaNumericText] = useState<
+    Record<string, { meta_refrendos_mensual?: string; techo_gasto_mensual?: string }>
+  >({});
 
   // --- Catalogos State ---
   const [newCallOption, setNewCallOption] = useState('');
@@ -292,7 +299,19 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   };
 
   const handleSaveMetaRow = async (suc: Sucursal) => {
-    const m = getEffectiveMeta(suc);
+    const base = getEffectiveMeta(suc);
+    const txt = metaNumericText[suc.id];
+    const m: MetaSucursal = {
+      ...base,
+      meta_refrendos_mensual:
+        txt?.meta_refrendos_mensual !== undefined
+          ? parseMoneyInput(txt.meta_refrendos_mensual)
+          : parseMoneyInput(base.meta_refrendos_mensual),
+      techo_gasto_mensual:
+        txt?.techo_gasto_mensual !== undefined
+          ? parseMoneyInput(txt.techo_gasto_mensual)
+          : parseMoneyInput(base.techo_gasto_mensual),
+    };
     const resMeta = await onSaveMeta(m);
     if (!resMeta.ok) {
       fail(resMeta.error);
@@ -309,6 +328,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
       fail(resSuc.error);
       return;
     }
+    setMetaNumericText((prev) => {
+      const copy = { ...prev };
+      delete copy[suc.id];
+      return copy;
+    });
     notify(`Metas y techo máximo actualizados para ${suc.nombre}.`);
   };
 
@@ -879,9 +903,12 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                         <div className="font-semibold text-[#1F172B]">
                           {suc.nombre}
                         </div>
-                        <div className="text-[11px] text-[#8B7CA5]">
-                          {suc.codigo} · Techo actual:{' '}
-                          {formatMXN(m.techo_gasto_mensual)}
+                        <div className="text-[11px] text-[#8B7CA5] font-mono-num">
+                          {suc.codigo} · Techo:{' '}
+                          {formatCurrencyClean(m.techo_gasto_mensual)}
+                          {m.meta_refrendos_mensual >= 500
+                            ? ` · Meta ref.: ${formatCurrencyClean(m.meta_refrendos_mensual)}`
+                            : ''}
                         </div>
                       </td>
                       <td className="py-2.5 px-4 text-right">
@@ -922,38 +949,59 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                       <td className="py-2.5 px-4 text-right">
                         <input
                           type="number"
-                          min="1"
-                          value={m.meta_refrendos_mensual}
-                          onChange={(e) =>
+                          min="0"
+                          step="0.01"
+                          value={
+                            metaNumericText[suc.id]?.meta_refrendos_mensual ??
+                            String(m.meta_refrendos_mensual)
+                          }
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            setMetaNumericText((p) => ({
+                              ...p,
+                              [suc.id]: {
+                                ...p[suc.id],
+                                meta_refrendos_mensual: raw,
+                              },
+                            }));
                             setMetaDrafts((p) => ({
                               ...p,
                               [suc.id]: {
                                 ...m,
-                                meta_refrendos_mensual:
-                                  Number(e.target.value) || 0,
+                                meta_refrendos_mensual: parseMoneyInput(raw),
                               },
-                            }))
-                          }
-                          className="w-20 px-2.5 py-1.5 rounded-lg border border-[#E6DDF5] text-right font-mono-num bg-white"
+                            }));
+                          }}
+                          className="w-32 px-2.5 py-1.5 rounded-lg border border-[#E6DDF5] text-right font-mono-num bg-white"
                         />
                       </td>
                       <td className="py-2.5 px-4 text-right">
                         <input
                           type="number"
                           min="0"
-                          step="100"
-                          value={m.techo_gasto_mensual}
-                          onChange={(e) =>
+                          step="0.01"
+                          value={
+                            metaNumericText[suc.id]?.techo_gasto_mensual ??
+                            String(m.techo_gasto_mensual)
+                          }
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            setMetaNumericText((p) => ({
+                              ...p,
+                              [suc.id]: {
+                                ...p[suc.id],
+                                techo_gasto_mensual: raw,
+                              },
+                            }));
                             setMetaDrafts((p) => ({
                               ...p,
                               [suc.id]: {
                                 ...m,
-                                techo_gasto_mensual:
-                                  Number(e.target.value) || 0,
+                                techo_gasto_mensual: parseMoneyInput(raw),
                               },
-                            }))
-                          }
-                          className="w-28 px-2.5 py-1.5 rounded-lg border border-[#E6DDF5] text-right font-mono-num font-semibold text-[#5B21B6] bg-white"
+                            }));
+                          }}
+                          className="w-32 px-2.5 py-1.5 rounded-lg border border-[#E6DDF5] text-right font-mono-num font-semibold text-[#5B21B6] bg-white"
                         />
                       </td>
                       <td className="py-2.5 px-4 text-right">

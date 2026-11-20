@@ -26,14 +26,19 @@ import {
   UsuarioControlOps,
 } from '../types/controlops';
 import {
+  MEXICO_TIMEZONE,
   calcularPuntualidadEnvio,
   evaluarVencimientoActividad,
   formatCurrencyClean,
   formatHora12h,
+  formatMexicoDateLabel,
+  formatMexicoMonthYearUpper,
   getCurrentLocalHHMM,
   getDiaSemanaFromDate,
   getLlamadaLocalDate,
+  getTodayLocalYYYYMMDD,
   resolveDailyTasksForBranch,
+  roundMoney2,
 } from '../utils/calculations';
 import {
   ServiceResult,
@@ -120,35 +125,53 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     };
   }, []);
 
-  const now = useMemo(() => new Date(), []);
-  const currentYear = now.getFullYear();
-  const currentMonth = now.getMonth(); // 0-indexed
-  const currentDay = now.getDate();
-  const todayStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(currentDay).padStart(2, '0')}`;
-  const currentMonthPrefix = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}`;
+  const [todayStr, setTodayStr] = useState<string>(() =>
+    getTodayLocalYYYYMMDD()
+  );
 
-  const formattedDate = useMemo(() => {
-    const raw = now.toLocaleDateString('es-MX', {
-      weekday: 'long',
-      day: 'numeric',
-      month: 'long',
-    });
-    return raw.charAt(0).toLowerCase() + raw.slice(1);
-  }, [now]);
+  useEffect(() => {
+    const syncToday = () => {
+      const latest = getTodayLocalYYYYMMDD();
+      setTodayStr((prev) => (prev === latest ? prev : latest));
+    };
+    const interval = window.setInterval(syncToday, 30000);
+    window.addEventListener('focus', syncToday);
+    document.addEventListener('visibilitychange', syncToday);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', syncToday);
+      document.removeEventListener('visibilitychange', syncToday);
+    };
+  }, []);
 
-  const monthYearUpper = useMemo(() => {
-    return now
-      .toLocaleDateString('es-MX', { month: 'long', year: 'numeric' })
-      .replace(' de ', ' ')
-      .toUpperCase();
-  }, [now]);
+  const [currentYear, currentMonthNum, currentDay] = useMemo(() => {
+    const [y, m, d] = todayStr.split('-').map(Number);
+    return [y || 2026, m || 1, d || 1];
+  }, [todayStr]);
+  const currentMonthPrefix = todayStr.slice(0, 7);
+  const effectiveDiaActivo = useMemo(
+    () => getDiaSemanaFromDate(todayStr),
+    [todayStr]
+  );
+
+  const formattedDate = useMemo(
+    () => formatMexicoDateLabel(todayStr),
+    [todayStr]
+  );
+
+  const monthYearUpper = useMemo(
+    () => formatMexicoMonthYearUpper(todayStr),
+    [todayStr]
+  );
 
   const horarioHoy = useMemo(
     () =>
       horarios.find(
-        (h) => h.sucursal_id === sucursal.id && h.dia === diaActivo
+        (h) =>
+          h.sucursal_id === sucursal.id &&
+          h.dia === (effectiveDiaActivo || diaActivo)
       ),
-    [horarios, sucursal.id, diaActivo]
+    [horarios, sucursal.id, effectiveDiaActivo, diaActivo]
   );
 
   // Branch-scoped records
@@ -163,7 +186,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         sucursal,
         tareasCatalogo,
         actividades,
-        diaActivo,
+        effectiveDiaActivo || diaActivo,
         todayStr,
         { id: currentUser.id, nombre: currentUser.nombre }
       ),
@@ -171,6 +194,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
       sucursal,
       tareasCatalogo,
       actividades,
+      effectiveDiaActivo,
       diaActivo,
       todayStr,
       currentUser.id,
@@ -219,16 +243,14 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     const refrendosMes = branchGastosRefrendos.filter(
       (r) => r.tipo === 'Refrendo' && r.fecha?.startsWith(currentMonthPrefix)
     );
-    const refrendosFuente =
-      refrendosMes.length > 0
-        ? refrendosMes
-        : branchGastosRefrendos.filter((r) => r.tipo === 'Refrendo');
+    const refrendosHoy = refrendosMes.filter((r) => r.fecha === todayStr);
 
-    const montoAcumuladoRaw = refrendosFuente.reduce(
-      (acc, r) => acc + (Number(r.monto_real) || 0),
-      0
+    const montoHoy = roundMoney2(
+      refrendosHoy.reduce((acc, r) => acc + (Number(r.monto_real) || 0), 0)
     );
-    const montoAcumulado = Math.round(montoAcumuladoRaw * 100) / 100;
+    const montoAcumulado = roundMoney2(
+      refrendosMes.reduce((acc, r) => acc + (Number(r.monto_real) || 0), 0)
+    );
 
     const rawMeta =
       metaSucursal?.meta_refrendos_mensual ??
@@ -236,65 +258,60 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
       0;
 
     // Si meta_refrendos_mensual < 500 representa cantidad de operaciones, convertir a meta monetaria estimada
-    const totalOps = refrendosFuente.reduce(
+    const totalOps = refrendosMes.reduce(
       (acc, r) => acc + (Number(r.cantidad_refrendos) || 0),
       0
     );
     const avgTicket =
       totalOps > 0 && montoAcumulado > 0 ? montoAcumulado / totalOps : 3250;
-    const metaMontoRaw = rawMeta >= 500 ? rawMeta : rawMeta * avgTicket;
-    const metaMonto = Math.round(metaMontoRaw * 100) / 100;
-
-    const faltante = Math.max(
-      0,
-      Math.round((metaMonto - montoAcumulado) * 100) / 100
+    const metaMonto = roundMoney2(
+      rawMeta >= 500 ? rawMeta : rawMeta * avgTicket
     );
+
+    const faltante = Math.max(0, roundMoney2(metaMonto - montoAcumulado));
     const pct =
       metaMonto > 0
         ? Math.min(100, Math.round((montoAcumulado / metaMonto) * 100))
         : 0;
 
     return {
+      montoHoy,
       montoAcumulado,
       metaMonto,
       faltante,
       pct,
     };
-  }, [branchGastosRefrendos, currentMonthPrefix, metaSucursal, sucursal]);
+  }, [branchGastosRefrendos, currentMonthPrefix, todayStr, metaSucursal, sucursal]);
 
   // KPI 3: TECHO DE GASTOS
   const kpiGastos = useMemo(() => {
     const gastosMes = branchGastosRefrendos.filter(
       (r) => r.tipo === 'Gasto' && r.fecha?.startsWith(currentMonthPrefix)
     );
-    const gastosFuente =
-      gastosMes.length > 0
-        ? gastosMes
-        : branchGastosRefrendos.filter((r) => r.tipo === 'Gasto');
+    const gastosHoy = gastosMes.filter((r) => r.fecha === todayStr);
 
-    const gastoAcumulado =
-      Math.round(
-        gastosFuente.reduce((acc, g) => acc + (Number(g.monto_real) || 0), 0) *
-          100
-      ) / 100;
+    const gastoHoy = roundMoney2(
+      gastosHoy.reduce((acc, g) => acc + (Number(g.monto_real) || 0), 0)
+    );
+    const gastoAcumulado = roundMoney2(
+      gastosMes.reduce((acc, g) => acc + (Number(g.monto_real) || 0), 0)
+    );
 
-    const techoRaw =
-      metaSucursal?.techo_gasto_mensual ?? sucursal.techo_gasto_mensual ?? 0;
-    const techo = Math.round(techoRaw * 100) / 100;
+    const techo = roundMoney2(
+      metaSucursal?.techo_gasto_mensual ?? sucursal.techo_gasto_mensual ?? 0
+    );
     const sinTecho = techo <= 0;
     const excedido = !sinTecho && gastoAcumulado > techo;
-    const exceso = excedido
-      ? Math.round((gastoAcumulado - techo) * 100) / 100
-      : 0;
-    const disponible = !sinTecho && !excedido
-      ? Math.round((techo - gastoAcumulado) * 100) / 100
-      : 0;
+    const exceso = excedido ? roundMoney2(gastoAcumulado - techo) : 0;
+    const disponible =
+      !sinTecho && !excedido ? roundMoney2(techo - gastoAcumulado) : 0;
     const pct =
       !sinTecho && techo > 0
         ? Math.min(100, Math.round((gastoAcumulado / techo) * 100))
         : 0;
 
     return {
+      gastoHoy,
       gastoAcumulado,
       techo,
       sinTecho,
@@ -303,7 +320,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
       disponible,
       pct,
     };
-  }, [branchGastosRefrendos, currentMonthPrefix, metaSucursal, sucursal]);
+  }, [branchGastosRefrendos, currentMonthPrefix, todayStr, metaSucursal, sucursal]);
 
   // KPI 4: LLAMADAS DEL MES
   const kpiLlamadas = useMemo(() => {
@@ -311,7 +328,9 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
       metaSucursal?.meta_llamadas_diarias ||
       sucursal.meta_llamadas_diarias ||
       30;
-    const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+    const daysInMonth = new Date(
+      Date.UTC(currentYear, currentMonthNum, 0)
+    ).getUTCDate();
     const metaMensual = metaDiaria * daysInMonth;
 
     const registradasMes = branchLlamadas.filter(
@@ -340,7 +359,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
   }, [
     branchLlamadas,
     currentYear,
-    currentMonth,
+    currentMonthNum,
     currentMonthPrefix,
     todayStr,
     metaSucursal,
@@ -369,27 +388,31 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     for (let d = 1; d <= currentDay; d++) {
       const dateStr = `${currentMonthPrefix}-${String(d).padStart(2, '0')}`;
       const diaSem = getDiaSemanaFromDate(dateStr);
-      const weekdayShort = new Date(currentYear, currentMonth, d)
-        .toLocaleDateString('es-MX', { weekday: 'short', month: 'short' })
+      const weekdayShort = new Date(
+        Date.UTC(currentYear, currentMonthNum - 1, d, 12, 0, 0)
+      )
+        .toLocaleDateString('es-MX', {
+          timeZone: MEXICO_TIMEZONE,
+          weekday: 'short',
+          month: 'short',
+        })
         .replace('.', '');
 
       const llamadasCount = branchLlamadas.filter(
         (l) => l.llamada_registrada && getLlamadaLocalDate(l) === dateStr
       ).length;
 
-      const refrendosMonto =
-        Math.round(
-          branchGastosRefrendos
-            .filter((g) => g.tipo === 'Refrendo' && g.fecha === dateStr)
-            .reduce((acc, g) => acc + (Number(g.monto_real) || 0), 0) * 100
-        ) / 100;
+      const refrendosMonto = roundMoney2(
+        branchGastosRefrendos
+          .filter((g) => g.tipo === 'Refrendo' && g.fecha === dateStr)
+          .reduce((acc, g) => acc + (Number(g.monto_real) || 0), 0)
+      );
 
-      const gastosMonto =
-        Math.round(
-          branchGastosRefrendos
-            .filter((g) => g.tipo === 'Gasto' && g.fecha === dateStr)
-            .reduce((acc, g) => acc + (Number(g.monto_real) || 0), 0) * 100
-        ) / 100;
+      const gastosMonto = roundMoney2(
+        branchGastosRefrendos
+          .filter((g) => g.tipo === 'Gasto' && g.fecha === dateStr)
+          .reduce((acc, g) => acc + (Number(g.monto_real) || 0), 0)
+      );
 
       const asignadasDiaList = resolveDailyTasksForBranch(
         sucursal,
@@ -422,7 +445,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     currentDay,
     currentMonthPrefix,
     currentYear,
-    currentMonth,
+    currentMonthNum,
     todayStr,
     branchLlamadas,
     branchGastosRefrendos,
@@ -754,11 +777,16 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                   {kpiRefrendos.pct}%
                 </span>
               </div>
-              <p className="text-[11px] text-[#6E5F87] leading-snug">
-                {kpiRefrendos.faltante > 0
-                  ? `Te faltan ${formatCurrencyClean(kpiRefrendos.faltante)} refrendos`
-                  : 'Meta mensual alcanzada'}
-              </p>
+              <div className="text-[11px] text-[#6E5F87] leading-snug space-y-0.5">
+                <p>
+                  {kpiRefrendos.faltante > 0
+                    ? `Te faltan ${formatCurrencyClean(kpiRefrendos.faltante)} refrendos`
+                    : 'Meta mensual alcanzada'}
+                </p>
+                <p className="font-semibold text-[#15803D]">
+                  Hoy: {formatCurrencyClean(kpiRefrendos.montoHoy)}
+                </p>
+              </div>
             </div>
           </div>
 
@@ -802,19 +830,22 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                   {kpiGastos.sinTecho ? '—' : `${kpiGastos.pct}%`}
                 </span>
               </div>
-              {kpiGastos.sinTecho ? (
-                <p className="text-[11px] text-[#6E5F87]">
-                  Sin techo de gastos asignado
+              <div className="text-[11px] leading-snug space-y-0.5">
+                {kpiGastos.sinTecho ? (
+                  <p className="text-[#6E5F87]">Sin techo de gastos asignado</p>
+                ) : kpiGastos.excedido ? (
+                  <p className="font-semibold text-[#BE123C]">
+                    Techo excedido por {formatCurrencyClean(kpiGastos.exceso)}
+                  </p>
+                ) : (
+                  <p className="text-[#6E5F87]">
+                    Disponible: {formatCurrencyClean(kpiGastos.disponible)}
+                  </p>
+                )}
+                <p className="font-semibold text-[#4F46E5]">
+                  Hoy: {formatCurrencyClean(kpiGastos.gastoHoy)}
                 </p>
-              ) : kpiGastos.excedido ? (
-                <p className="text-[11px] font-semibold text-[#BE123C]">
-                  Techo excedido por {formatCurrencyClean(kpiGastos.exceso)}
-                </p>
-              ) : (
-                <p className="text-[11px] text-[#6E5F87]">
-                  Disponible: {formatCurrencyClean(kpiGastos.disponible)}
-                </p>
-              )}
+              </div>
             </div>
           </div>
 

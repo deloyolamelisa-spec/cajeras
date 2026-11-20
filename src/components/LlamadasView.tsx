@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Phone,
   MessageCircle,
@@ -25,12 +25,15 @@ import {
   Sucursal,
 } from '../types/controlops';
 import {
+  addDaysYYYYMMDD,
   extractLlamadaBatchInfo,
-  formatMXN,
+  formatCurrencyClean,
   getDailyBatchSummaryForBranch,
   getLlamadaLocalDate,
   getTodayLocalYYYYMMDD,
+  parseMoneyInput,
   sanitizePhoneForWhatsApp,
+  toLocalYYYYMMDD,
 } from '../utils/calculations';
 import { ServiceResult } from '../services/controlOpsService';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
@@ -62,7 +65,7 @@ function normalizeText(val: string): string {
 
 function parseExcelOrStringDate(raw: unknown): string {
   if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
-    return raw.toISOString().slice(0, 10);
+    return toLocalYYYYMMDD(raw);
   }
   if (typeof raw === 'number' && raw > 20000 && raw < 80000) {
     const utcDays = Math.floor(raw - 25569);
@@ -75,11 +78,11 @@ function parseExcelOrStringDate(raw: unknown): string {
   if (dmy) {
     return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
   }
-  return new Date().toISOString().slice(0, 10);
+  return getTodayLocalYYYYMMDD();
 }
 
 function computeVencimientoFromDate(fechaVenc: string): EstatusVencimiento {
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getTodayLocalYYYYMMDD();
   if (fechaVenc < todayStr) return 'Vencido';
   const today = new Date(`${todayStr}T00:00:00`);
   const due = new Date(`${fechaVenc}T00:00:00`);
@@ -164,7 +167,24 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     onCloseCreateModalExternal?.();
   };
 
-  const todayStr = getTodayLocalYYYYMMDD();
+  const [todayStr, setTodayStr] = useState<string>(() =>
+    getTodayLocalYYYYMMDD()
+  );
+
+  useEffect(() => {
+    const syncToday = () => {
+      const latest = getTodayLocalYYYYMMDD();
+      setTodayStr((prev) => (prev === latest ? prev : latest));
+    };
+    const interval = window.setInterval(syncToday, 30000);
+    window.addEventListener('focus', syncToday);
+    document.addEventListener('visibilitychange', syncToday);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', syncToday);
+      document.removeEventListener('visibilitychange', syncToday);
+    };
+  }, []);
 
   const scopedLlamadas = useMemo(() => {
     if (selectedSucursalId === 'todas') return llamadas;
@@ -318,9 +338,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
         newForm.contrato.trim() ||
         `${suc.codigo.split('-')[0]}-2026-${Math.floor(1000 + Math.random() * 9000)}`,
       telefono: newForm.telefono.replace(/\D/g, ''),
-      monto_prestamo: Number(newForm.monto_prestamo) || 0,
+      monto_prestamo: parseMoneyInput(newForm.monto_prestamo),
       estatus_vencimiento: newForm.estatus_vencimiento,
-      fecha_vencimiento: new Date().toISOString().slice(0, 10),
+      fecha_vencimiento: todayStr,
       reporte_cajera: newForm.reporte_cajera,
       estatus_auditoria: 'Sin auditar',
       observaciones_admin: isCajera ? '' : newForm.observaciones_admin.trim(),
@@ -350,11 +370,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     const b1 = isCajera ? ownName : sampleBranches[0]?.nombre || 'Sucursal Centro';
     const b2 = isCajera ? ownName : sampleBranches[1]?.nombre || 'Sucursal Norte';
     const b3 = isCajera ? ownName : sampleBranches[2]?.nombre || 'Sucursal Sur';
-    const today = new Date();
-    const fmt = (offsetDays: number) => {
-      const d = new Date(today.getTime() + offsetDays * 86400000);
-      return d.toISOString().slice(0, 10);
-    };
+    const fmt = (offsetDays: number) => addDaysYYYYMMDD(todayStr, offsetDays);
     const rows = [
       ['sucursal', 'cliente', 'contrato', 'telefono', 'monto_prestamo', 'fecha_vencimiento'],
       [b1, 'María Fernanda López', 'CTR-2026-8801', '5512345678', '12500', fmt(-2)],
@@ -993,7 +1009,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                   {/* Loan & Expiration */}
                   <div className="xl:col-span-2 space-y-1">
                     <div className="font-mono-num text-sm font-bold text-[#1F172B]">
-                      {formatMXN(item.monto_prestamo)}
+                      {formatCurrencyClean(item.monto_prestamo)}
                     </div>
                     <div
                       className={`text-xs font-semibold ${
@@ -1400,6 +1416,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                   <input
                     type="number"
                     min="0"
+                    step="0.01"
                     value={newForm.monto_prestamo}
                     onChange={(e) =>
                       setNewForm({ ...newForm, monto_prestamo: e.target.value })
@@ -1641,7 +1658,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                               {row.telefono}
                             </td>
                             <td className="py-2 px-3 text-right font-mono-num">
-                              {formatMXN(row.monto_prestamo)}
+                              {formatCurrencyClean(row.monto_prestamo)}
                             </td>
                             <td className="py-2 px-3 font-mono-num">
                               {row.fecha_vencimiento} ({row.estatus_vencimiento})
