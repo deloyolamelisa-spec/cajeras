@@ -101,14 +101,20 @@ export interface LlamadaSucursal {
   contrato: string;
   telefono: string;
   monto_prestamo: number;
+  monto?: number;
   estatus_vencimiento: EstatusVencimiento;
   fecha_vencimiento: string;
   reporte_cajera: ReporteCajeraOpcion;
+  respuesta?: string;
   estatus_auditoria: EstatusAuditoriaLlamada;
   observaciones_admin: string;
   cajera_nombre: string;
   cajera_id?: string;
   llamada_registrada: boolean;
+  estatus?: 'Pendiente' | 'Realizada';
+  estado?: 'Pendiente' | 'Realizada';
+  hora_llamada?: string;
+  fecha_llamada?: string;
   fecha_registro: string;
 }
 

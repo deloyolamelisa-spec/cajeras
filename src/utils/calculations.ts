@@ -16,10 +16,7 @@ import { BASE_DAILY_TASKS } from '../data/mockData';
 export const MEXICO_TIMEZONE = 'America/Mexico_City';
 
 export function roundMoney2(value: unknown): number {
-  const num =
-    typeof value === 'string'
-      ? Number(value.replace(/[$,\s]/g, ''))
-      : Number(value);
+  const num = parseMoneyInput(value);
   if (!Number.isFinite(num)) return 0;
   return Math.round((num + Number.EPSILON) * 100) / 100;
 }
@@ -30,11 +27,36 @@ export function parseMoneyInput(value: unknown): number {
       ? Math.round((value + Number.EPSILON) * 100) / 100
       : 0;
   }
-  const cleaned = String(value ?? '')
-    .replace(/[$,\s]/g, '')
+  const raw = String(value ?? '')
+    .replace(/MXN|USD|MN/gi, '')
+    .replace(/[^0-9.,-]/g, '')
     .trim();
-  if (!cleaned) return 0;
-  const num = Number(cleaned);
+  if (!raw || raw === '-' || raw === '.' || raw === ',') return 0;
+
+  let normalized = raw;
+  const lastComma = raw.lastIndexOf(',');
+  const lastDot = raw.lastIndexOf('.');
+
+  if (lastComma !== -1 && lastDot !== -1) {
+    if (lastComma > lastDot) {
+      // European / dot-thousands format e.g. 2.000,50
+      normalized = raw.replace(/\./g, '').replace(',', '.');
+    } else {
+      // US / MX comma-thousands format e.g. 2,000.50
+      normalized = raw.replace(/,/g, '');
+    }
+  } else if (lastComma !== -1) {
+    // Single comma with 1-2 trailing digits (e.g. 2000,50) -> decimal; otherwise thousands (2,000)
+    const commaCount = (raw.match(/,/g) || []).length;
+    const afterComma = raw.slice(lastComma + 1);
+    if (commaCount === 1 && afterComma.length > 0 && afterComma.length <= 2) {
+      normalized = raw.replace(',', '.');
+    } else {
+      normalized = raw.replace(/,/g, '');
+    }
+  }
+
+  const num = Number(normalized);
   if (!Number.isFinite(num)) return 0;
   return Math.round((num + Number.EPSILON) * 100) / 100;
 }

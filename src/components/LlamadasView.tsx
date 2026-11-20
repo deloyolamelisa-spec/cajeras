@@ -35,7 +35,9 @@ import {
   formatCurrencyClean,
   getDailyBatchSummaryForBranch,
   getLlamadaLocalDate,
+  getMexicoNowParts,
   getTodayLocalYYYYMMDD,
+  MEXICO_TIMEZONE,
   parseMoneyInput,
   renderWhatsAppTemplate,
   toLocalYYYYMMDD,
@@ -57,7 +59,9 @@ interface LlamadasViewProps {
     plantillas: PlantillaWhatsApp[]
   ) => Promise<ServiceResult>;
   onUpdateLlamada: (updated: LlamadaSucursal) => Promise<ServiceResult | void>;
-  onCreateLlamada: (nueva: LlamadaSucursal) => Promise<void>;
+  onCreateLlamada: (
+    nueva: LlamadaSucursal
+  ) => Promise<ServiceResult | void>;
   onImportLlamadas: (nuevas: LlamadaSucursal[]) => Promise<ServiceResult | void>;
   onDeleteLlamada: (id: string) => Promise<void>;
   onSelectSucursal?: (id: string) => void;
@@ -101,6 +105,42 @@ function computeVencimientoFromDate(fechaVenc: string): EstatusVencimiento {
   return 'Al corriente';
 }
 
+const REQUIRED_CALL_RESPONSES = [
+  'Promesa de pago',
+  'No contesta / Buzón',
+  'Número equivocado',
+  'Ya pagó',
+  'Mensaje dejado',
+];
+
+function getMexicoExactTimeHHMMSS(date: Date = new Date()): string {
+  try {
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone: MEXICO_TIMEZONE,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(date);
+  } catch {
+    return getMexicoNowParts(date).hhmm;
+  }
+}
+
+function getDisplayCallTime(item: LlamadaSucursal): string {
+  if (item.hora_llamada && item.hora_llamada.trim()) {
+    return item.hora_llamada.trim();
+  }
+  if (!item.fecha_registro) return '';
+  const dt = new Date(item.fecha_registro);
+  if (Number.isNaN(dt.getTime())) return '';
+  return getMexicoExactTimeHHMMSS(dt);
+}
+
+function getItemLoanAmount(item: LlamadaSucursal): number {
+  return parseMoneyInput(item.monto_prestamo ?? item.monto ?? 0);
+}
+
 export const LlamadasView: React.FC<LlamadasViewProps> = ({
   llamadas,
   sucursales,
@@ -124,10 +164,20 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   const canAuditCalls = isCreador;
   const canImport = isCajera || isCreador;
   const canFilterBranch = !isCajera;
+  const quickResponseOptions = useMemo(() => {
+    const merged = new Set<string>(REQUIRED_CALL_RESPONSES);
+    for (const op of opcionesReporte) {
+      if (op && op !== 'Sin reporte') merged.add(op);
+    }
+    return Array.from(merged);
+  }, [opcionesReporte]);
   const dropdownOpciones: ReporteCajeraOpcion[] = [
     'Sin reporte',
-    ...opcionesReporte,
+    ...quickResponseOptions,
   ];
+  const [cajeraTab, setCajeraTab] = useState<'pendientes' | 'realizadas'>(
+    'pendientes'
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [filterAuditoria, setFilterAuditoria] = useState<string>('todos');
   const [filterFecha, setFilterFecha] = useState<'hoy' | 'todos'>(() =>
@@ -140,11 +190,16 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   const [montoMax, setMontoMax] = useState<string>('');
   const [sortBy, setSortBy] = useState<string>('recientes');
   const [draftObs, setDraftObs] = useState<Record<string, string>>({});
+  const [rowRespuestaDrafts, setRowRespuestaDrafts] = useState<
+    Record<string, string>
+  >({});
+  const [rowNotaDrafts, setRowNotaDrafts] = useState<Record<string, string>>(
+    {}
+  );
   const [savedToastId, setSavedToastId] = useState<string | null>(null);
   const [registeringRowId, setRegisteringRowId] = useState<string | null>(null);
-  const [rowRegisterToastId, setRowRegisterToastId] = useState<string | null>(
-    null
-  );
+  const [rowErrorToast, setRowErrorToast] = useState<string | null>(null);
+  const [callActionToast, setCallActionToast] = useState<string | null>(null);
 
   // WhatsApp Templates & Row Personalization state
   const effectiveTemplates: PlantillaWhatsApp[] = useMemo(() => {
@@ -285,6 +340,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       (l) => getLlamadaLocalDate(l) === todayStr
     );
     const currentMonthPrefix = todayStr.slice(0, 7);
+    const totalBaseHoy = todayScoped.length;
     const registradas = todayScoped.filter((l) => l.llamada_registrada).length;
     const pendientes = todayScoped.filter((l) => !l.llamada_registrada).length;
     const verificadas = todayScoped.filter(
@@ -309,7 +365,10 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
             ?.meta_llamadas_diarias || 30;
 
     const pct = metaDiaria > 0 ? Math.min(100, (registradas / metaDiaria) * 100) : 0;
+    const pctBaseHoy =
+      totalBaseHoy > 0 ? Math.min(100, (registradas / totalBaseHoy) * 100) : 0;
     return {
+      totalBaseHoy,
       registradas,
       pendientes,
       verificadas,
@@ -318,6 +377,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       registradasMes,
       metaDiaria,
       pct,
+      pctBaseHoy,
     };
   }, [scopedLlamadas, selectedSucursalId, sucursales, todayStr]);
 
@@ -384,7 +444,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
         if (vEnd && fv > vEnd) return false;
       }
 
-      const monto = Number(item.monto_prestamo) || 0;
+      const monto = getItemLoanAmount(item);
       if (hasMinMonto && monto < minVal) return false;
       if (hasMaxMonto && monto > maxVal) return false;
 
@@ -392,8 +452,12 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     });
 
     list.sort((a, b) => {
-      if (sortBy === 'mayor_monto') return b.monto_prestamo - a.monto_prestamo;
-      if (sortBy === 'menor_monto') return a.monto_prestamo - b.monto_prestamo;
+      if (sortBy === 'mayor_monto') {
+        return getItemLoanAmount(b) - getItemLoanAmount(a);
+      }
+      if (sortBy === 'menor_monto') {
+        return getItemLoanAmount(a) - getItemLoanAmount(b);
+      }
       if (sortBy === 'vencimiento') {
         return a.fecha_vencimiento.localeCompare(b.fecha_vencimiento);
       }
@@ -415,6 +479,21 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     sortBy,
     canAuditCalls,
   ]);
+
+  const cajeraPendientes = useMemo(
+    () => filteredLlamadas.filter((item) => !item.llamada_registrada),
+    [filteredLlamadas]
+  );
+
+  const cajeraRealizadas = useMemo(
+    () => filteredLlamadas.filter((item) => item.llamada_registrada),
+    [filteredLlamadas]
+  );
+
+  const displayedLlamadas = useMemo(() => {
+    if (!isCajera) return filteredLlamadas;
+    return cajeraTab === 'pendientes' ? cajeraPendientes : cajeraRealizadas;
+  }, [isCajera, cajeraTab, filteredLlamadas, cajeraPendientes, cajeraRealizadas]);
 
   const hasActiveFilters = Boolean(
     searchQuery ||
@@ -504,6 +583,8 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       userRole === 'cajera' ? selectedSucursalId : newForm.sucursal_id;
     const suc =
       sucursales.find((s) => s.id === targetSucId) || sucursales[0];
+    const now = new Date();
+    const parsedMonto = parseMoneyInput(newForm.monto_prestamo);
     const nueva: LlamadaSucursal = {
       id: `ll-${Date.now()}`,
       sucursal_id: suc.id,
@@ -514,19 +595,32 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
         newForm.contrato.trim() ||
         `${suc.codigo.split('-')[0]}-2026-${Math.floor(1000 + Math.random() * 9000)}`,
       telefono: newForm.telefono.replace(/\D/g, ''),
-      monto_prestamo: parseMoneyInput(newForm.monto_prestamo),
+      monto_prestamo: parsedMonto,
+      monto: parsedMonto,
       estatus_vencimiento: newForm.estatus_vencimiento,
       fecha_vencimiento: todayStr,
       reporte_cajera: newForm.reporte_cajera,
+      respuesta: newForm.reporte_cajera,
       estatus_auditoria: 'Sin auditar',
-      observaciones_admin: isCajera ? '' : newForm.observaciones_admin.trim(),
+      observaciones_admin: newForm.observaciones_admin.trim(),
       cajera_nombre: currentUserName || suc.responsable_caja,
       cajera_id: currentUserId || '',
       llamada_registrada: true,
-      fecha_registro: new Date().toISOString(),
+      estatus: 'Realizada',
+      estado: 'Realizada',
+      hora_llamada: getMexicoExactTimeHHMMSS(now),
+      fecha_llamada: todayStr,
+      fecha_registro: now.toISOString(),
     };
 
-    await onCreateLlamada(nueva);
+    const res = await onCreateLlamada(nueva);
+    if (res && res.ok === false) {
+      setRowErrorToast(
+        res.error || 'No se pudo registrar la llamada en Supabase.'
+      );
+      return;
+    }
+    setRowErrorToast(null);
     setNewForm({
       sucursal_id: defaultSucursal,
       cliente_nombre: '',
@@ -649,9 +743,16 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
         const telefonoRaw = String(
           normalized.telefono ?? normalized.celular ?? normalized.tel ?? ''
         ).replace(/\D/g, '');
-        const montoRaw = String(
-          normalized.monto_prestamo ?? normalized.monto ?? '0'
-        ).replace(/[^0-9.]/g, '');
+        const rawMontoVal =
+          normalized.monto_prestamo ??
+          normalized.monto ??
+          normalized.prestamo ??
+          normalized.importe ??
+          normalized.saldo ??
+          normalized.monto_del_prestamo ??
+          normalized.cantidad ??
+          0;
+        const parsedMonto = parseMoneyInput(rawMontoVal);
         const fechaVenc = parseExcelOrStringDate(
           normalized.fecha_vencimiento ?? normalized.vencimiento ?? ''
         );
@@ -724,7 +825,8 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
             contrato ||
             `${matchedSuc.codigo.split('-')[0]}-2026-${Math.floor(1000 + Math.random() * 9000)}`,
           telefono: telefonoRaw,
-          monto_prestamo: Number(montoRaw) || 0,
+          monto_prestamo: parsedMonto,
+          monto: parsedMonto,
           estatus_vencimiento: estatusVenc,
           fecha_vencimiento: fechaVenc,
           reporte_cajera: 'Sin reporte',
@@ -735,6 +837,8 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
             : matchedSuc.responsable_caja,
           cajera_id: isCajera ? currentUserId || '' : '',
           llamada_registrada: false,
+          estatus: 'Pendiente',
+          estado: 'Pendiente',
           fecha_registro: nowIso,
         });
       });
@@ -792,31 +896,66 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 md:p-6">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1 flex-1">
-            <div className="flex items-center justify-between max-w-2xl">
+            <div className="flex items-center justify-between gap-2 max-w-2xl">
               <h2 className="font-display text-base font-bold text-[#1F172B]">
-                Avance diario de marcación
+                {isCajera
+                  ? 'Avance de tus bases de hoy'
+                  : 'Avance diario de marcación'}
               </h2>
-              <span className="font-mono-num text-sm font-bold text-[#5B21B6]">
-                {metrics.registradas} / {metrics.metaDiaria} llamadas (
-                {metrics.pct.toFixed(0)}%)
-              </span>
+              {isCajera ? (
+                <span className="font-mono-num text-sm font-bold text-[#5B21B6]">
+                  {metrics.registradas} de {metrics.totalBaseHoy} llamadas de tu
+                  base de hoy ({metrics.pctBaseHoy.toFixed(1)}%)
+                </span>
+              ) : (
+                <span className="font-mono-num text-sm font-bold text-[#5B21B6]">
+                  {metrics.registradas} / {metrics.metaDiaria} llamadas (
+                  {metrics.pct.toFixed(0)}%)
+                </span>
+              )}
             </div>
             <div className="h-3 w-full max-w-2xl rounded-full bg-[#F3ECFC] overflow-hidden">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-[#7C3AED] to-[#EC4899] transition-all duration-300"
-                style={{ width: `${Math.max(2, metrics.pct)}%` }}
+                style={{
+                  width: `${
+                    isCajera
+                      ? metrics.registradas > 0
+                        ? Math.max(2, metrics.pctBaseHoy)
+                        : 0
+                      : Math.max(2, metrics.pct)
+                  }%`,
+                }}
               />
             </div>
-            <p className="text-xs text-[#7A6B93] pt-0.5">
-              Meta diaria ({todayStr}): {metrics.metaDiaria} llamadas · Faltan{' '}
-              <span className="font-mono-num font-semibold text-[#1F172B]">
-                {Math.max(0, metrics.metaDiaria - metrics.registradas)}
-              </span>{' '}
-              hoy · Acumulado del mes:{' '}
-              <span className="font-mono-num font-semibold text-[#5B21B6]">
-                {metrics.registradasMes} llamadas
-              </span>
-            </p>
+            {isCajera ? (
+              <p className="text-xs text-[#7A6B93] pt-0.5">
+                Hoy ({todayStr}):{' '}
+                <span className="font-mono-num font-semibold text-[#15803D]">
+                  {metrics.registradas} realizada(s)
+                </span>{' '}
+                ·{' '}
+                <span className="font-mono-num font-semibold text-[#B45309]">
+                  {metrics.pendientes} pendiente(s)
+                </span>{' '}
+                de {metrics.totalBaseHoy} registro(s) en tus bases subidas ·
+                Acumulado del mes:{' '}
+                <span className="font-mono-num font-semibold text-[#5B21B6]">
+                  {metrics.registradasMes} llamadas
+                </span>
+              </p>
+            ) : (
+              <p className="text-xs text-[#7A6B93] pt-0.5">
+                Meta diaria ({todayStr}): {metrics.metaDiaria} llamadas · Faltan{' '}
+                <span className="font-mono-num font-semibold text-[#1F172B]">
+                  {Math.max(0, metrics.metaDiaria - metrics.registradas)}
+                </span>{' '}
+                hoy · Acumulado del mes:{' '}
+                <span className="font-mono-num font-semibold text-[#5B21B6]">
+                  {metrics.registradasMes} llamadas
+                </span>
+              </p>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
@@ -1011,7 +1150,11 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 md:p-5 space-y-3.5">
         <div
           className={`grid grid-cols-1 md:grid-cols-2 gap-3 ${
-            canFilterBranch && onSelectSucursal ? 'xl:grid-cols-6' : 'xl:grid-cols-5'
+            canFilterBranch && onSelectSucursal
+              ? 'xl:grid-cols-6'
+              : isCajera
+                ? 'xl:grid-cols-4'
+                : 'xl:grid-cols-5'
           }`}
         >
           <div className="xl:col-span-2 relative">
@@ -1056,7 +1199,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
               <option value="Sin auditar">Sin auditar</option>
               <option value="pendiente_marcar">Pendiente de marcar</option>
             </select>
-          ) : (
+          ) : !isCajera ? (
             <select
               aria-label="Filtrar por estado de marcación"
               value={filterAuditoria}
@@ -1067,7 +1210,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
               <option value="marcadas">Marcadas / Realizadas</option>
               <option value="pendiente_marcar">Pendientes por marcar</option>
             </select>
-          )}
+          ) : null}
 
           <select
             aria-label="Filtrar por fecha"
@@ -1445,34 +1588,135 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
       {/* Client Calls Table / Cards */}
       <section className="bg-white rounded-2xl border border-[#EAE3F5] overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-[#F1ECF9] flex items-center justify-between">
-          <span className="text-xs font-semibold text-[#55476E]">
-            Mostrando {filteredLlamadas.length} cliente(s)
-          </span>
-          {hasActiveFilters && (
-            <button
-              type="button"
-              onClick={handleClearFilters}
-              className="text-xs font-medium text-[#DB2777] hover:underline"
-            >
-              Limpiar filtros
-            </button>
+        <div className="px-5 py-3.5 border-b border-[#F1ECF9] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          {isCajera ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCajeraTab('pendientes')}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-colors ${
+                  cajeraTab === 'pendientes'
+                    ? 'bg-[#7C3AED] text-white shadow-xs'
+                    : 'bg-[#FAF8FC] text-[#55476E] border border-[#E6DDF5] hover:bg-[#F3ECFC]'
+                }`}
+              >
+                <Clock className="h-3.5 w-3.5" />
+                Llamadas pendientes
+                <span
+                  className={`px-2 py-0.5 rounded-md font-mono-num text-[11px] ${
+                    cajeraTab === 'pendientes'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-[#FEF3C7] text-[#B45309]'
+                  }`}
+                >
+                  {cajeraPendientes.length}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCajeraTab('realizadas')}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-colors ${
+                  cajeraTab === 'realizadas'
+                    ? 'bg-[#15803D] text-white shadow-xs'
+                    : 'bg-[#FAF8FC] text-[#55476E] border border-[#E6DDF5] hover:bg-[#ECFDF5]'
+                }`}
+              >
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                Llamadas realizadas
+                <span
+                  className={`px-2 py-0.5 rounded-md font-mono-num text-[11px] ${
+                    cajeraTab === 'realizadas'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-[#DCFCE7] text-[#15803D]'
+                  }`}
+                >
+                  {cajeraRealizadas.length}
+                </span>
+              </button>
+            </div>
+          ) : (
+            <span className="text-xs font-semibold text-[#55476E]">
+              Mostrando {displayedLlamadas.length} cliente(s)
+            </span>
           )}
+
+          <div className="flex items-center gap-3">
+            {isCajera && (
+              <span className="text-xs font-semibold text-[#55476E]">
+                Mostrando {displayedLlamadas.length} cliente(s)
+              </span>
+            )}
+            {hasActiveFilters && (
+              <button
+                type="button"
+                onClick={handleClearFilters}
+                className="text-xs font-medium text-[#DB2777] hover:underline"
+              >
+                Limpiar filtros
+              </button>
+            )}
+          </div>
         </div>
 
-        {filteredLlamadas.length === 0 ? (
+        {rowErrorToast && (
+          <div
+            role="alert"
+            className="mx-5 mt-3 rounded-xl px-4 py-2.5 bg-[#FFF1F2] border border-[#FECDD3] text-xs font-semibold text-[#BE123C] flex items-center justify-between gap-2"
+          >
+            <div className="flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>{rowErrorToast}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRowErrorToast(null)}
+              className="underline shrink-0"
+            >
+              Cerrar
+            </button>
+          </div>
+        )}
+
+        {callActionToast && (
+          <div
+            role="status"
+            className="mx-5 mt-3 rounded-xl px-4 py-2.5 bg-[#ECFDF5] border border-[#A7F3D0] text-xs font-semibold text-[#065F46] flex items-center justify-between gap-2"
+          >
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-[#15803D]" />
+              <span>{callActionToast}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCallActionToast(null)}
+              className="underline shrink-0"
+            >
+              Ocultar
+            </button>
+          </div>
+        )}
+
+        {displayedLlamadas.length === 0 ? (
           <div className="p-10 text-center space-y-2">
             <p className="text-sm font-semibold text-[#1F172B]">
-              No hay clientes que coincidan con tu búsqueda
+              {isCajera
+                ? cajeraTab === 'pendientes'
+                  ? 'No tienes llamadas pendientes en esta vista'
+                  : 'Aún no hay llamadas realizadas registradas en esta vista'
+                : 'No hay clientes que coincidan con tu búsqueda'}
             </p>
             <p className="text-xs text-[#7A6B93]">
-              Ajusta los filtros de monto, vencimiento o registra una nueva
-              llamada.
+              {isCajera
+                ? cajeraTab === 'pendientes'
+                  ? 'Revisa la pestaña "Llamadas realizadas" o sube una nueva base de llamadas.'
+                  : 'Selecciona una respuesta en "Llamadas pendientes" y presiona "Registrar llamada".'
+                : 'Ajusta los filtros de monto, vencimiento o registra una nueva llamada.'}
             </p>
           </div>
         ) : (
           <div className="divide-y divide-[#F1ECF9]">
-            {filteredLlamadas.map((item) => {
+            {displayedLlamadas.map((item) => {
               const currentObs =
                 draftObs[item.id] !== undefined
                   ? draftObs[item.id]
@@ -1481,6 +1725,17 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                 draftObs[item.id] !== undefined &&
                 draftObs[item.id] !== item.observaciones_admin;
               const batchInfo = extractLlamadaBatchInfo(item);
+              const loanAmount = getItemLoanAmount(item);
+              const selectedResponse =
+                rowRespuestaDrafts[item.id] ??
+                (item.reporte_cajera && item.reporte_cajera !== 'Sin reporte'
+                  ? item.reporte_cajera
+                  : quickResponseOptions[0] || 'Promesa de pago');
+              const freeNoteValue =
+                rowNotaDrafts[item.id] !== undefined
+                  ? rowNotaDrafts[item.id]
+                  : item.observaciones_admin || '';
+              const callTimeDisplay = getDisplayCallTime(item);
 
               return (
                 <div
@@ -1490,7 +1745,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                   {/* Client Info */}
                   <div
                     className={`${
-                      canAuditCalls ? 'xl:col-span-3' : 'xl:col-span-4'
+                      canAuditCalls ? 'xl:col-span-3' : 'xl:col-span-3'
                     } space-y-1`}
                   >
                     <div className="flex flex-wrap items-center gap-2">
@@ -1514,7 +1769,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                   {/* Loan & Expiration */}
                   <div className="xl:col-span-2 space-y-1">
                     <div className="font-mono-num text-sm font-bold text-[#1F172B]">
-                      {formatCurrencyClean(item.monto_prestamo)}
+                      {formatCurrencyClean(loanAmount)}
                     </div>
                     <div
                       className={`text-xs font-semibold ${
@@ -1543,7 +1798,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                         {(() => {
                           const defaultRendered = renderWhatsAppTemplate(
                             activeTemplate?.mensaje || '',
-                            item
+                            { ...item, monto_prestamo: loanAmount }
                           );
                           const effectiveWaMsg =
                             rowWaDrafts[item.id] !== undefined
@@ -1558,65 +1813,8 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                           return (
                             <>
                               <div className="flex flex-wrap items-center gap-2">
-                                <button
-                                  type="button"
-                                  disabled={registeringRowId === item.id}
-                                  onClick={async () => {
-                                    if (item.llamada_registrada) return;
-                                    setRegisteringRowId(item.id);
-                                    await onUpdateLlamada({
-                                      ...item,
-                                      sucursal:
-                                        item.sucursal || item.sucursal_nombre,
-                                      cajera_nombre:
-                                        currentUserName || item.cajera_nombre,
-                                      cajera_id: currentUserId || item.cajera_id,
-                                      llamada_registrada: true,
-                                      fecha_registro:
-                                        item.fecha_registro ||
-                                        new Date().toISOString(),
-                                    });
-                                    setRegisteringRowId(null);
-                                    setRowRegisterToastId(item.id);
-                                    setTimeout(
-                                      () =>
-                                        setRowRegisterToastId((prev) =>
-                                          prev === item.id ? null : prev
-                                        ),
-                                      2000
-                                    );
-                                  }}
-                                  className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
-                                    item.llamada_registrada
-                                      ? 'bg-[#ECFDF5] text-[#15803D] border border-[#A7F3D0] cursor-default'
-                                      : 'bg-[#7C3AED] hover:bg-[#6D28D9] text-white shadow-xs disabled:opacity-60'
-                                  }`}
-                                >
-                                  <CheckCircle2 className="h-3.5 w-3.5" />
-                                  {registeringRowId === item.id
-                                    ? 'Guardando...'
-                                    : item.llamada_registrada
-                                      ? rowRegisterToastId === item.id
-                                        ? 'Guardada'
-                                        : 'Llamada registrada'
-                                      : 'Registrar llamada'}
-                                </button>
                                 <a
                                   href={`tel:${item.telefono}`}
-                                  onClick={() => {
-                                    if (!item.llamada_registrada) {
-                                      void onUpdateLlamada({
-                                        ...item,
-                                        sucursal:
-                                          item.sucursal || item.sucursal_nombre,
-                                        cajera_nombre:
-                                          currentUserName || item.cajera_nombre,
-                                        cajera_id:
-                                          currentUserId || item.cajera_id,
-                                        llamada_registrada: true,
-                                      });
-                                    }
-                                  }}
                                   className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#F3ECFC] hover:bg-[#E7DAFA] text-[#5B21B6] transition-colors whitespace-nowrap"
                                 >
                                   <Phone className="h-3.5 w-3.5" />
@@ -1626,20 +1824,6 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                                   href={waHref}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  onClick={() => {
-                                    if (!item.llamada_registrada) {
-                                      void onUpdateLlamada({
-                                        ...item,
-                                        sucursal:
-                                          item.sucursal || item.sucursal_nombre,
-                                        cajera_nombre:
-                                          currentUserName || item.cajera_nombre,
-                                        cajera_id:
-                                          currentUserId || item.cajera_id,
-                                        llamada_registrada: true,
-                                      });
-                                    }
-                                  }}
                                   className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#FDF2F8] hover:bg-[#FCE7F3] text-[#BE185D] border border-[#FBCFE8] transition-colors whitespace-nowrap"
                                 >
                                   <MessageCircle className="h-3.5 w-3.5" />
@@ -1676,7 +1860,8 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                                 <div className="rounded-xl border border-[#DDD6FE] bg-[#FAF7FE] p-3 space-y-2">
                                   <div className="flex items-center justify-between gap-2">
                                     <span className="text-[11px] font-bold text-[#5B21B6]">
-                                      Personalizar WhatsApp para {item.cliente_nombre}
+                                      Personalizar WhatsApp para{' '}
+                                      {item.cliente_nombre}
                                     </span>
                                     <button
                                       type="button"
@@ -1714,22 +1899,6 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                                       href={waHref}
                                       target="_blank"
                                       rel="noopener noreferrer"
-                                      onClick={() => {
-                                        if (!item.llamada_registrada) {
-                                          void onUpdateLlamada({
-                                            ...item,
-                                            sucursal:
-                                              item.sucursal ||
-                                              item.sucursal_nombre,
-                                            cajera_nombre:
-                                              currentUserName ||
-                                              item.cajera_nombre,
-                                            cajera_id:
-                                              currentUserId || item.cajera_id,
-                                            llamada_registrada: true,
-                                          });
-                                        }
-                                      }}
                                       className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#DB2777] hover:bg-[#BE185D] text-white"
                                     >
                                       <MessageCircle className="h-3.5 w-3.5" />
@@ -1744,10 +1913,17 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                       </>
                     ) : (
                       <div className="text-xs text-[#6E5F87] space-y-1.5">
-                        <div className="font-medium text-[#1F172B]">
-                          {item.llamada_registrada
-                            ? 'Marcación registrada'
-                            : 'Sin marcar'}
+                        <div className="flex flex-wrap items-center gap-1.5 font-medium text-[#1F172B]">
+                          <span>
+                            {item.llamada_registrada
+                              ? 'Realizada'
+                              : 'Pendiente'}
+                          </span>
+                          {item.llamada_registrada && callTimeDisplay && (
+                            <span className="font-mono-num text-[11px] text-[#5B21B6] bg-[#F3ECFC] px-1.5 py-0.5 rounded">
+                              {callTimeDisplay}
+                            </span>
+                          )}
                         </div>
                         <div className="font-mono-num text-[11px]">
                           Tel. {item.telefono}
@@ -1757,7 +1933,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                             item.telefono,
                             renderWhatsAppTemplate(
                               activeTemplate?.mensaje || '',
-                              item
+                              { ...item, monto_prestamo: loanAmount }
                             )
                           )}
                           target="_blank"
@@ -1771,57 +1947,171 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                     )}
                   </div>
 
-                  {/* Cashier Report Dropdown (Editable only by Cajera) */}
+                  {/* Cashier Response Capture & Register Call (Cajera) or Read-only Response (Admin/Supervisor) */}
                   <div
                     className={
-                      canAuditCalls ? 'xl:col-span-2' : 'xl:col-span-3 space-y-1.5'
+                      canAuditCalls ? 'xl:col-span-2 space-y-1.5' : 'xl:col-span-4 space-y-2'
                     }
                   >
-                    <div className="flex items-center justify-between gap-2 mb-1">
+                    <div className="flex items-center justify-between gap-2">
                       <label className="block text-[11px] font-medium text-[#7A6B93]">
-                        Reporte de cajera
+                        Respuesta obtenida
                       </label>
                       {!canAuditCalls && (
-                        <span
-                          className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${
-                            item.llamada_registrada
-                              ? 'bg-[#ECFDF5] text-[#15803D]'
-                              : 'bg-[#FEF9C3] text-[#A16207]'
-                          }`}
-                        >
-                          {item.llamada_registrada ? 'Marcada' : 'Pendiente'}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {item.llamada_registrada && callTimeDisplay && (
+                            <span className="font-mono-num text-[11px] font-semibold text-[#5B21B6]">
+                              {callTimeDisplay}
+                            </span>
+                          )}
+                          <span
+                            className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${
+                              item.llamada_registrada
+                                ? 'bg-[#ECFDF5] text-[#15803D]'
+                                : 'bg-[#FEF9C3] text-[#A16207]'
+                            }`}
+                          >
+                            {item.llamada_registrada
+                              ? 'Realizada'
+                              : 'Pendiente'}
+                          </span>
+                        </div>
                       )}
                     </div>
+
                     {isCajera ? (
-                      <select
-                        value={item.reporte_cajera}
-                        onChange={(e) =>
-                          onUpdateLlamada({
-                            ...item,
-                            sucursal: item.sucursal || item.sucursal_nombre,
-                            cajera_nombre:
-                              currentUserName || item.cajera_nombre,
-                            cajera_id: currentUserId || item.cajera_id,
-                            reporte_cajera: e.target
-                              .value as ReporteCajeraOpcion,
-                            llamada_registrada:
-                              e.target.value !== 'Sin reporte'
-                                ? true
-                                : item.llamada_registrada,
-                          })
-                        }
-                        className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
-                      >
-                        {dropdownOpciones.map((op) => (
-                          <option key={op} value={op}>
-                            {op}
-                          </option>
-                        ))}
-                      </select>
+                      !item.llamada_registrada ? (
+                        <div className="space-y-2">
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <select
+                              aria-label={`Respuesta para ${item.cliente_nombre}`}
+                              value={selectedResponse}
+                              onChange={(e) =>
+                                setRowRespuestaDrafts((prev) => ({
+                                  ...prev,
+                                  [item.id]: e.target.value,
+                                }))
+                              }
+                              className="flex-1 px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+                            >
+                              {quickResponseOptions.map((op) => (
+                                <option key={op} value={op}>
+                                  {op}
+                                </option>
+                              ))}
+                            </select>
+
+                            <button
+                              type="button"
+                              disabled={registeringRowId === item.id}
+                              onClick={async () => {
+                                setRegisteringRowId(item.id);
+                                setRowErrorToast(null);
+                                try {
+                                  const now = new Date();
+                                  const exactTime =
+                                    getMexicoExactTimeHHMMSS(now);
+                                  const res = await onUpdateLlamada({
+                                    ...item,
+                                    monto_prestamo: loanAmount,
+                                    monto: loanAmount,
+                                    sucursal:
+                                      item.sucursal || item.sucursal_nombre,
+                                    cajera_nombre:
+                                      currentUserName || item.cajera_nombre,
+                                    cajera_id:
+                                      currentUserId || item.cajera_id,
+                                    reporte_cajera: selectedResponse,
+                                    respuesta: selectedResponse,
+                                    observaciones_admin: freeNoteValue.trim(),
+                                    llamada_registrada: true,
+                                    estatus: 'Realizada',
+                                    estado: 'Realizada',
+                                    hora_llamada: exactTime,
+                                    fecha_llamada: todayStr,
+                                    fecha_registro: now.toISOString(),
+                                  });
+
+                                  if (res && res.ok === false) {
+                                    setRowErrorToast(
+                                      res.error ||
+                                        'Error al guardar la llamada en Supabase.'
+                                    );
+                                    return;
+                                  }
+
+                                  setRowRespuestaDrafts((prev) => {
+                                    const next = { ...prev };
+                                    delete next[item.id];
+                                    return next;
+                                  });
+                                  setRowNotaDrafts((prev) => {
+                                    const next = { ...prev };
+                                    delete next[item.id];
+                                    return next;
+                                  });
+                                  setCallActionToast(
+                                    `Llamada de ${item.cliente_nombre} guardada (${selectedResponse} · ${exactTime}) y movida a Llamadas realizadas.`
+                                  );
+                                  window.setTimeout(() => {
+                                    setCallActionToast((prev) =>
+                                      prev &&
+                                      prev.includes(item.cliente_nombre)
+                                        ? null
+                                        : prev
+                                    );
+                                  }, 4000);
+                                } finally {
+                                  setRegisteringRowId(null);
+                                }
+                              }}
+                              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white shadow-xs disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              {registeringRowId === item.id
+                                ? 'Guardando...'
+                                : 'Registrar llamada'}
+                            </button>
+                          </div>
+
+                          <input
+                            type="text"
+                            aria-label={`Observación libre para ${item.cliente_nombre}`}
+                            value={freeNoteValue}
+                            onChange={(e) =>
+                              setRowNotaDrafts((prev) => ({
+                                ...prev,
+                                [item.id]: e.target.value,
+                              }))
+                            }
+                            placeholder="Observación libre (opcional)..."
+                            className="w-full px-3 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs text-[#1F172B] placeholder:text-[#9D8FB5] focus:outline-none focus:border-[#7C3AED] focus:bg-white"
+                          />
+                        </div>
+                      ) : (
+                        <div className="space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="px-3 py-1.5 rounded-xl border border-[#BBF7D0] bg-[#F0FDF4] text-xs font-semibold text-[#15803D]">
+                              {item.reporte_cajera}
+                            </span>
+                            {item.observaciones_admin && (
+                              <span className="text-xs text-[#55476E] bg-[#FAF8FC] border border-[#E6DDF5] px-2.5 py-1 rounded-xl">
+                                {item.observaciones_admin}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )
                     ) : (
-                      <div className="px-3 py-2 rounded-xl border border-[#F1ECF9] bg-[#FAF8FC] text-xs font-semibold text-[#1F172B]">
-                        {item.reporte_cajera}
+                      <div className="space-y-1">
+                        <div className="px-3 py-2 rounded-xl border border-[#F1ECF9] bg-[#FAF8FC] text-xs font-semibold text-[#1F172B]">
+                          {item.reporte_cajera}
+                        </div>
+                        {!canAuditCalls && item.observaciones_admin && (
+                          <p className="text-[11px] text-[#6E5F87]">
+                            Nota: {item.observaciones_admin}
+                          </p>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2202,7 +2492,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                     { col: 'cliente', ex: 'María Fernanda López' },
                     { col: 'contrato', ex: 'CTR-2026-8801' },
                     { col: 'telefono', ex: '5512345678 (10 dígitos)' },
-                    { col: 'monto_prestamo', ex: '12500 (solo número)' },
+                    { col: 'monto_prestamo', ex: '$2,000.00 o monto / préstamo' },
                     { col: 'fecha_vencimiento', ex: '2026-11-25 (AAAA-MM-DD)' },
                   ].map((item) => (
                     <div
@@ -2296,7 +2586,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                               {row.telefono}
                             </td>
                             <td className="py-2 px-3 text-right font-mono-num">
-                              {formatCurrencyClean(row.monto_prestamo)}
+                              {formatCurrencyClean(getItemLoanAmount(row))}
                             </td>
                             <td className="py-2 px-3 font-mono-num">
                               {row.fecha_vencimiento} ({row.estatus_vencimiento})

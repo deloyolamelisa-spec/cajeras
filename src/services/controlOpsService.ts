@@ -34,8 +34,11 @@ import {
 import {
   calcularPuntualidadEnvio,
   ensureBaseDailyCatalogTasks,
+  getMexicoNowParts,
   getTodayLocalYYYYMMDD,
+  parseMoneyInput,
   roundMoney2,
+  toLocalYYYYMMDD,
 } from '../utils/calculations';
 
 const STORAGE_KEYS = {
@@ -315,7 +318,7 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
       metasRes,
       catalogosRes,
     ] = await Promise.all([
-      supabase.from(SUPABASE_TABLES.LLAMADAS).select('*'),
+      supabase.from(SUPABASE_TABLES.LLAMADAS).select('*').range(0, 4999),
       supabase
         .from(SUPABASE_TABLES.ACTIVIDADES)
         .select('*')
@@ -516,9 +519,11 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
     let llamadas: LlamadaSucursal[];
     if (!llamadasRes.error && llamadasRes.data) {
       if (llamadasRes.data.length > 0) {
-        llamadasSchemaCache.validColumns = new Set(
-          Object.keys(llamadasRes.data[0] as Record<string, unknown>)
-        );
+        const firstRow = llamadasRes.data[0] as Record<string, unknown>;
+        llamadasSchemaCache.validColumns = new Set(Object.keys(firstRow));
+        if (typeof firstRow.id === 'number') {
+          llamadasSchemaCache.omitGeneratedId = true;
+        }
       }
       llamadas = (llamadasRes.data as Record<string, unknown>[])
         .map((row) => normalizeLlamadaFromDb(row, sucursales))
@@ -648,7 +653,18 @@ function normalizeLlamadaFromDb(
   const fechaVenc = row.fecha_vencimiento
     ? String(row.fecha_vencimiento).slice(0, 10)
     : '';
-  const reporteCajera = String(row.reporte_cajera ?? 'Sin reporte');
+  const reporteCajera =
+    String(row.reporte_cajera ?? row.respuesta ?? 'Sin reporte').trim() ||
+    'Sin reporte';
+  const rawEstado = String(row.estatus ?? row.estado ?? '')
+    .trim()
+    .toLowerCase();
+  const isRealizada =
+    row.llamada_registrada !== undefined && row.llamada_registrada !== null
+      ? Boolean(row.llamada_registrada) || rawEstado === 'realizada'
+      : rawEstado === 'realizada' ||
+        (reporteCajera !== 'Sin reporte' && reporteCajera !== 'Pendiente');
+
   const rawEstatusVenc = String(row.estatus_vencimiento ?? '');
   const estatusVencimiento: EstatusVencimiento =
     rawEstatusVenc === 'Vencido' ||
@@ -668,6 +684,25 @@ function normalizeLlamadaFromDb(
       `ll-db-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
   );
 
+  const parsedMonto = parseMoneyInput(
+    row.monto_prestamo ??
+      row.monto ??
+      row.prestamo ??
+      row.importe ??
+      row.saldo ??
+      0
+  );
+  const fechaRegistro = String(
+    row.fecha_registro ?? row.created_at ?? new Date().toISOString()
+  );
+  const rawHora = String(row.hora_llamada ?? '').trim();
+  const horaLlamada =
+    rawHora ||
+    (isRealizada
+      ? getMexicoNowParts(new Date(fechaRegistro)).hhmm
+      : undefined);
+  const rawFechaLlamada = String(row.fecha_llamada ?? row.fecha ?? '').trim();
+
   return {
     id: idStr,
     sucursal_id: rawSucId || matchedSuc?.id || '',
@@ -676,24 +711,29 @@ function normalizeLlamadaFromDb(
     cliente_nombre: String(row.cliente_nombre ?? row.cliente ?? 'Cliente'),
     contrato: String(row.contrato ?? ''),
     telefono: String(row.telefono ?? ''),
-    monto_prestamo: Number(row.monto_prestamo ?? 0) || 0,
+    monto_prestamo: parsedMonto,
+    monto: parsedMonto,
     estatus_vencimiento: estatusVencimiento,
     fecha_vencimiento: fechaVenc,
     reporte_cajera: reporteCajera,
+    respuesta: reporteCajera,
     estatus_auditoria: estatusAuditoria,
-    observaciones_admin: String(row.observaciones_admin ?? ''),
+    observaciones_admin: String(
+      row.observaciones_admin ?? row.observaciones ?? ''
+    ),
     cajera_nombre: String(
       row.cajera_nombre ?? matchedSuc?.responsable_caja ?? ''
     ),
     cajera_id:
       typeof row.cajera_id === 'string' ? row.cajera_id : undefined,
-    llamada_registrada:
-      row.llamada_registrada !== undefined && row.llamada_registrada !== null
-        ? Boolean(row.llamada_registrada)
-        : reporteCajera !== 'Sin reporte',
-    fecha_registro: String(
-      row.fecha_registro ?? row.created_at ?? new Date().toISOString()
-    ),
+    llamada_registrada: isRealizada,
+    estatus: isRealizada ? 'Realizada' : 'Pendiente',
+    estado: isRealizada ? 'Realizada' : 'Pendiente',
+    hora_llamada: horaLlamada,
+    fecha_llamada: rawFechaLlamada
+      ? toLocalYYYYMMDD(rawFechaLlamada)
+      : undefined,
+    fecha_registro: fechaRegistro,
   };
 }
 
@@ -785,7 +825,7 @@ function isRlsOrAuthError(err: { code?: string; message?: string }): boolean {
 }
 
 function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> {
-  const safeMonto = roundMoney2(llamada.monto_prestamo);
+  const safeMonto = roundMoney2(llamada.monto_prestamo ?? llamada.monto ?? 0);
   const safeFechaVenc =
     llamada.fecha_vencimiento && String(llamada.fecha_vencimiento).trim()
       ? String(llamada.fecha_vencimiento).trim().slice(0, 10)
@@ -795,8 +835,19 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
     (llamada.sucursal || llamada.sucursal_nombre || llamada.sucursal_id || 'Sucursal').trim() ||
     'Sucursal';
 
+  const isTemp = isClientTempId(llamada.id);
+  const isRealizada = Boolean(llamada.llamada_registrada);
+  const estadoLabel = isRealizada ? 'Realizada' : 'Pendiente';
+  const fechaRegistro = llamada.fecha_registro || new Date().toISOString();
+  const horaLlamada =
+    llamada.hora_llamada ||
+    (isRealizada ? getMexicoNowParts(new Date(fechaRegistro)).hhmm : '');
+  const fechaLlamada =
+    llamada.fecha_llamada ||
+    (isRealizada ? getTodayLocalYYYYMMDD() : toLocalYYYYMMDD(fechaRegistro));
+
   const candidateValues: Record<string, unknown> = {
-    id: llamada.id,
+    id: isTemp ? llamada.id : toDbFilterId(llamada.id),
     sucursal_id: llamada.sucursal_id || safeSucursalNombre,
     sucursal_nombre: safeSucursalNombre,
     sucursal: safeSucursalNombre,
@@ -805,15 +856,22 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
     contrato: llamada.contrato,
     telefono: llamada.telefono,
     monto_prestamo: safeMonto >= 0 ? safeMonto : 0,
+    monto: safeMonto >= 0 ? safeMonto : 0,
     estatus_vencimiento: llamada.estatus_vencimiento,
     fecha_vencimiento: safeFechaVenc,
     reporte_cajera: llamada.reporte_cajera || 'Sin reporte',
+    respuesta: llamada.reporte_cajera || 'Sin reporte',
     estatus_auditoria: llamada.estatus_auditoria || 'Sin auditar',
     observaciones_admin: llamada.observaciones_admin ?? '',
+    observaciones: llamada.observaciones_admin ?? '',
     cajera_nombre: llamada.cajera_nombre ?? '',
     cajera_id: llamada.cajera_id ?? '',
-    llamada_registrada: Boolean(llamada.llamada_registrada),
-    fecha_registro: llamada.fecha_registro || new Date().toISOString(),
+    llamada_registrada: isRealizada,
+    estatus: estadoLabel,
+    estado: estadoLabel,
+    hora_llamada: horaLlamada,
+    fecha_llamada: fechaLlamada,
+    fecha_registro: fechaRegistro,
   };
 
   const { validColumns, missingColumns, useAliasCliente, omitGeneratedId } =
@@ -824,7 +882,7 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
   if (validColumns && validColumns.size > 0) {
     for (const [col, val] of Object.entries(candidateValues)) {
       if (!validColumns.has(col) || missingColumns.has(col)) continue;
-      if (col === 'id' && omitGeneratedId && isClientTempId(llamada.id)) {
+      if (col === 'id' && omitGeneratedId && isTemp) {
         continue;
       }
       payload[col] = val;
@@ -832,8 +890,8 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
     return payload;
   }
 
-  // Schema not yet discovered: send canonical columns plus sucursal & cajera_id,
-  // and map cliente alias if needed. Missing optional columns are stripped on retry.
+  // Schema not yet discovered: send canonical columns plus optional equivalents.
+  // Missing optional columns are stripped automatically on retry.
   const orderedKeys = [
     'id',
     'sucursal_id',
@@ -844,6 +902,7 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
     'contrato',
     'telefono',
     'monto_prestamo',
+    'monto',
     'estatus_vencimiento',
     'fecha_vencimiento',
     'reporte_cajera',
@@ -852,12 +911,16 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
     'cajera_nombre',
     'cajera_id',
     'llamada_registrada',
+    'estatus',
+    'estado',
+    'hora_llamada',
+    'fecha_llamada',
     'fecha_registro',
   ];
 
   for (const col of orderedKeys) {
     if (missingColumns.has(col)) continue;
-    if (col === 'id' && omitGeneratedId && isClientTempId(llamada.id)) {
+    if (col === 'id' && omitGeneratedId && isTemp) {
       continue;
     }
     payload[col] = candidateValues[col];
@@ -871,6 +934,11 @@ function mergeDbRowWithInput(
   dbRow: Record<string, unknown>
 ): LlamadaSucursal {
   const normalizedDb = normalizeLlamadaFromDb(dbRow);
+  const hasMontoInDb =
+    dbRow.monto_prestamo !== undefined ||
+    dbRow.monto !== undefined ||
+    dbRow.prestamo !== undefined ||
+    dbRow.importe !== undefined;
   return {
     ...orig,
     id: dbRow.id !== undefined && dbRow.id !== null ? String(dbRow.id) : orig.id,
@@ -890,10 +958,10 @@ function mergeDbRowWithInput(
       dbRow.contrato !== undefined ? normalizedDb.contrato : orig.contrato,
     telefono:
       dbRow.telefono !== undefined ? normalizedDb.telefono : orig.telefono,
-    monto_prestamo:
-      dbRow.monto_prestamo !== undefined
-        ? normalizedDb.monto_prestamo
-        : orig.monto_prestamo,
+    monto_prestamo: hasMontoInDb
+      ? normalizedDb.monto_prestamo
+      : orig.monto_prestamo,
+    monto: hasMontoInDb ? normalizedDb.monto_prestamo : orig.monto_prestamo,
     estatus_vencimiento:
       dbRow.estatus_vencimiento !== undefined
         ? normalizedDb.estatus_vencimiento
@@ -903,7 +971,7 @@ function mergeDbRowWithInput(
         ? normalizedDb.fecha_vencimiento
         : orig.fecha_vencimiento,
     reporte_cajera:
-      dbRow.reporte_cajera !== undefined
+      dbRow.reporte_cajera !== undefined || dbRow.respuesta !== undefined
         ? normalizedDb.reporte_cajera
         : orig.reporte_cajera,
     estatus_auditoria:
@@ -911,7 +979,8 @@ function mergeDbRowWithInput(
         ? normalizedDb.estatus_auditoria
         : orig.estatus_auditoria,
     observaciones_admin:
-      dbRow.observaciones_admin !== undefined
+      dbRow.observaciones_admin !== undefined ||
+      dbRow.observaciones !== undefined
         ? normalizedDb.observaciones_admin
         : orig.observaciones_admin,
     cajera_nombre:
@@ -919,9 +988,31 @@ function mergeDbRowWithInput(
         ? normalizedDb.cajera_nombre
         : orig.cajera_nombre,
     llamada_registrada:
-      dbRow.llamada_registrada !== undefined
+      dbRow.llamada_registrada !== undefined ||
+      dbRow.estatus !== undefined ||
+      dbRow.estado !== undefined
         ? normalizedDb.llamada_registrada
         : orig.llamada_registrada,
+    estatus:
+      dbRow.estatus !== undefined ||
+      dbRow.estado !== undefined ||
+      dbRow.llamada_registrada !== undefined
+        ? normalizedDb.estatus
+        : orig.estatus,
+    estado:
+      dbRow.estado !== undefined ||
+      dbRow.estatus !== undefined ||
+      dbRow.llamada_registrada !== undefined
+        ? normalizedDb.estado
+        : orig.estado,
+    hora_llamada:
+      dbRow.hora_llamada !== undefined
+        ? normalizedDb.hora_llamada
+        : orig.hora_llamada,
+    fecha_llamada:
+      dbRow.fecha_llamada !== undefined
+        ? normalizedDb.fecha_llamada
+        : orig.fecha_llamada,
     fecha_registro:
       dbRow.fecha_registro !== undefined || dbRow.created_at !== undefined
         ? normalizedDb.fecha_registro
@@ -938,7 +1029,14 @@ async function executeLlamadasWriteChunk(
   error?: string;
   schemaFailed?: boolean;
 }> {
-  for (let attempt = 0; attempt < 20; attempt++) {
+  let lastError: {
+    message?: string;
+    details?: string | null;
+    hint?: string | null;
+    code?: string;
+  } | null = null;
+
+  for (let attempt = 0; attempt < 25; attempt++) {
     const payloads = records.map(buildLlamadaPayload);
     const hasPayloadKeys = payloads.every((p) => Object.keys(p).length > 0);
     if (!hasPayloadKeys) {
@@ -946,26 +1044,63 @@ async function executeLlamadasWriteChunk(
         ok: false,
         savedPairs: [],
         schemaFailed: true,
-        error: `No quedaron columnas válidas para escribir en ${SUPABASE_TABLES.LLAMADAS}.`,
+        error: lastError
+          ? formatSupabaseError(lastError)
+          : `No quedaron columnas válidas para escribir en ${SUPABASE_TABLES.LLAMADAS}.`,
       };
     }
 
-    const hasIdInPayload = payloads.every(
-      (p) =>
-        (typeof p.id === 'string' && p.id.length > 0) ||
-        typeof p.id === 'number'
-    );
-    const useInsert =
-      llamadasSchemaCache.useInsertInsteadOfUpsert || !hasIdInPayload;
+    const isSingleExistingUpdate =
+      records.length === 1 && !isClientTempId(records[0].id);
 
-    const query = useInsert
-      ? client.from(SUPABASE_TABLES.LLAMADAS).insert(payloads).select()
-      : client
+    let data: unknown[] | null = null;
+    let error: {
+      message?: string;
+      details?: string | null;
+      hint?: string | null;
+      code?: string;
+    } | null = null;
+
+    if (isSingleExistingUpdate) {
+      const updatePayload = { ...payloads[0] };
+      delete updatePayload.id;
+      const updateRes = await client
+        .from(SUPABASE_TABLES.LLAMADAS)
+        .update(updatePayload)
+        .eq('id', toDbFilterId(records[0].id))
+        .select();
+
+      if (updateRes.error) {
+        error = updateRes.error;
+      } else if (updateRes.data && updateRes.data.length > 0) {
+        data = updateRes.data;
+      } else {
+        // Fallback if record wasn't persisted yet
+        const insertRes = await client
           .from(SUPABASE_TABLES.LLAMADAS)
-          .upsert(payloads, { onConflict: 'id' })
+          .insert(payloads[0])
           .select();
+        data = insertRes.data;
+        error = insertRes.error;
+      }
+    } else {
+      const hasIdInPayload = payloads.every(
+        (p) =>
+          (typeof p.id === 'string' && p.id.length > 0) ||
+          typeof p.id === 'number'
+      );
+      const useInsert =
+        llamadasSchemaCache.useInsertInsteadOfUpsert || !hasIdInPayload;
 
-    const { data, error } = await query;
+      const res = useInsert
+        ? await client.from(SUPABASE_TABLES.LLAMADAS).insert(payloads).select()
+        : await client
+            .from(SUPABASE_TABLES.LLAMADAS)
+            .upsert(payloads, { onConflict: 'id' })
+            .select();
+      data = res.data;
+      error = res.error;
+    }
 
     if (!error) {
       if (!data || data.length === 0) {
@@ -990,6 +1125,8 @@ async function executeLlamadasWriteChunk(
       return { ok: true, savedPairs };
     }
 
+    lastError = error;
+
     if (isRlsOrAuthError(error)) {
       return {
         ok: false,
@@ -999,7 +1136,10 @@ async function executeLlamadasWriteChunk(
     }
 
     const missingCol = extractMissingColumnFromError(error);
-    if (missingCol) {
+    if (
+      missingCol &&
+      !llamadasSchemaCache.missingColumns.has(missingCol)
+    ) {
       llamadasSchemaCache.missingColumns.add(missingCol);
       if (llamadasSchemaCache.validColumns) {
         llamadasSchemaCache.validColumns.delete(missingCol);
@@ -1058,7 +1198,9 @@ async function executeLlamadasWriteChunk(
     ok: false,
     savedPairs: [],
     schemaFailed: true,
-    error: `No se pudieron compatibilizar las columnas de ${SUPABASE_TABLES.LLAMADAS}.`,
+    error: lastError
+      ? formatSupabaseError(lastError)
+      : `No se pudieron compatibilizar las columnas de ${SUPABASE_TABLES.LLAMADAS}.`,
   };
 }
 

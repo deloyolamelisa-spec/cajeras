@@ -427,21 +427,36 @@ export default function App() {
 
   const handleUpdateLlamada = async (
     updated: LlamadaSucursal
-  ): Promise<ServiceResult> => {
+  ): Promise<ServiceResult<LlamadaSucursal>> => {
     const enriched = enrichLlamadaWithAuth(updated);
     const next = llamadas.map((l) => (l.id === enriched.id ? enriched : l));
-    setLlamadas(next);
     const res = await saveLlamada(enriched, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
-    return res;
+    if (!res.ok) {
+      if (res.error) setSyncError(`Supabase (${res.error})`);
+      return res;
+    }
+    setSyncError(null);
+    const savedRow = res.data || enriched;
+    setLlamadas((prev) =>
+      prev.map((l) => (l.id === enriched.id ? savedRow : l))
+    );
+    return { ...res, data: savedRow };
   };
 
-  const handleCreateLlamada = async (nueva: LlamadaSucursal) => {
+  const handleCreateLlamada = async (
+    nueva: LlamadaSucursal
+  ): Promise<ServiceResult<LlamadaSucursal>> => {
     const enriched = enrichLlamadaWithAuth(nueva);
     const next = [enriched, ...llamadas];
-    setLlamadas(next);
     const res = await saveLlamada(enriched, next);
-    if (!res.ok && res.error) setSyncError(`Supabase (${res.error})`);
+    if (!res.ok) {
+      if (res.error) setSyncError(`Supabase (${res.error})`);
+      return res;
+    }
+    setSyncError(null);
+    const savedRow = res.data || enriched;
+    setLlamadas((prev) => [savedRow, ...prev]);
+    return { ...res, data: savedRow };
   };
 
   const handleImportLlamadas = async (

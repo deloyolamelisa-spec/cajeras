@@ -322,16 +322,15 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     };
   }, [branchGastosRefrendos, currentMonthPrefix, todayStr, metaSucursal, sucursal]);
 
-  // KPI 4: LLAMADAS DEL MES
+  // KPI 4: LLAMADAS DE TU BASE (HOY) — sin exponer metas diarias/mensuales a cajeras
   const kpiLlamadas = useMemo(() => {
-    const metaDiaria =
-      metaSucursal?.meta_llamadas_diarias ||
-      sucursal.meta_llamadas_diarias ||
-      30;
-    const daysInMonth = new Date(
-      Date.UTC(currentYear, currentMonthNum, 0)
-    ).getUTCDate();
-    const metaMensual = metaDiaria * daysInMonth;
+    const baseHoyTotal = branchLlamadas.filter(
+      (l) => getLlamadaLocalDate(l) === todayStr
+    ).length;
+
+    const realizadasHoy = branchLlamadas.filter(
+      (l) => l.llamada_registrada && getLlamadaLocalDate(l) === todayStr
+    ).length;
 
     const registradasMes = branchLlamadas.filter(
       (l) =>
@@ -339,46 +338,27 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         getLlamadaLocalDate(l).startsWith(currentMonthPrefix)
     ).length;
 
-    const hoy = branchLlamadas.filter(
-      (l) =>
-        l.llamada_registrada && getLlamadaLocalDate(l) === todayStr
-    ).length;
-
-    const pct =
-      metaMensual > 0
-        ? Math.min(100, Math.round((registradasMes / metaMensual) * 100))
+    const pctHoy =
+      baseHoyTotal > 0
+        ? Math.min(100, Math.round((realizadasHoy / baseHoyTotal) * 1000) / 10)
         : 0;
 
     return {
+      realizadasHoy,
+      baseHoyTotal,
       registradasMes,
-      metaMensual,
-      hoy,
-      metaDiaria,
-      pct,
+      pctHoy,
     };
-  }, [
-    branchLlamadas,
-    currentYear,
-    currentMonthNum,
-    currentMonthPrefix,
-    todayStr,
-    metaSucursal,
-    sucursal,
-  ]);
+  }, [branchLlamadas, currentMonthPrefix, todayStr]);
 
   // Daily breakdown rows for current month (DÍA 1 .. DÍA currentDay)
   const desgloseDiario = useMemo(() => {
-    const metaDiaria =
-      metaSucursal?.meta_llamadas_diarias ||
-      sucursal.meta_llamadas_diarias ||
-      30;
-
     const rows: {
       day: number;
       dateStr: string;
       weekdayShort: string;
       llamadasCount: number;
-      metaLlamadas: number;
+      totalBaseDia: number;
       refrendosMonto: number;
       gastosMonto: number;
       actCompletadas: number;
@@ -398,9 +378,11 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         })
         .replace('.', '');
 
-      const llamadasCount = branchLlamadas.filter(
-        (l) => l.llamada_registrada && getLlamadaLocalDate(l) === dateStr
-      ).length;
+      const callsDia = branchLlamadas.filter(
+        (l) => getLlamadaLocalDate(l) === dateStr
+      );
+      const totalBaseDia = callsDia.length;
+      const llamadasCount = callsDia.filter((l) => l.llamada_registrada).length;
 
       const refrendosMonto = roundMoney2(
         branchGastosRefrendos
@@ -432,7 +414,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         dateStr,
         weekdayShort,
         llamadasCount,
-        metaLlamadas: metaDiaria,
+        totalBaseDia,
         refrendosMonto,
         gastosMonto,
         actCompletadas,
@@ -446,12 +428,10 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     currentMonthPrefix,
     currentYear,
     currentMonthNum,
-    todayStr,
     branchLlamadas,
     branchGastosRefrendos,
     actividades,
     tareasCatalogo,
-    metaSucursal,
     sucursal,
     currentUser.id,
     currentUser.nombre,
@@ -849,11 +829,11 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
             </div>
           </div>
 
-          {/* KPI 4: LLAMADAS DEL MES */}
+          {/* KPI 4: LLAMADAS DE TU BASE DE HOY */}
           <div className="bg-white rounded-2xl border border-[#EAE3F5] p-5 flex flex-col justify-between gap-3 shadow-[0_2px_10px_rgba(124,58,237,0.03)]">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold tracking-wider text-[#7A6B93] uppercase">
-                LLAMADAS DEL MES
+                LLAMADAS DE TU BASE (HOY)
               </span>
               <div className="h-8 w-8 rounded-xl bg-[#FFF7ED] text-[#EA580C] flex items-center justify-center">
                 <PhoneCall className="h-4 w-4" />
@@ -861,9 +841,9 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
             </div>
 
             <div className="font-mono-num text-2xl font-extrabold text-[#1F172B]">
-              {kpiLlamadas.registradasMes}
+              {kpiLlamadas.realizadasHoy}
               <span className="text-base font-semibold text-[#9D8FB5]">
-                /{kpiLlamadas.metaMensual}
+                /{kpiLlamadas.baseHoyTotal}
               </span>
             </div>
 
@@ -872,16 +852,17 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                 <div className="flex-1 h-2 rounded-full bg-[#EFE9F8] overflow-hidden">
                   <div
                     className="h-full rounded-full bg-[#7C3AED] transition-all"
-                    style={{ width: `${kpiLlamadas.pct}%` }}
+                    style={{ width: `${kpiLlamadas.pctHoy}%` }}
                   />
                 </div>
                 <span className="font-mono-num text-xs font-bold text-[#7C3AED]">
-                  {kpiLlamadas.pct}%
+                  {kpiLlamadas.pctHoy.toFixed(1)}%
                 </span>
               </div>
               <p className="text-[11px] text-[#6E5F87] leading-snug">
-                Hoy llevas {kpiLlamadas.hoy} de {kpiLlamadas.metaDiaria} ·
-                Acumulado mensual de tu base diaria
+                {kpiLlamadas.realizadasHoy} de {kpiLlamadas.baseHoyTotal} llamadas
+                de tu base de hoy ({kpiLlamadas.pctHoy.toFixed(1)}%) · Mes:{' '}
+                {kpiLlamadas.registradasMes} realizadas
               </p>
             </div>
           </div>
@@ -1157,7 +1138,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
 
               <div className="flex flex-wrap items-center gap-2">
                 <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#F5F0FF] text-[#5B21B6] border border-[#E9DDFC] font-mono-num">
-                  {row.llamadasCount}/{row.metaLlamadas} (llamadas)
+                  {row.llamadasCount}/{row.totalBaseDia} llamadas
                 </span>
                 <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#F5F0FF] text-[#5B21B6] border border-[#E9DDFC] font-mono-num">
                   {formatCurrencyClean(row.refrendosMonto)} refrendos
