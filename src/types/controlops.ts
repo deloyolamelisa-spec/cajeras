@@ -72,10 +72,18 @@ export interface TareaCatalogo {
   activa: boolean;
 }
 
+export interface PlantillaWhatsApp {
+  id: string;
+  nombre: string;
+  mensaje: string;
+  es_oficial?: boolean;
+}
+
 export interface CatalogosControlOps {
   id: string;
   tareas_obligatorias: TareaCatalogo[];
   opciones_llamada: string[];
+  plantillas_whatsapp?: PlantillaWhatsApp[];
 }
 
 export type ReporteCajeraOpcion = string;

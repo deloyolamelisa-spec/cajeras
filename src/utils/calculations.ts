@@ -183,14 +183,61 @@ export function formatPercent(value: number, decimals = 1): string {
 }
 
 export function sanitizePhoneForWhatsApp(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
-  if (digits.startsWith('52') && digits.length === 12) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('52') && digits.length >= 12) {
     return digits;
   }
   if (digits.length === 10) {
     return `52${digits}`;
   }
   return `52${digits}`;
+}
+
+export function formatAmountPlain(amount: number): string {
+  const rounded = roundMoney2(amount);
+  const hasCents = Math.abs(rounded - Math.trunc(rounded)) > 0.001;
+  return rounded.toLocaleString('es-MX', {
+    minimumFractionDigits: hasCents ? 2 : 0,
+    maximumFractionDigits: 2,
+  });
+}
+
+export function renderWhatsAppTemplate(
+  template: string,
+  item: Pick<
+    LlamadaSucursal,
+    | 'cliente_nombre'
+    | 'contrato'
+    | 'monto_prestamo'
+    | 'fecha_vencimiento'
+    | 'sucursal_nombre'
+    | 'sucursal'
+    | 'telefono'
+  >
+): string {
+  const cliente = (item.cliente_nombre || 'Cliente').trim();
+  const contrato = (item.contrato || 'S/N').trim();
+  const monto = formatAmountPlain(item.monto_prestamo);
+  const fechaVenc = (item.fecha_vencimiento || '').trim();
+  const sucursal = (item.sucursal_nombre || item.sucursal || 'Sucursal').trim();
+  const telefono = (item.telefono || '').trim();
+
+  return String(template || '')
+    .replace(/\{cliente\}/gi, cliente)
+    .replace(/\{contrato\}/gi, contrato)
+    .replace(/\{monto\}/gi, monto)
+    .replace(/\{fecha_vencimiento\}/gi, fechaVenc)
+    .replace(/\{sucursal\}/gi, sucursal)
+    .replace(/\{telefono\}/gi, telefono);
+}
+
+export function buildWhatsAppUrl(phone: string, message: string): string {
+  const cleanPhone = sanitizePhoneForWhatsApp(phone);
+  const base = `https://wa.me/${cleanPhone}`;
+  const trimmedMsg = message.trim();
+  if (!trimmedMsg) return base;
+  return `${base}?text=${encodeURIComponent(trimmedMsg)}`;
 }
 
 export function getTodayDiaSemana(): DiaSemana {

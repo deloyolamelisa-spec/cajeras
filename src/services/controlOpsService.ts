@@ -16,10 +16,12 @@ import {
   HorarioSucursalDia,
   LlamadaSucursal,
   MetaSucursal,
+  PlantillaWhatsApp,
   Sucursal,
   UsuarioControlOps,
 } from '../types/controlops';
 import {
+  DEFAULT_WHATSAPP_TEMPLATES,
   INITIAL_ACTIVIDADES,
   INITIAL_CATALOGOS,
   INITIAL_GASTOS_REFRENDOS,
@@ -406,15 +408,49 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
       writeLocal(STORAGE_KEYS.USUARIOS, usuarios);
     }
 
+    const parseWhatsappTemplates = (
+      rows: CatalogosControlOps[],
+      mainRow?: CatalogosControlOps
+    ): PlantillaWhatsApp[] => {
+      if (
+        mainRow &&
+        Array.isArray(mainRow.plantillas_whatsapp) &&
+        mainRow.plantillas_whatsapp.length > 0
+      ) {
+        return mainRow.plantillas_whatsapp;
+      }
+      const waRow = rows.find((r) => r.id === 'cat-whatsapp');
+      if (waRow && Array.isArray(waRow.opciones_llamada)) {
+        for (const entry of waRow.opciones_llamada) {
+          if (typeof entry === 'string' && entry.trim().startsWith('[')) {
+            try {
+              const parsed = JSON.parse(entry) as PlantillaWhatsApp[];
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                return parsed;
+              }
+            } catch {
+              // Ignore malformed JSON
+            }
+          }
+        }
+      }
+      return DEFAULT_WHATSAPP_TEMPLATES;
+    };
+
     let catalogos: CatalogosControlOps;
     if (!catalogosRes.error && catalogosRes.data) {
-      if (catalogosRes.data.length > 0) {
-        const rawCat = catalogosRes.data[0] as CatalogosControlOps;
+      const catRows = catalogosRes.data as CatalogosControlOps[];
+      if (catRows.length > 0) {
+        const rawCat =
+          catRows.find((r) => r.id === 'cat-global') ||
+          catRows.find((r) => r.id !== 'cat-whatsapp') ||
+          catRows[0];
         catalogos = {
           ...rawCat,
           tareas_obligatorias: ensureBaseDailyCatalogTasks(
             rawCat.tareas_obligatorias
           ),
+          plantillas_whatsapp: parseWhatsappTemplates(catRows, rawCat),
         };
         writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
       } else {
@@ -434,12 +470,17 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
           tableWarnings.push(
             `Seed ${SUPABASE_TABLES.CATALOGOS}: ${formatSupabaseError(seedError)}`
           );
-          const localCat = readLocal(STORAGE_KEYS.CATALOGOS, seedCatalog);
+          const localCat = readLocal(STORAGE_KEYS.CATALOGOS, INITIAL_CATALOGOS);
           catalogos = {
             ...localCat,
             tareas_obligatorias: ensureBaseDailyCatalogTasks(
               localCat.tareas_obligatorias
             ),
+            plantillas_whatsapp:
+              localCat.plantillas_whatsapp &&
+              localCat.plantillas_whatsapp.length > 0
+                ? localCat.plantillas_whatsapp
+                : DEFAULT_WHATSAPP_TEMPLATES,
           };
         } else {
           const seededRow =
@@ -451,6 +492,7 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
             tareas_obligatorias: ensureBaseDailyCatalogTasks(
               seededRow.tareas_obligatorias
             ),
+            plantillas_whatsapp: DEFAULT_WHATSAPP_TEMPLATES,
           };
           remoteCounts[SUPABASE_TABLES.CATALOGOS] = 1;
           writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
@@ -463,6 +505,11 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
         tareas_obligatorias: ensureBaseDailyCatalogTasks(
           localCat.tareas_obligatorias
         ),
+        plantillas_whatsapp:
+          localCat.plantillas_whatsapp &&
+          localCat.plantillas_whatsapp.length > 0
+            ? localCat.plantillas_whatsapp
+            : DEFAULT_WHATSAPP_TEMPLATES,
       };
     }
 
@@ -2798,6 +2845,8 @@ export async function deleteUsuarioRecord(
   }
 }
 
+let catalogosHasPlantillasCol: boolean | null = null;
+
 export async function saveCatalogos(
   catalogos: CatalogosControlOps
 ): Promise<ServiceResult> {
@@ -2805,14 +2854,49 @@ export async function saveCatalogos(
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
-    const payload = {
+    const basePayload = {
       id: catalogos.id || 'cat-global',
       tareas_obligatorias: catalogos.tareas_obligatorias ?? [],
       opciones_llamada: catalogos.opciones_llamada ?? [],
     };
+    const hasPlantillas =
+      Array.isArray(catalogos.plantillas_whatsapp) &&
+      catalogos.plantillas_whatsapp.length > 0;
+
+    if (hasPlantillas && catalogosHasPlantillasCol !== false) {
+      const extendedPayload = {
+        ...basePayload,
+        plantillas_whatsapp: catalogos.plantillas_whatsapp,
+      };
+      const extRes = await conn.client
+        .from(SUPABASE_TABLES.CATALOGOS)
+        .upsert(extendedPayload, { onConflict: 'id' })
+        .select();
+      if (!extRes.error) {
+        if (!extRes.data || extRes.data.length === 0) {
+          return {
+            ok: false,
+            error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.CATALOGOS} (revisa RLS).`,
+          };
+        }
+        catalogosHasPlantillasCol = true;
+        writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
+        return { ok: true };
+      }
+      const missingCol = extractMissingColumnFromError(extRes.error);
+      if (missingCol === 'plantillas_whatsapp') {
+        catalogosHasPlantillasCol = false;
+      } else {
+        return {
+          ok: false,
+          error: `Error en ${SUPABASE_TABLES.CATALOGOS}: ${formatSupabaseError(extRes.error)}`,
+        };
+      }
+    }
+
     const { data, error } = await conn.client
       .from(SUPABASE_TABLES.CATALOGOS)
-      .upsert(payload, { onConflict: 'id' })
+      .upsert(basePayload, { onConflict: 'id' })
       .select();
     if (error) {
       return {
@@ -2826,6 +2910,25 @@ export async function saveCatalogos(
         error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.CATALOGOS} (revisa RLS).`,
       };
     }
+
+    if (hasPlantillas && catalogosHasPlantillasCol === false) {
+      const waPayload = {
+        id: 'cat-whatsapp',
+        tareas_obligatorias: [],
+        opciones_llamada: [JSON.stringify(catalogos.plantillas_whatsapp)],
+      };
+      const waRes = await conn.client
+        .from(SUPABASE_TABLES.CATALOGOS)
+        .upsert(waPayload, { onConflict: 'id' })
+        .select();
+      if (waRes.error) {
+        return {
+          ok: false,
+          error: `Error al guardar plantillas de WhatsApp en ${SUPABASE_TABLES.CATALOGOS}: ${formatSupabaseError(waRes.error)}`,
+        };
+      }
+    }
+
     writeLocal(STORAGE_KEYS.CATALOGOS, catalogos);
     return { ok: true };
   } catch (err) {

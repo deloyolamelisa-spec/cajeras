@@ -14,27 +14,33 @@ import {
   Download,
   FileSpreadsheet,
   AlertCircle,
+  Pencil,
+  RotateCcw,
+  Star,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
   EstatusAuditoriaLlamada,
   EstatusVencimiento,
   LlamadaSucursal,
+  PlantillaWhatsApp,
   ReporteCajeraOpcion,
   RolUsuario,
   Sucursal,
 } from '../types/controlops';
 import {
   addDaysYYYYMMDD,
+  buildWhatsAppUrl,
   extractLlamadaBatchInfo,
   formatCurrencyClean,
   getDailyBatchSummaryForBranch,
   getLlamadaLocalDate,
   getTodayLocalYYYYMMDD,
   parseMoneyInput,
-  sanitizePhoneForWhatsApp,
+  renderWhatsAppTemplate,
   toLocalYYYYMMDD,
 } from '../utils/calculations';
+import { DEFAULT_WHATSAPP_TEMPLATES } from '../data/mockData';
 import { ServiceResult } from '../services/controlOpsService';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
@@ -46,6 +52,10 @@ interface LlamadasViewProps {
   currentUserId?: string;
   currentUserName?: string;
   opcionesReporte: string[];
+  plantillasWhatsApp?: PlantillaWhatsApp[];
+  onSavePlantillasWhatsApp?: (
+    plantillas: PlantillaWhatsApp[]
+  ) => Promise<ServiceResult>;
   onUpdateLlamada: (updated: LlamadaSucursal) => Promise<ServiceResult | void>;
   onCreateLlamada: (nueva: LlamadaSucursal) => Promise<void>;
   onImportLlamadas: (nuevas: LlamadaSucursal[]) => Promise<ServiceResult | void>;
@@ -99,6 +109,8 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   currentUserId,
   currentUserName,
   opcionesReporte,
+  plantillasWhatsApp,
+  onSavePlantillasWhatsApp,
   onUpdateLlamada,
   onCreateLlamada,
   onImportLlamadas,
@@ -122,7 +134,10 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     isCajera ? 'hoy' : 'todos'
   );
   const [filterVencimiento, setFilterVencimiento] = useState<string>('todos');
-  const [filterMonto, setFilterMonto] = useState<string>('todos');
+  const [venceDesde, setVenceDesde] = useState<string>('');
+  const [venceHasta, setVenceHasta] = useState<string>('');
+  const [montoMin, setMontoMin] = useState<string>('');
+  const [montoMax, setMontoMax] = useState<string>('');
   const [sortBy, setSortBy] = useState<string>('recientes');
   const [draftObs, setDraftObs] = useState<Record<string, string>>({});
   const [savedToastId, setSavedToastId] = useState<string | null>(null);
@@ -130,6 +145,51 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   const [rowRegisterToastId, setRowRegisterToastId] = useState<string | null>(
     null
   );
+
+  // WhatsApp Templates & Row Personalization state
+  const effectiveTemplates: PlantillaWhatsApp[] = useMemo(() => {
+    if (plantillasWhatsApp && plantillasWhatsApp.length > 0) {
+      return plantillasWhatsApp;
+    }
+    return DEFAULT_WHATSAPP_TEMPLATES;
+  }, [plantillasWhatsApp]);
+
+  const officialTemplate = useMemo(
+    () =>
+      effectiveTemplates.find((t) => t.es_oficial) || effectiveTemplates[0],
+    [effectiveTemplates]
+  );
+
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
+    () => officialTemplate?.id || 'wa-oficial'
+  );
+  useEffect(() => {
+    if (!effectiveTemplates.some((t) => t.id === selectedTemplateId)) {
+      setSelectedTemplateId(officialTemplate?.id || effectiveTemplates[0]?.id || 'wa-oficial');
+    }
+  }, [effectiveTemplates, officialTemplate, selectedTemplateId]);
+
+  const activeTemplate = useMemo(
+    () =>
+      effectiveTemplates.find((t) => t.id === selectedTemplateId) ||
+      officialTemplate,
+    [effectiveTemplates, selectedTemplateId, officialTemplate]
+  );
+
+  const [showWaEditor, setShowWaEditor] = useState(false);
+  const [waTemplatesDraft, setWaTemplatesDraft] = useState<PlantillaWhatsApp[]>(
+    effectiveTemplates
+  );
+  const [editingWaTemplateId, setEditingWaTemplateId] = useState<string>(
+    officialTemplate?.id || effectiveTemplates[0]?.id || 'wa-oficial'
+  );
+  const [savingWaTemplates, setSavingWaTemplates] = useState(false);
+  const [waSaveFeedback, setWaSaveFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [openRowWaId, setOpenRowWaId] = useState<string | null>(null);
+  const [rowWaDrafts, setRowWaDrafts] = useState<Record<string, string>>({});
   const [showNewModal, setShowNewModal] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<LlamadaSucursal | null>(
     null
@@ -263,6 +323,17 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
   const filteredLlamadas = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const soonLimit = addDaysYYYYMMDD(todayStr, 3);
+    const hasMinMonto = montoMin.trim() !== '';
+    const hasMaxMonto = montoMax.trim() !== '';
+    const minVal = hasMinMonto ? parseMoneyInput(montoMin) : 0;
+    const maxVal = hasMaxMonto ? parseMoneyInput(montoMax) : Number.POSITIVE_INFINITY;
+    const rawVDesde = venceDesde.trim();
+    const rawVHasta = venceHasta.trim();
+    const vStart =
+      rawVDesde && rawVHasta && rawVDesde > rawVHasta ? rawVHasta : rawVDesde;
+    const vEnd =
+      rawVDesde && rawVHasta && rawVDesde > rawVHasta ? rawVDesde : rawVHasta;
 
     const list = scopedLlamadas.filter((item) => {
       if (filterFecha === 'hoy' && getLlamadaLocalDate(item) !== todayStr) {
@@ -286,21 +357,36 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
         }
       }
 
-      if (
-        filterVencimiento !== 'todos' &&
-        item.estatus_vencimiento !== filterVencimiento
-      ) {
-        return false;
+      if (filterVencimiento !== 'todos') {
+        const fv = (item.fecha_vencimiento || '').slice(0, 10);
+        if (filterVencimiento === 'Vencido') {
+          if (!(fv < todayStr || item.estatus_vencimiento === 'Vencido')) {
+            return false;
+          }
+        } else if (filterVencimiento === 'vencen_hoy') {
+          if (fv !== todayStr) return false;
+        } else if (filterVencimiento === 'Por vencer') {
+          const isSoonByDate = Boolean(fv && fv > todayStr && fv <= soonLimit);
+          if (!isSoonByDate && item.estatus_vencimiento !== 'Por vencer') {
+            return false;
+          }
+        } else if (filterVencimiento === 'Al corriente') {
+          if (item.estatus_vencimiento !== 'Al corriente' && !(fv > soonLimit)) {
+            return false;
+          }
+        }
       }
 
-      if (filterMonto === 'menor_5k' && item.monto_prestamo >= 5000) return false;
-      if (
-        filterMonto === 'entre_5k_15k' &&
-        (item.monto_prestamo < 5000 || item.monto_prestamo > 15000)
-      ) {
-        return false;
+      if (vStart || vEnd) {
+        const fv = (item.fecha_vencimiento || '').slice(0, 10);
+        if (!fv) return false;
+        if (vStart && fv < vStart) return false;
+        if (vEnd && fv > vEnd) return false;
       }
-      if (filterMonto === 'mayor_15k' && item.monto_prestamo <= 15000) return false;
+
+      const monto = Number(item.monto_prestamo) || 0;
+      if (hasMinMonto && monto < minVal) return false;
+      if (hasMaxMonto && monto > maxVal) return false;
 
       return true;
     });
@@ -322,10 +408,81 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     searchQuery,
     filterAuditoria,
     filterVencimiento,
-    filterMonto,
+    venceDesde,
+    venceHasta,
+    montoMin,
+    montoMax,
     sortBy,
     canAuditCalls,
   ]);
+
+  const hasActiveFilters = Boolean(
+    searchQuery ||
+      filterAuditoria !== 'todos' ||
+      filterVencimiento !== 'todos' ||
+      venceDesde ||
+      venceHasta ||
+      montoMin.trim() !== '' ||
+      montoMax.trim() !== ''
+  );
+
+  const handleClearFilters = () => {
+    setSearchQuery('');
+    setFilterAuditoria('todos');
+    setFilterVencimiento('todos');
+    setVenceDesde('');
+    setVenceHasta('');
+    setMontoMin('');
+    setMontoMax('');
+  };
+
+  const openCreatorWaEditor = () => {
+    setWaTemplatesDraft(effectiveTemplates.map((t) => ({ ...t })));
+    setEditingWaTemplateId(activeTemplate?.id || effectiveTemplates[0]?.id || 'wa-oficial');
+    setWaSaveFeedback(null);
+    setShowWaEditor((prev) => !prev);
+  };
+
+  const handleSaveCreatorWaTemplates = async () => {
+    if (!onSavePlantillasWhatsApp) return;
+    const cleaned = waTemplatesDraft
+      .map((t) => ({
+        ...t,
+        nombre: t.nombre.trim() || 'Plantilla WhatsApp',
+        mensaje: t.mensaje.trim(),
+      }))
+      .filter((t) => t.mensaje.length > 0);
+    if (cleaned.length === 0) {
+      setWaSaveFeedback({
+        type: 'error',
+        message: 'Escribe al menos una plantilla de mensaje con texto válido.',
+      });
+      return;
+    }
+    if (!cleaned.some((t) => t.es_oficial)) {
+      cleaned[0] = { ...cleaned[0], es_oficial: true };
+    }
+    setSavingWaTemplates(true);
+    setWaSaveFeedback(null);
+    try {
+      const res = await onSavePlantillasWhatsApp(cleaned);
+      if (!res.ok) {
+        setWaSaveFeedback({
+          type: 'error',
+          message: res.error || 'No se pudieron guardar las plantillas en Supabase.',
+        });
+        return;
+      }
+      setWaTemplatesDraft(cleaned);
+      setWaSaveFeedback({
+        type: 'success',
+        message:
+          'Plantilla oficial y opciones guardadas en Supabase para todas las sucursales.',
+      });
+    } finally {
+      setSavingWaTemplates(false);
+    }
+  };
 
   const handleSaveObservation = async (item: LlamadaSucursal) => {
     const obs =
@@ -850,8 +1007,8 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
         </div>
       )}
 
-      {/* Search & Multi-Filters */}
-      <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 md:p-5 space-y-3">
+      {/* Search & Multi-Filters (Advanced Expiration & Loan Amount Filters) */}
+      <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 md:p-5 space-y-3.5">
         <div
           className={`grid grid-cols-1 md:grid-cols-2 gap-3 ${
             canFilterBranch && onSelectSucursal ? 'xl:grid-cols-6' : 'xl:grid-cols-5'
@@ -923,43 +1080,367 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
           </select>
 
           <select
-            aria-label="Filtrar por vencimiento"
-            value={filterVencimiento}
-            onChange={(e) => setFilterVencimiento(e.target.value)}
+            aria-label="Ordenar lista"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
             className="px-3 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#8B5CF6]"
           >
-            <option value="todos">Vencimiento: Todos</option>
-            <option value="Vencido">Vencido</option>
-            <option value="Por vencer">Por vencer</option>
-            <option value="Al corriente">Al corriente</option>
+            <option value="recientes">Orden: Recientes</option>
+            <option value="mayor_monto">Mayor monto</option>
+            <option value="menor_monto">Menor monto</option>
+            <option value="vencimiento">Próximo vencimiento</option>
           </select>
+        </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <select
-              aria-label="Filtrar por monto"
-              value={filterMonto}
-              onChange={(e) => setFilterMonto(e.target.value)}
-              className="px-2.5 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#8B5CF6]"
-            >
-              <option value="todos">Monto: Todos</option>
-              <option value="menor_5k">&lt; $5,000</option>
-              <option value="entre_5k_15k">$5k - $15k</option>
-              <option value="mayor_15k">&gt; $15,000</option>
-            </select>
+        {/* Advanced Expiration Date Range & Custom Loan Amount Range */}
+        <div className="pt-3 border-t border-[#F1ECF9] flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-semibold text-[#6E5F87] mr-1">
+              Vencimiento:
+            </span>
+            {(
+              [
+                { id: 'todos', label: 'Todos' },
+                { id: 'Vencido', label: 'Vencidos' },
+                { id: 'vencen_hoy', label: 'Vencen hoy' },
+                { id: 'Por vencer', label: 'Próximos a vencer' },
+                { id: 'Al corriente', label: 'Al corriente' },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setFilterVencimiento(opt.id)}
+                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-colors ${
+                  filterVencimiento === opt.id
+                    ? 'bg-[#7C3AED] text-white'
+                    : 'bg-[#FAF8FC] text-[#55476E] border border-[#E6DDF5] hover:bg-[#F3ECFC]'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
 
-            <select
-              aria-label="Ordenar lista"
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-              className="px-2.5 py-2 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-medium text-[#1F172B] focus:outline-none focus:border-[#8B5CF6]"
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="inline-flex items-center gap-1.5 text-[11px] text-[#6E5F87]">
+              <span>Vence desde</span>
+              <input
+                type="date"
+                aria-label="Vence desde"
+                value={venceDesde}
+                onChange={(e) => setVenceDesde(e.target.value)}
+                className="px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-mono-num text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+              />
+            </label>
+            <label className="inline-flex items-center gap-1.5 text-[11px] text-[#6E5F87]">
+              <span>Vence hasta</span>
+              <input
+                type="date"
+                aria-label="Vence hasta"
+                value={venceHasta}
+                onChange={(e) => setVenceHasta(e.target.value)}
+                className="px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-mono-num text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+              />
+            </label>
+            <label className="inline-flex items-center gap-1.5 text-[11px] text-[#6E5F87]">
+              <span>Monto mín. ($)</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                aria-label="Monto mínimo"
+                placeholder="Ej. 1000"
+                value={montoMin}
+                onChange={(e) => setMontoMin(e.target.value)}
+                className="w-24 px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-mono-num text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+              />
+            </label>
+            <label className="inline-flex items-center gap-1.5 text-[11px] text-[#6E5F87]">
+              <span>Monto máx. ($)</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                aria-label="Monto máximo"
+                placeholder="Ej. 5000"
+                value={montoMax}
+                onChange={(e) => setMontoMax(e.target.value)}
+                className="w-24 px-2.5 py-1.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-mono-num text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={handleClearFilters}
+              disabled={!hasActiveFilters}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-[#FBCFE8] bg-[#FDF2F8] hover:bg-[#FCE7F3] text-[11px] font-semibold text-[#BE185D] disabled:opacity-45 disabled:cursor-not-allowed transition-colors"
             >
-              <option value="recientes">Recientes</option>
-              <option value="mayor_monto">Mayor monto</option>
-              <option value="menor_monto">Menor monto</option>
-              <option value="vencimiento">Vencimiento</option>
-            </select>
+              <RotateCcw className="h-3 w-3" />
+              Limpiar filtros
+            </button>
           </div>
         </div>
+      </section>
+
+      {/* Dynamic WhatsApp Message Template Bar & Creator Editor */}
+      <section className="bg-white rounded-2xl border border-[#EAE3F5] p-4 md:p-5 space-y-3">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+            <div className="h-8 w-8 rounded-xl bg-[#FDF2F8] text-[#DB2777] flex items-center justify-center shrink-0">
+              <MessageCircle className="h-4 w-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-bold text-[#1F172B]">
+                  Plantilla de WhatsApp activa:
+                </span>
+                <select
+                  aria-label="Seleccionar plantilla de WhatsApp"
+                  value={activeTemplate?.id || ''}
+                  onChange={(e) => setSelectedTemplateId(e.target.value)}
+                  className="px-2.5 py-1 rounded-lg border border-[#E6DDF5] bg-[#FAF8FC] text-xs font-semibold text-[#5B21B6] focus:outline-none focus:border-[#7C3AED]"
+                >
+                  {effectiveTemplates.map((tpl) => (
+                    <option key={tpl.id} value={tpl.id}>
+                      {tpl.nombre}
+                      {tpl.es_oficial ? ' (Oficial)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-[11px] text-[#7A6B93] truncate max-w-2xl mt-0.5">
+                {activeTemplate?.mensaje}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {isCreador ? (
+              <button
+                type="button"
+                onClick={openCreatorWaEditor}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-[#FAF7FE] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#DDD6FE] transition-colors"
+              >
+                <Pencil className="h-3.5 w-3.5 text-[#DB2777]" />
+                {showWaEditor
+                  ? 'Ocultar editor oficial'
+                  : 'Configurar plantilla oficial (WhatsApp)'}
+              </button>
+            ) : (
+              <span className="text-[11px] text-[#7A6B93]">
+                Puedes personalizar el mensaje directo en cada cliente antes de enviar.
+              </span>
+            )}
+          </div>
+        </div>
+
+        {isCreador && showWaEditor && (
+          <div className="pt-3 border-t border-[#F1ECF9] space-y-4">
+            {waSaveFeedback && (
+              <div
+                role="status"
+                className={`rounded-xl px-3.5 py-2.5 text-xs font-semibold border ${
+                  waSaveFeedback.type === 'success'
+                    ? 'bg-[#F0FDF4] border-[#BBF7D0] text-[#15803D]'
+                    : 'bg-[#FFF1F2] border-[#FECDD3] text-[#BE123C]'
+                }`}
+              >
+                {waSaveFeedback.message}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {waTemplatesDraft.map((tpl) => {
+                  const isEditing = tpl.id === editingWaTemplateId;
+                  return (
+                    <button
+                      key={tpl.id}
+                      type="button"
+                      onClick={() => setEditingWaTemplateId(tpl.id)}
+                      className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                        isEditing
+                          ? 'bg-[#7C3AED] text-white'
+                          : 'bg-[#FAF8FC] text-[#55476E] border border-[#E6DDF5] hover:bg-[#F3ECFC]'
+                      }`}
+                    >
+                      {tpl.es_oficial && (
+                        <Star className="h-3 w-3 fill-current" />
+                      )}
+                      {tpl.nombre}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const newId = `wa-${Date.now()}`;
+                    const nextTpl: PlantillaWhatsApp = {
+                      id: newId,
+                      nombre: `Opción ${waTemplatesDraft.length + 1}`,
+                      mensaje:
+                        'Hola {cliente}, te recordamos tu contrato {contrato} por ${monto} con fecha de vencimiento {fecha_vencimiento}.',
+                      es_oficial: false,
+                    };
+                    setWaTemplatesDraft((prev) => [...prev, nextTpl]);
+                    setEditingWaTemplateId(newId);
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-[#FDF2F8] text-[#BE185D] border border-[#FBCFE8] hover:bg-[#FCE7F3]"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Nueva opción
+                </button>
+              </div>
+
+              <button
+                type="button"
+                disabled={savingWaTemplates}
+                onClick={handleSaveCreatorWaTemplates}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
+              >
+                <Save className="h-3.5 w-3.5" />
+                {savingWaTemplates
+                  ? 'Guardando...'
+                  : 'Guardar plantillas en Supabase'}
+              </button>
+            </div>
+
+            {(() => {
+              const currentDraft =
+                waTemplatesDraft.find((t) => t.id === editingWaTemplateId) ||
+                waTemplatesDraft[0];
+              if (!currentDraft) return null;
+              const sampleClient = filteredLlamadas[0] ||
+                scopedLlamadas[0] || {
+                  cliente_nombre: 'Laura Patricia Mendoza',
+                  contrato: 'CTR-2026-5010',
+                  monto_prestamo: 8500,
+                  fecha_vencimiento: todayStr,
+                  sucursal_nombre: activeBranchObj?.nombre || 'Sucursal Centro',
+                  sucursal: activeBranchObj?.nombre || 'Sucursal Centro',
+                  telefono: '5512345678',
+                };
+              const updateCurrentDraft = (patch: Partial<PlantillaWhatsApp>) => {
+                setWaTemplatesDraft((prev) =>
+                  prev.map((t) =>
+                    t.id === currentDraft.id ? { ...t, ...patch } : t
+                  )
+                );
+              };
+
+              return (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 bg-[#FAF8FC] border border-[#EAE3F5] rounded-xl p-4">
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="text"
+                        value={currentDraft.nombre}
+                        onChange={(e) =>
+                          updateCurrentDraft({ nombre: e.target.value })
+                        }
+                        placeholder="Nombre de la plantilla"
+                        className="flex-1 min-w-[180px] px-3 py-1.5 rounded-lg border border-[#E6DDF5] bg-white text-xs font-semibold text-[#1F172B]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setWaTemplatesDraft((prev) =>
+                            prev.map((t) => ({
+                              ...t,
+                              es_oficial: t.id === currentDraft.id,
+                            }))
+                          )
+                        }
+                        className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border ${
+                          currentDraft.es_oficial
+                            ? 'bg-[#ECFDF5] border-[#A7F3D0] text-[#15803D]'
+                            : 'bg-white border-[#E6DDF5] text-[#6E5F87] hover:bg-[#F3ECFC]'
+                        }`}
+                      >
+                        <Star className="h-3 w-3" />
+                        {currentDraft.es_oficial
+                          ? 'Plantilla oficial'
+                          : 'Marcar oficial'}
+                      </button>
+                      {waTemplatesDraft.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const remaining = waTemplatesDraft.filter(
+                              (t) => t.id !== currentDraft.id
+                            );
+                            if (
+                              currentDraft.es_oficial &&
+                              remaining.length > 0
+                            ) {
+                              remaining[0] = {
+                                ...remaining[0],
+                                es_oficial: true,
+                              };
+                            }
+                            setWaTemplatesDraft(remaining);
+                            if (remaining[0]) {
+                              setEditingWaTemplateId(remaining[0].id);
+                            }
+                          }}
+                          className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
+                          title="Eliminar esta opción"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] font-medium text-[#6E5F87]">
+                        Variables:
+                      </span>
+                      {[
+                        '{cliente}',
+                        '{contrato}',
+                        '{monto}',
+                        '{fecha_vencimiento}',
+                        '{sucursal}',
+                      ].map((variable) => (
+                        <button
+                          key={variable}
+                          type="button"
+                          onClick={() =>
+                            updateCurrentDraft({
+                              mensaje: `${currentDraft.mensaje}${currentDraft.mensaje.endsWith(' ') || currentDraft.mensaje === '' ? '' : ' '}${variable}`,
+                            })
+                          }
+                          className="px-2 py-0.5 rounded-md bg-white border border-[#DDD6FE] text-[11px] font-mono-num font-semibold text-[#5B21B6] hover:bg-[#F3ECFC]"
+                        >
+                          + {variable}
+                        </button>
+                      ))}
+                    </div>
+
+                    <textarea
+                      rows={3}
+                      value={currentDraft.mensaje}
+                      onChange={(e) =>
+                        updateCurrentDraft({ mensaje: e.target.value })
+                      }
+                      placeholder="Redacta el mensaje oficial usando {cliente}, {contrato}, {monto}, {fecha_vencimiento}..."
+                      className="w-full px-3 py-2 rounded-xl border border-[#E6DDF5] bg-white text-xs text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+                    />
+                  </div>
+
+                  <div className="rounded-xl bg-white border border-[#EAE3F5] p-3.5 space-y-2">
+                    <div className="text-[11px] font-bold text-[#5B21B6] uppercase tracking-wider">
+                      Vista previa en vivo ({sampleClient.cliente_nombre})
+                    </div>
+                    <p className="text-xs text-[#1F172B] whitespace-pre-wrap leading-relaxed bg-[#F8F6FB] rounded-lg p-3 border border-[#F1ECF9]">
+                      {renderWhatsAppTemplate(currentDraft.mensaje, sampleClient)}
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
       </section>
 
       {/* Client Calls Table / Cards */}
@@ -968,18 +1449,10 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
           <span className="text-xs font-semibold text-[#55476E]">
             Mostrando {filteredLlamadas.length} cliente(s)
           </span>
-          {(searchQuery ||
-            filterAuditoria !== 'todos' ||
-            filterVencimiento !== 'todos' ||
-            filterMonto !== 'todos') && (
+          {hasActiveFilters && (
             <button
               type="button"
-              onClick={() => {
-                setSearchQuery('');
-                setFilterAuditoria('todos');
-                setFilterVencimiento('todos');
-                setFilterMonto('todos');
-              }}
+              onClick={handleClearFilters}
               className="text-xs font-medium text-[#DB2777] hover:underline"
             >
               Limpiar filtros
@@ -1063,96 +1536,214 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                   <div
                     className={`${
                       canAuditCalls ? 'xl:col-span-2' : 'xl:col-span-3'
-                    } flex flex-wrap items-center gap-2`}
+                    } space-y-2`}
                   >
                     {isCajera ? (
                       <>
-                        <button
-                          type="button"
-                          disabled={registeringRowId === item.id}
-                          onClick={async () => {
-                            if (item.llamada_registrada) return;
-                            setRegisteringRowId(item.id);
-                            await onUpdateLlamada({
-                              ...item,
-                              sucursal: item.sucursal || item.sucursal_nombre,
-                              cajera_nombre:
-                                currentUserName || item.cajera_nombre,
-                              cajera_id: currentUserId || item.cajera_id,
-                              llamada_registrada: true,
-                              fecha_registro:
-                                item.fecha_registro || new Date().toISOString(),
-                            });
-                            setRegisteringRowId(null);
-                            setRowRegisterToastId(item.id);
-                            setTimeout(
-                              () =>
-                                setRowRegisterToastId((prev) =>
-                                  prev === item.id ? null : prev
-                                ),
-                              2000
-                            );
-                          }}
-                          className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
-                            item.llamada_registrada
-                              ? 'bg-[#ECFDF5] text-[#15803D] border border-[#A7F3D0] cursor-default'
-                              : 'bg-[#7C3AED] hover:bg-[#6D28D9] text-white shadow-xs disabled:opacity-60'
-                          }`}
-                        >
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          {registeringRowId === item.id
-                            ? 'Guardando...'
-                            : item.llamada_registrada
-                              ? rowRegisterToastId === item.id
-                                ? 'Guardada'
-                                : 'Llamada registrada'
-                              : 'Registrar llamada'}
-                        </button>
-                        <a
-                          href={`tel:${item.telefono}`}
-                          onClick={() => {
-                            if (!item.llamada_registrada) {
-                              void onUpdateLlamada({
-                                ...item,
-                                sucursal:
-                                  item.sucursal || item.sucursal_nombre,
-                                cajera_nombre:
-                                  currentUserName || item.cajera_nombre,
-                                cajera_id: currentUserId || item.cajera_id,
-                                llamada_registrada: true,
-                              });
-                            }
-                          }}
-                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#F3ECFC] hover:bg-[#E7DAFA] text-[#5B21B6] transition-colors whitespace-nowrap"
-                        >
-                          <Phone className="h-3.5 w-3.5" />
-                          Llamar
-                        </a>
-                        <a
-                          href={`https://wa.me/${sanitizePhoneForWhatsApp(item.telefono)}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={() => {
-                            if (!item.llamada_registrada) {
-                              void onUpdateLlamada({
-                                ...item,
-                                sucursal:
-                                  item.sucursal || item.sucursal_nombre,
-                                cajera_nombre:
-                                  currentUserName || item.cajera_nombre,
-                                cajera_id: currentUserId || item.cajera_id,
-                                llamada_registrada: true,
-                              });
-                            }
-                          }}
-                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#FDF2F8] hover:bg-[#FCE7F3] text-[#BE185D] border border-[#FBCFE8] transition-colors whitespace-nowrap"
-                        >
-                          <MessageCircle className="h-3.5 w-3.5" />
-                          WhatsApp
-                        </a>
+                        {(() => {
+                          const defaultRendered = renderWhatsAppTemplate(
+                            activeTemplate?.mensaje || '',
+                            item
+                          );
+                          const effectiveWaMsg =
+                            rowWaDrafts[item.id] !== undefined
+                              ? rowWaDrafts[item.id]
+                              : defaultRendered;
+                          const waHref = buildWhatsAppUrl(
+                            item.telefono,
+                            effectiveWaMsg
+                          );
+                          const isEditingRowWa = openRowWaId === item.id;
+
+                          return (
+                            <>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                  type="button"
+                                  disabled={registeringRowId === item.id}
+                                  onClick={async () => {
+                                    if (item.llamada_registrada) return;
+                                    setRegisteringRowId(item.id);
+                                    await onUpdateLlamada({
+                                      ...item,
+                                      sucursal:
+                                        item.sucursal || item.sucursal_nombre,
+                                      cajera_nombre:
+                                        currentUserName || item.cajera_nombre,
+                                      cajera_id: currentUserId || item.cajera_id,
+                                      llamada_registrada: true,
+                                      fecha_registro:
+                                        item.fecha_registro ||
+                                        new Date().toISOString(),
+                                    });
+                                    setRegisteringRowId(null);
+                                    setRowRegisterToastId(item.id);
+                                    setTimeout(
+                                      () =>
+                                        setRowRegisterToastId((prev) =>
+                                          prev === item.id ? null : prev
+                                        ),
+                                      2000
+                                    );
+                                  }}
+                                  className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
+                                    item.llamada_registrada
+                                      ? 'bg-[#ECFDF5] text-[#15803D] border border-[#A7F3D0] cursor-default'
+                                      : 'bg-[#7C3AED] hover:bg-[#6D28D9] text-white shadow-xs disabled:opacity-60'
+                                  }`}
+                                >
+                                  <CheckCircle2 className="h-3.5 w-3.5" />
+                                  {registeringRowId === item.id
+                                    ? 'Guardando...'
+                                    : item.llamada_registrada
+                                      ? rowRegisterToastId === item.id
+                                        ? 'Guardada'
+                                        : 'Llamada registrada'
+                                      : 'Registrar llamada'}
+                                </button>
+                                <a
+                                  href={`tel:${item.telefono}`}
+                                  onClick={() => {
+                                    if (!item.llamada_registrada) {
+                                      void onUpdateLlamada({
+                                        ...item,
+                                        sucursal:
+                                          item.sucursal || item.sucursal_nombre,
+                                        cajera_nombre:
+                                          currentUserName || item.cajera_nombre,
+                                        cajera_id:
+                                          currentUserId || item.cajera_id,
+                                        llamada_registrada: true,
+                                      });
+                                    }
+                                  }}
+                                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#F3ECFC] hover:bg-[#E7DAFA] text-[#5B21B6] transition-colors whitespace-nowrap"
+                                >
+                                  <Phone className="h-3.5 w-3.5" />
+                                  Llamar
+                                </a>
+                                <a
+                                  href={waHref}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={() => {
+                                    if (!item.llamada_registrada) {
+                                      void onUpdateLlamada({
+                                        ...item,
+                                        sucursal:
+                                          item.sucursal || item.sucursal_nombre,
+                                        cajera_nombre:
+                                          currentUserName || item.cajera_nombre,
+                                        cajera_id:
+                                          currentUserId || item.cajera_id,
+                                        llamada_registrada: true,
+                                      });
+                                    }
+                                  }}
+                                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#FDF2F8] hover:bg-[#FCE7F3] text-[#BE185D] border border-[#FBCFE8] transition-colors whitespace-nowrap"
+                                >
+                                  <MessageCircle className="h-3.5 w-3.5" />
+                                  WhatsApp
+                                </a>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (isEditingRowWa) {
+                                      setOpenRowWaId(null);
+                                    } else {
+                                      if (rowWaDrafts[item.id] === undefined) {
+                                        setRowWaDrafts((prev) => ({
+                                          ...prev,
+                                          [item.id]: defaultRendered,
+                                        }));
+                                      }
+                                      setOpenRowWaId(item.id);
+                                    }
+                                  }}
+                                  title="Editar mensaje de WhatsApp antes de enviar"
+                                  className={`inline-flex items-center gap-1 px-2.5 py-2 rounded-xl text-[11px] font-semibold border transition-colors whitespace-nowrap ${
+                                    isEditingRowWa
+                                      ? 'bg-[#7C3AED] text-white border-[#7C3AED]'
+                                      : 'bg-white text-[#5B21B6] border-[#E6DDF5] hover:bg-[#FAF7FE]'
+                                  }`}
+                                >
+                                  <Pencil className="h-3 w-3" />
+                                  Editar mensaje
+                                </button>
+                              </div>
+
+                              {isEditingRowWa && (
+                                <div className="rounded-xl border border-[#DDD6FE] bg-[#FAF7FE] p-3 space-y-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-[11px] font-bold text-[#5B21B6]">
+                                      Personalizar WhatsApp para {item.cliente_nombre}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setRowWaDrafts((prev) => ({
+                                          ...prev,
+                                          [item.id]: defaultRendered,
+                                        }))
+                                      }
+                                      className="text-[11px] font-semibold text-[#6E5F87] hover:underline"
+                                    >
+                                      Restablecer plantilla
+                                    </button>
+                                  </div>
+                                  <textarea
+                                    rows={3}
+                                    value={effectiveWaMsg}
+                                    onChange={(e) =>
+                                      setRowWaDrafts((prev) => ({
+                                        ...prev,
+                                        [item.id]: e.target.value,
+                                      }))
+                                    }
+                                    className="w-full px-2.5 py-2 rounded-lg border border-[#E6DDF5] bg-white text-xs text-[#1F172B] focus:outline-none focus:border-[#7C3AED]"
+                                  />
+                                  <div className="flex items-center justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setOpenRowWaId(null)}
+                                      className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-[#6E5F87] hover:bg-white"
+                                    >
+                                      Cerrar
+                                    </button>
+                                    <a
+                                      href={waHref}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={() => {
+                                        if (!item.llamada_registrada) {
+                                          void onUpdateLlamada({
+                                            ...item,
+                                            sucursal:
+                                              item.sucursal ||
+                                              item.sucursal_nombre,
+                                            cajera_nombre:
+                                              currentUserName ||
+                                              item.cajera_nombre,
+                                            cajera_id:
+                                              currentUserId || item.cajera_id,
+                                            llamada_registrada: true,
+                                          });
+                                        }
+                                      }}
+                                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#DB2777] hover:bg-[#BE185D] text-white"
+                                    >
+                                      <MessageCircle className="h-3.5 w-3.5" />
+                                      Enviar WhatsApp
+                                    </a>
+                                  </div>
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </>
                     ) : (
-                      <div className="text-xs text-[#6E5F87] space-y-0.5">
+                      <div className="text-xs text-[#6E5F87] space-y-1.5">
                         <div className="font-medium text-[#1F172B]">
                           {item.llamada_registrada
                             ? 'Marcación registrada'
@@ -1161,6 +1752,21 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                         <div className="font-mono-num text-[11px]">
                           Tel. {item.telefono}
                         </div>
+                        <a
+                          href={buildWhatsAppUrl(
+                            item.telefono,
+                            renderWhatsAppTemplate(
+                              activeTemplate?.mensaje || '',
+                              item
+                            )
+                          )}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-[#FDF2F8] hover:bg-[#FCE7F3] text-[#BE185D] border border-[#FBCFE8] transition-colors"
+                        >
+                          <MessageCircle className="h-3 w-3" />
+                          WhatsApp
+                        </a>
                       </div>
                     )}
                   </div>

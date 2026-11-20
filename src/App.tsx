@@ -1171,6 +1171,14 @@ export default function App() {
                     currentUserId={currentUser.id}
                     currentUserName={currentUser.nombre}
                     opcionesReporte={catalogos.opciones_llamada}
+                    plantillasWhatsApp={catalogos.plantillas_whatsapp}
+                    onSavePlantillasWhatsApp={(plantillas) =>
+                      handleSaveCatalogos({
+                        ...catalogos,
+                        id: catalogos.id || 'cat-global',
+                        plantillas_whatsapp: plantillas,
+                      })
+                    }
                     onUpdateLlamada={handleUpdateLlamada}
                     onCreateLlamada={handleCreateLlamada}
                     onImportLlamadas={handleImportLlamadas}

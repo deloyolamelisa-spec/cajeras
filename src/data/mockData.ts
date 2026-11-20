@@ -8,6 +8,7 @@ import {
   GastoYRefrendo,
   HorarioSucursalDia,
   DiaSemana,
+  PlantillaWhatsApp,
   TareaCatalogo,
 } from '../types/controlops';
 
@@ -351,6 +352,30 @@ export const BASE_DAILY_TASKS: TareaCatalogo[] = [
   },
 ];
 
+export const DEFAULT_WHATSAPP_TEMPLATES: PlantillaWhatsApp[] = [
+  {
+    id: 'wa-oficial',
+    nombre: 'Plantilla Oficial (Cobranza)',
+    mensaje:
+      'Hola {cliente}, te recordamos tu contrato {contrato} por ${monto} con fecha de vencimiento {fecha_vencimiento}. Quedamos a tus órdenes en {sucursal}.',
+    es_oficial: true,
+  },
+  {
+    id: 'wa-vence-hoy',
+    nombre: 'Vencimiento Hoy',
+    mensaje:
+      'Hola {cliente}, te informamos que hoy {fecha_vencimiento} vence tu contrato {contrato} por ${monto}. Acude a {sucursal} o contáctanos para realizar tu refrendo.',
+    es_oficial: false,
+  },
+  {
+    id: 'wa-vencido',
+    nombre: 'Seguimiento Saldo Vencido',
+    mensaje:
+      'Hola {cliente}, nos comunicamos de {sucursal} respecto a tu contrato {contrato} por ${monto} (vencimiento {fecha_vencimiento}). Contáctanos para apoyarte con tu pago o refrendo.',
+    es_oficial: false,
+  },
+];
+
 export const INITIAL_CATALOGOS: CatalogosControlOps = {
   id: 'cat-global',
   tareas_obligatorias: BASE_DAILY_TASKS,
@@ -360,6 +385,7 @@ export const INITIAL_CATALOGOS: CatalogosControlOps = {
     'Número equivocado',
     'Irá a sucursal',
   ],
+  plantillas_whatsapp: DEFAULT_WHATSAPP_TEMPLATES,
 };
 
 export const INITIAL_USUARIOS: UsuarioControlOps[] = [
