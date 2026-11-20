@@ -1382,6 +1382,22 @@ function buildActividadPayload(
   return payload;
 }
 
+function formatActividadesSupabaseError(err: {
+  code?: string;
+  message?: string;
+  details?: string | null;
+  hint?: string | null;
+}): string {
+  const parts: string[] = [];
+  if (err.code) parts.push(`error.code: ${err.code}`);
+  if (err.message) parts.push(`error.message: ${err.message}`);
+  if (err.details) parts.push(`error.details: ${err.details}`);
+  if (err.hint) parts.push(`error.hint: ${err.hint}`);
+  return parts.length > 0
+    ? `Error Supabase en ${SUPABASE_TABLES.ACTIVIDADES} — ${parts.join(' | ')}`
+    : `Error desconocido de Supabase en ${SUPABASE_TABLES.ACTIVIDADES}`;
+}
+
 async function executeActividadesWriteChunk(
   client: NonNullable<ReturnType<typeof getSupabaseClient>>,
   records: ActividadDiaria[]
@@ -1390,6 +1406,13 @@ async function executeActividadesWriteChunk(
   savedRecords: ActividadDiaria[];
   error?: string;
 }> {
+  let lastError: {
+    message?: string;
+    details?: string | null;
+    hint?: string | null;
+    code?: string;
+  } | null = null;
+
   for (let attempt = 0; attempt < 20; attempt++) {
     const payloads = records.map(buildActividadPayload);
     const hasPayloadKeys = payloads.every((p) => Object.keys(p).length > 0);
@@ -1397,7 +1420,9 @@ async function executeActividadesWriteChunk(
       return {
         ok: false,
         savedRecords: [],
-        error: `No quedaron columnas válidas para escribir en ${SUPABASE_TABLES.ACTIVIDADES}.`,
+        error: lastError
+          ? formatActividadesSupabaseError(lastError)
+          : `No quedaron columnas válidas para escribir en ${SUPABASE_TABLES.ACTIVIDADES}.`,
       };
     }
 
@@ -1458,7 +1483,7 @@ async function executeActividadesWriteChunk(
         return {
           ok: false,
           savedRecords: [],
-          error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.ACTIVIDADES} (revisa políticas RLS).`,
+          error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.ACTIVIDADES} (data vacío; revisa políticas RLS).`,
         };
       }
       if (!actividadesSchemaCache.validColumns && data.length > 0) {
@@ -1473,16 +1498,26 @@ async function executeActividadesWriteChunk(
       return { ok: true, savedRecords };
     }
 
+    lastError = error;
+
     if (isRlsOrAuthError(error)) {
       return {
         ok: false,
         savedRecords: [],
-        error: `Error de permisos en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+        error: formatActividadesSupabaseError(error),
       };
     }
 
     const missingCol = extractMissingColumnFromError(error);
-    if (missingCol) {
+    const colWasInPayload =
+      missingCol !== null &&
+      payloads.some((p) => Object.prototype.hasOwnProperty.call(p, missingCol));
+
+    if (
+      missingCol &&
+      colWasInPayload &&
+      !actividadesSchemaCache.missingColumns.has(missingCol)
+    ) {
       actividadesSchemaCache.missingColumns.add(missingCol);
       if (actividadesSchemaCache.validColumns) {
         actividadesSchemaCache.validColumns.delete(missingCol);
@@ -1521,14 +1556,16 @@ async function executeActividadesWriteChunk(
     return {
       ok: false,
       savedRecords: [],
-      error: `Error en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+      error: formatActividadesSupabaseError(error),
     };
   }
 
   return {
     ok: false,
     savedRecords: [],
-    error: `No se pudieron compatibilizar las columnas de ${SUPABASE_TABLES.ACTIVIDADES}.`,
+    error: lastError
+      ? formatActividadesSupabaseError(lastError)
+      : `Error inesperado al guardar en ${SUPABASE_TABLES.ACTIVIDADES}.`,
   };
 }
 
