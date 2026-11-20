@@ -336,18 +336,29 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
         'actividades',
         target.sucursal_id
       );
+      if (!res.uploadedToSupabase || !res.url) {
+        setUploadNotice(
+          res.error ||
+            'No se pudo subir la fotografía al bucket evidencias_controlops.'
+        );
+        return;
+      }
       const nowTime = new Date().toTimeString().slice(0, 5);
-      await onUpdateActividad({
+      const saveRes = (await onUpdateActividad({
         ...target,
         evidencia_url: res.url,
         estatus: 'Completada',
         hora_completada: target.hora_completada || nowTime,
-      });
+      })) as ServiceResult | undefined;
+      if (saveRes && !saveRes.ok) {
+        setUploadNotice(
+          saveRes.error ||
+            'La imagen subió a Storage, pero no se pudo guardar en actividades_diarias.'
+        );
+        return;
+      }
       setUploadNotice(
-        res.uploadedToSupabase
-          ? 'Fotografía subida correctamente al bucket evidencias_controlops.'
-          : res.error ||
-              'Fotografía adjuntada en vista local (conecta Supabase para guardarla en evidencias_controlops).'
+        'Fotografía guardada correctamente en evidencias_controlops y actividades_diarias.'
       );
     } finally {
       setUploadingId(null);

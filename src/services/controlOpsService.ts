@@ -451,12 +451,19 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
       llamadas = readLocal(STORAGE_KEYS.LLAMADAS, INITIAL_LLAMADAS);
     }
 
-    const actividades =
-      !actividadesRes.error && actividadesRes.data
-        ? (actividadesRes.data as ActividadDiaria[])
-        : readLocal(STORAGE_KEYS.ACTIVIDADES, INITIAL_ACTIVIDADES);
+    let actividades: ActividadDiaria[];
     if (!actividadesRes.error && actividadesRes.data) {
+      if (actividadesRes.data.length > 0) {
+        actividadesSchemaCache.validColumns = new Set(
+          Object.keys(actividadesRes.data[0] as Record<string, unknown>)
+        );
+      }
+      actividades = (actividadesRes.data as Record<string, unknown>[]).map(
+        (row) => normalizeActividadFromDb(row, sucursales)
+      );
       writeLocal(STORAGE_KEYS.ACTIVIDADES, actividades);
+    } else {
+      actividades = readLocal(STORAGE_KEYS.ACTIVIDADES, INITIAL_ACTIVIDADES);
     }
 
     const gastosYRefrendos =
@@ -1130,8 +1137,207 @@ export async function deleteEvidenciaFoto(
   return { ok: true };
 }
 
-function buildActividadPayload(actividad: ActividadDiaria) {
+interface ActividadesSchemaCache {
+  validColumns: Set<string> | null;
+  missingColumns: Set<string>;
+  omitGeneratedId: boolean;
+  useInsertInsteadOfUpsert: boolean;
+  openApiChecked: boolean;
+}
+
+const actividadesSchemaCache: ActividadesSchemaCache = {
+  validColumns: null,
+  missingColumns: new Set<string>(),
+  omitGeneratedId: false,
+  useInsertInsteadOfUpsert: false,
+  openApiChecked: false,
+};
+
+function isClientTempActividadId(id: string): boolean {
+  return id.startsWith('act-');
+}
+
+function normalizeActividadFromDb(
+  row: Record<string, unknown>,
+  sucursales: Sucursal[] = []
+): ActividadDiaria {
+  const rawSucId = String(row.sucursal_id ?? '').trim();
+  const rawSucNombre = String(
+    row.sucursal_nombre ?? row.sucursal ?? ''
+  ).trim();
+  const matchedSuc =
+    sucursales.find((s) => s.id === rawSucId) ||
+    sucursales.find(
+      (s) => s.nombre.toLowerCase() === rawSucNombre.toLowerCase()
+    );
+
+  const rawEstatus = String(row.estatus ?? 'Pendiente');
+  const estatus: ActividadDiaria['estatus'] =
+    rawEstatus === 'Completada' ||
+    rawEstatus === 'Observada' ||
+    rawEstatus === 'Pendiente'
+      ? rawEstatus
+      : 'Pendiente';
+
+  const rawDias = row.dias_semana;
+  const diasSemana = Array.isArray(rawDias)
+    ? (rawDias.filter((d) => typeof d === 'string') as ActividadDiaria['dias_semana'])
+    : undefined;
+
   return {
+    id: String(
+      row.id ?? `act-db-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    ),
+    sucursal_id: rawSucId || matchedSuc?.id || '',
+    sucursal_nombre: rawSucNombre || matchedSuc?.nombre || 'Sucursal',
+    titulo: String(row.titulo ?? 'Actividad'),
+    descripcion:
+      typeof row.descripcion === 'string' ? row.descripcion : undefined,
+    categoria:
+      row.categoria === 'Caja' ||
+      row.categoria === 'Auditoría' ||
+      row.categoria === 'Expedientes' ||
+      row.categoria === 'Corte'
+        ? row.categoria
+        : 'Caja',
+    responsable: String(
+      row.responsable ?? matchedSuc?.responsable_caja ?? ''
+    ),
+    fecha: row.fecha
+      ? String(row.fecha).slice(0, 10)
+      : new Date().toISOString().slice(0, 10),
+    dias_semana: diasSemana,
+    hora_limite:
+      typeof row.hora_limite === 'string' ? row.hora_limite : undefined,
+    sin_horario_limite:
+      row.sin_horario_limite !== undefined && row.sin_horario_limite !== null
+        ? Boolean(row.sin_horario_limite)
+        : undefined,
+    hora_completada:
+      typeof row.hora_completada === 'string' ? row.hora_completada : null,
+    estatus,
+    evidencia_url:
+      typeof row.evidencia_url === 'string' ? row.evidencia_url : null,
+    observaciones:
+      typeof row.observaciones === 'string' ? row.observaciones : '',
+  };
+}
+
+function mergeActividadDbRowWithInput(
+  orig: ActividadDiaria,
+  dbRow: Record<string, unknown>
+): ActividadDiaria {
+  const normalizedDb = normalizeActividadFromDb(dbRow);
+  return {
+    ...orig,
+    id:
+      dbRow.id !== undefined && dbRow.id !== null
+        ? String(dbRow.id)
+        : orig.id,
+    sucursal_id:
+      dbRow.sucursal_id !== undefined && dbRow.sucursal_id !== null
+        ? normalizedDb.sucursal_id
+        : orig.sucursal_id,
+    sucursal_nombre:
+      dbRow.sucursal_nombre !== undefined || dbRow.sucursal !== undefined
+        ? normalizedDb.sucursal_nombre
+        : orig.sucursal_nombre,
+    titulo: dbRow.titulo !== undefined ? normalizedDb.titulo : orig.titulo,
+    descripcion:
+      dbRow.descripcion !== undefined
+        ? normalizedDb.descripcion
+        : orig.descripcion,
+    categoria:
+      dbRow.categoria !== undefined ? normalizedDb.categoria : orig.categoria,
+    responsable:
+      dbRow.responsable !== undefined
+        ? normalizedDb.responsable
+        : orig.responsable,
+    fecha: dbRow.fecha !== undefined ? normalizedDb.fecha : orig.fecha,
+    dias_semana:
+      dbRow.dias_semana !== undefined
+        ? normalizedDb.dias_semana
+        : orig.dias_semana,
+    hora_limite:
+      dbRow.hora_limite !== undefined
+        ? normalizedDb.hora_limite
+        : orig.hora_limite,
+    sin_horario_limite:
+      dbRow.sin_horario_limite !== undefined
+        ? normalizedDb.sin_horario_limite
+        : orig.sin_horario_limite,
+    hora_completada:
+      dbRow.hora_completada !== undefined
+        ? normalizedDb.hora_completada
+        : orig.hora_completada,
+    estatus:
+      dbRow.estatus !== undefined ? normalizedDb.estatus : orig.estatus,
+    evidencia_url:
+      dbRow.evidencia_url !== undefined
+        ? normalizedDb.evidencia_url
+        : orig.evidencia_url,
+    observaciones:
+      dbRow.observaciones !== undefined
+        ? normalizedDb.observaciones
+        : orig.observaciones,
+  };
+}
+
+async function discoverActividadesSchema(): Promise<void> {
+  if (
+    actividadesSchemaCache.validColumns ||
+    actividadesSchemaCache.openApiChecked
+  ) {
+    return;
+  }
+  actividadesSchemaCache.openApiChecked = true;
+  if (!isSupabaseConfigured()) return;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/`, {
+      method: 'GET',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        Accept: 'application/openapi+json, application/json',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return;
+
+    const spec = (await res.json()) as {
+      definitions?: Record<
+        string,
+        {
+          properties?: Record<string, { type?: string; format?: string }>;
+        }
+      >;
+    };
+    const props = spec?.definitions?.[SUPABASE_TABLES.ACTIVIDADES]?.properties;
+    if (props && Object.keys(props).length > 0) {
+      actividadesSchemaCache.validColumns = new Set(Object.keys(props));
+      const idProp = props.id;
+      if (
+        idProp &&
+        (idProp.type === 'integer' ||
+          idProp.type === 'number' ||
+          idProp.format === 'uuid')
+      ) {
+        actividadesSchemaCache.omitGeneratedId = true;
+      }
+    }
+  } catch {
+    // OpenAPI introspection is optional; dynamic error-stripping handles fallback
+  }
+}
+
+function buildActividadPayload(
+  actividad: ActividadDiaria
+): Record<string, unknown> {
+  const candidateValues: Record<string, unknown> = {
     id: actividad.id,
     sucursal_id: actividad.sucursal_id,
     sucursal_nombre: actividad.sucursal_nombre,
@@ -1148,35 +1354,207 @@ function buildActividadPayload(actividad: ActividadDiaria) {
     evidencia_url: actividad.evidencia_url ?? null,
     observaciones: actividad.observaciones ?? '',
   };
+
+  const { validColumns, missingColumns, omitGeneratedId } =
+    actividadesSchemaCache;
+
+  const payload: Record<string, unknown> = {};
+
+  if (validColumns && validColumns.size > 0) {
+    for (const [col, val] of Object.entries(candidateValues)) {
+      if (!validColumns.has(col) || missingColumns.has(col)) continue;
+      if (col === 'id' && omitGeneratedId && isClientTempActividadId(actividad.id)) {
+        continue;
+      }
+      payload[col] = val;
+    }
+    return payload;
+  }
+
+  for (const [col, val] of Object.entries(candidateValues)) {
+    if (missingColumns.has(col)) continue;
+    if (col === 'id' && omitGeneratedId && isClientTempActividadId(actividad.id)) {
+      continue;
+    }
+    payload[col] = val;
+  }
+
+  return payload;
+}
+
+async function executeActividadesWriteChunk(
+  client: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  records: ActividadDiaria[]
+): Promise<{
+  ok: boolean;
+  savedRecords: ActividadDiaria[];
+  error?: string;
+}> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const payloads = records.map(buildActividadPayload);
+    const hasPayloadKeys = payloads.every((p) => Object.keys(p).length > 0);
+    if (!hasPayloadKeys) {
+      return {
+        ok: false,
+        savedRecords: [],
+        error: `No quedaron columnas válidas para escribir en ${SUPABASE_TABLES.ACTIVIDADES}.`,
+      };
+    }
+
+    const hasIdInPayload = payloads.every(
+      (p) =>
+        (typeof p.id === 'string' && p.id.length > 0) ||
+        typeof p.id === 'number'
+    );
+    const useInsert =
+      actividadesSchemaCache.useInsertInsteadOfUpsert || !hasIdInPayload;
+
+    let data: unknown[] | null = null;
+    let error: {
+      message?: string;
+      details?: string | null;
+      hint?: string | null;
+      code?: string;
+    } | null = null;
+
+    if (useInsert && records.length === 1 && hasIdInPayload) {
+      const singlePayload = { ...payloads[0] };
+      const recordId = singlePayload.id;
+      delete singlePayload.id;
+
+      const updateRes = await client
+        .from(SUPABASE_TABLES.ACTIVIDADES)
+        .update(singlePayload)
+        .eq('id', recordId as string | number)
+        .select();
+
+      if (updateRes.error) {
+        error = updateRes.error;
+      } else if (updateRes.data && updateRes.data.length > 0) {
+        data = updateRes.data;
+      } else {
+        const insertRes = await client
+          .from(SUPABASE_TABLES.ACTIVIDADES)
+          .insert(payloads)
+          .select();
+        data = insertRes.data;
+        error = insertRes.error;
+      }
+    } else {
+      const query = useInsert
+        ? client.from(SUPABASE_TABLES.ACTIVIDADES).insert(payloads).select()
+        : client
+            .from(SUPABASE_TABLES.ACTIVIDADES)
+            .upsert(payloads, { onConflict: 'id' })
+            .select();
+
+      const res = await query;
+      data = res.data;
+      error = res.error;
+    }
+
+    if (!error) {
+      if (!data || data.length === 0) {
+        return {
+          ok: false,
+          savedRecords: [],
+          error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.ACTIVIDADES} (revisa políticas RLS).`,
+        };
+      }
+      if (!actividadesSchemaCache.validColumns && data.length > 0) {
+        actividadesSchemaCache.validColumns = new Set(
+          Object.keys(data[0] as Record<string, unknown>)
+        );
+      }
+      const savedRecords = (data as Record<string, unknown>[]).map((r, i) => {
+        const orig = records[i] || records[0];
+        return mergeActividadDbRowWithInput(orig, r);
+      });
+      return { ok: true, savedRecords };
+    }
+
+    if (isRlsOrAuthError(error)) {
+      return {
+        ok: false,
+        savedRecords: [],
+        error: `Error de permisos en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+      };
+    }
+
+    const missingCol = extractMissingColumnFromError(error);
+    if (missingCol) {
+      actividadesSchemaCache.missingColumns.add(missingCol);
+      if (actividadesSchemaCache.validColumns) {
+        actividadesSchemaCache.validColumns.delete(missingCol);
+      }
+      if (missingCol === 'id') {
+        actividadesSchemaCache.omitGeneratedId = true;
+        actividadesSchemaCache.useInsertInsteadOfUpsert = true;
+      }
+      continue;
+    }
+
+    const msgLower = (error.message || '').toLowerCase();
+    if (
+      error.code === '42P10' ||
+      msgLower.includes('on conflict') ||
+      msgLower.includes('no unique or exclusion constraint')
+    ) {
+      if (!actividadesSchemaCache.useInsertInsteadOfUpsert) {
+        actividadesSchemaCache.useInsertInsteadOfUpsert = true;
+        continue;
+      }
+    }
+
+    if (
+      error.code === '22P02' &&
+      (msgLower.includes('uuid') ||
+        msgLower.includes('bigint') ||
+        msgLower.includes('integer')) &&
+      !actividadesSchemaCache.omitGeneratedId
+    ) {
+      actividadesSchemaCache.omitGeneratedId = true;
+      actividadesSchemaCache.useInsertInsteadOfUpsert = true;
+      continue;
+    }
+
+    return {
+      ok: false,
+      savedRecords: [],
+      error: `Error en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+    };
+  }
+
+  return {
+    ok: false,
+    savedRecords: [],
+    error: `No se pudieron compatibilizar las columnas de ${SUPABASE_TABLES.ACTIVIDADES}.`,
+  };
 }
 
 export async function saveActividad(
   actividad: ActividadDiaria,
   allActividades: ActividadDiaria[]
-): Promise<ServiceResult> {
+): Promise<ServiceResult<ActividadDiaria>> {
   const conn = requireConfiguredSupabase();
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
-    const payload = buildActividadPayload(actividad);
-    const { data, error } = await conn.client
-      .from(SUPABASE_TABLES.ACTIVIDADES)
-      .upsert(payload, { onConflict: 'id' })
-      .select();
-    if (error) {
+    await discoverActividadesSchema();
+    const res = await executeActividadesWriteChunk(conn.client, [actividad]);
+    if (!res.ok) {
       return {
         ok: false,
-        error: `Error en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+        error:
+          res.error || `Error al guardar en ${SUPABASE_TABLES.ACTIVIDADES}.`,
       };
     }
-    if (!data || data.length === 0) {
-      return {
-        ok: false,
-        error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.ACTIVIDADES} (revisa RLS).`,
-      };
-    }
-    writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
-    return { ok: true };
+    const saved = res.savedRecords[0] ?? actividad;
+    const syncedList = allActividades.map((a) =>
+      a.id === actividad.id ? saved : a
+    );
+    writeLocal(STORAGE_KEYS.ACTIVIDADES, syncedList);
+    return { ok: true, data: saved };
   } catch (err) {
     return {
       ok: false,
@@ -1191,31 +1569,30 @@ export async function saveActividad(
 export async function saveActividadesBatch(
   nuevas: ActividadDiaria[],
   allActividades: ActividadDiaria[]
-): Promise<ServiceResult> {
-  if (nuevas.length === 0) return { ok: true };
+): Promise<ServiceResult<ActividadDiaria[]>> {
+  if (nuevas.length === 0) return { ok: true, data: [] };
   const conn = requireConfiguredSupabase();
   if (!conn.ok) return { ok: false, error: conn.error };
 
   try {
-    const payloads = nuevas.map(buildActividadPayload);
-    const { data, error } = await conn.client
-      .from(SUPABASE_TABLES.ACTIVIDADES)
-      .upsert(payloads, { onConflict: 'id' })
-      .select();
-    if (error) {
+    await discoverActividadesSchema();
+    const res = await executeActividadesWriteChunk(conn.client, nuevas);
+    if (!res.ok) {
       return {
         ok: false,
-        error: `Error en ${SUPABASE_TABLES.ACTIVIDADES}: ${formatSupabaseError(error)}`,
+        error:
+          res.error || `Error al guardar en ${SUPABASE_TABLES.ACTIVIDADES}.`,
       };
     }
-    if (!data || data.length === 0) {
-      return {
-        ok: false,
-        error: `Supabase no confirmó el guardado en ${SUPABASE_TABLES.ACTIVIDADES} (revisa RLS).`,
-      };
-    }
-    writeLocal(STORAGE_KEYS.ACTIVIDADES, allActividades);
-    return { ok: true };
+    const savedByOrigId = new Map<string, ActividadDiaria>();
+    nuevas.forEach((orig, idx) => {
+      savedByOrigId.set(orig.id, res.savedRecords[idx] ?? orig);
+    });
+    const syncedList = allActividades.map(
+      (a) => savedByOrigId.get(a.id) ?? a
+    );
+    writeLocal(STORAGE_KEYS.ACTIVIDADES, syncedList);
+    return { ok: true, data: res.savedRecords };
   } catch (err) {
     return {
       ok: false,
@@ -1874,7 +2251,15 @@ export async function uploadEvidenciaFoto(
   const supabase = getSupabaseClient();
 
   if (supabase && isSupabaseConfigured()) {
-    const ext = file.name.split('.').pop()?.toLowerCase() || 'jpg';
+    const rawExt = file.name.split('.').pop()?.toLowerCase() || '';
+    const ext =
+      rawExt && rawExt.length <= 5
+        ? rawExt
+        : file.type === 'image/png'
+          ? 'png'
+          : file.type === 'image/webp'
+            ? 'webp'
+            : 'jpg';
     const cleanName = `${folder}/${sucursalId}/${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 8)}.${ext}`;
@@ -1883,6 +2268,7 @@ export async function uploadEvidenciaFoto(
       .from(SUPABASE_BUCKETS.EVIDENCIAS)
       .upload(cleanName, file, {
         cacheControl: '3600',
+        contentType: file.type || 'image/jpeg',
         upsert: true,
       });
 
@@ -1890,28 +2276,28 @@ export async function uploadEvidenciaFoto(
       const { data } = supabase.storage
         .from(SUPABASE_BUCKETS.EVIDENCIAS)
         .getPublicUrl(cleanName);
+      if (!data?.publicUrl) {
+        return {
+          url: '',
+          uploadedToSupabase: false,
+          error: `Se subió la imagen pero no se pudo obtener la URL pública del bucket "${SUPABASE_BUCKETS.EVIDENCIAS}".`,
+        };
+      }
       return { url: data.publicUrl, uploadedToSupabase: true };
     }
 
-    const fallbackUrl = await readFileAsDataURL(file);
     return {
-      url: fallbackUrl,
+      url: '',
       uploadedToSupabase: false,
-      error: `No se pudo subir al bucket "${SUPABASE_BUCKETS.EVIDENCIAS}": ${error.message}. Se guardó vista previa local.`,
+      error: `Error al subir la foto al bucket "${SUPABASE_BUCKETS.EVIDENCIAS}": ${error.message}`,
     };
   }
 
-  const localUrl = await readFileAsDataURL(file);
-  return { url: localUrl, uploadedToSupabase: false };
-}
-
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error('No se pudo leer la imagen'));
-    reader.readAsDataURL(file);
-  });
+  return {
+    url: '',
+    uploadedToSupabase: false,
+    error: `Supabase no está configurado para subir fotos al bucket "${SUPABASE_BUCKETS.EVIDENCIAS}".`,
+  };
 }
 
 export function resetDemoLocalData(): LoadedOperationalData {

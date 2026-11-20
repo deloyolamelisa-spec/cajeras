@@ -276,28 +276,35 @@ export default function App() {
     updated: ActividadDiaria
   ): Promise<ServiceResult> => {
     const exists = actividades.some((a) => a.id === updated.id);
-    const next = exists
+    const provisional = exists
       ? actividades.map((a) => (a.id === updated.id ? updated : a))
       : [updated, ...actividades];
-    const res = await saveActividad(updated, next);
+    const res = await saveActividad(updated, provisional);
     if (!res.ok) {
       if (res.error) setSyncError(res.error);
       return res;
     }
-    setActividades(next);
+    const saved = (res.data as ActividadDiaria | undefined) ?? updated;
+    const synced = exists
+      ? actividades.map((a) => (a.id === updated.id ? saved : a))
+      : [saved, ...actividades];
+    setActividades(synced);
+    setSyncError(null);
     return res;
   };
 
   const handleCreateActividad = async (
     nueva: ActividadDiaria
   ): Promise<ServiceResult> => {
-    const next = [nueva, ...actividades];
-    const res = await saveActividad(nueva, next);
+    const provisional = [nueva, ...actividades];
+    const res = await saveActividad(nueva, provisional);
     if (!res.ok) {
       if (res.error) setSyncError(res.error);
       return res;
     }
-    setActividades(next);
+    const saved = (res.data as ActividadDiaria | undefined) ?? nueva;
+    setActividades((prev) => [saved, ...prev]);
+    setSyncError(null);
     return res;
   };
 
@@ -305,13 +312,17 @@ export default function App() {
     nuevas: ActividadDiaria[]
   ): Promise<ServiceResult> => {
     if (nuevas.length === 0) return { ok: true };
-    const next = [...nuevas, ...actividades];
-    const res = await saveActividadesBatch(nuevas, next);
+    const provisional = [...nuevas, ...actividades];
+    const res = await saveActividadesBatch(nuevas, provisional);
     if (!res.ok) {
       if (res.error) setSyncError(res.error);
       return res;
     }
-    setActividades(next);
+    const savedRows = Array.isArray(res.data)
+      ? (res.data as ActividadDiaria[])
+      : nuevas;
+    setActividades((prev) => [...savedRows, ...prev]);
+    setSyncError(null);
     return res;
   };
 

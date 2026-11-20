@@ -9,6 +9,7 @@ import {
   Image as ImageIcon,
   MapPin,
   PhoneCall,
+  RotateCcw,
   TrendingUp,
   Wallet,
   X,
@@ -33,7 +34,10 @@ import {
   getLlamadaLocalDate,
   resolveDailyTasksForBranch,
 } from '../utils/calculations';
-import { uploadEvidenciaFoto } from '../services/controlOpsService';
+import {
+  ServiceResult,
+  uploadEvidenciaFoto,
+} from '../services/controlOpsService';
 
 interface CajeraMiDiaViewProps {
   currentUser: UsuarioControlOps;
@@ -45,7 +49,7 @@ interface CajeraMiDiaViewProps {
   gastosYRefrendos: GastoYRefrendo[];
   horarios: HorarioSucursalDia[];
   diaActivo: DiaSemana;
-  onUpdateActividad: (updated: ActividadDiaria) => Promise<unknown>;
+  onUpdateActividad: (updated: ActividadDiaria) => Promise<ServiceResult>;
 }
 
 export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
@@ -62,19 +66,57 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
 }) => {
   const [notifDenied, setNotifDenied] = useState(false);
   const [uploadingId, setUploadingId] = useState<string | null>(null);
-  const [uploadFeedback, setUploadFeedback] = useState<string | null>(null);
+  const [uploadFeedback, setUploadFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
   const [previewImg, setPreviewImg] = useState<{
     url: string;
     title: string;
   } | null>(null);
 
-  const cameraInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
-  const galleryInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  // Desktop live camera capture modal state
+  const [webcamActivity, setWebcamActivity] = useState<ActividadDiaria | null>(
+    null
+  );
+  const [webcamLoading, setWebcamLoading] = useState(false);
+  const [webcamError, setWebcamError] = useState<string | null>(null);
+  const [capturedPhoto, setCapturedPhoto] = useState<{
+    previewUrl: string;
+    file: File;
+  } | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const isMobileDevice = useMemo(() => {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    const mobileUA =
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(
+        ua
+      );
+    const ipadOS =
+      navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+    return mobileUA || ipadOS;
+  }, []);
+
+  const stopWebcamStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
 
   useEffect(() => {
     if (typeof window !== 'undefined' && 'Notification' in window) {
       setNotifDenied(Notification.permission === 'denied');
     }
+    return () => {
+      stopWebcamStream();
+    };
   }, []);
 
   const now = useMemo(() => new Date(), []);
@@ -379,6 +421,123 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     sucursal,
   ]);
 
+  const startWebcamStream = async () => {
+    stopWebcamStream();
+    setWebcamLoading(true);
+    setWebcamError(null);
+
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia
+    ) {
+      setWebcamLoading(false);
+      setWebcamError(
+        'Este navegador no permite acceso directo a la cámara. Selecciona una imagen desde tu equipo.'
+      );
+      return;
+    }
+
+    try {
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false,
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+      }
+
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play().catch(() => {});
+      }
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'No se pudo activar la cámara del dispositivo.';
+      setWebcamError(
+        `No se pudo abrir la cámara (${msg}). Verifica los permisos del navegador o elige una foto de archivo.`
+      );
+    } finally {
+      setWebcamLoading(false);
+    }
+  };
+
+  const openWebcamModal = (actividad: ActividadDiaria) => {
+    if (capturedPhoto?.previewUrl) {
+      URL.revokeObjectURL(capturedPhoto.previewUrl);
+    }
+    setCapturedPhoto(null);
+    setWebcamError(null);
+    setWebcamActivity(actividad);
+    void startWebcamStream();
+  };
+
+  const closeWebcamModal = () => {
+    stopWebcamStream();
+    if (capturedPhoto?.previewUrl) {
+      URL.revokeObjectURL(capturedPhoto.previewUrl);
+    }
+    setCapturedPhoto(null);
+    setWebcamError(null);
+    setWebcamActivity(null);
+  };
+
+  const handleCaptureSnapshot = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      setWebcamError('La cámara aún está iniciando, espera un momento.');
+      return;
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          setWebcamError('No se pudo capturar la fotografía.');
+          return;
+        }
+        const file = new File([blob], `camara-${Date.now()}.jpg`, {
+          type: 'image/jpeg',
+        });
+        const previewUrl = URL.createObjectURL(blob);
+        stopWebcamStream();
+        setCapturedPhoto({ previewUrl, file });
+      },
+      'image/jpeg',
+      0.9
+    );
+  };
+
+  const handleRetakeSnapshot = () => {
+    if (capturedPhoto?.previewUrl) {
+      URL.revokeObjectURL(capturedPhoto.previewUrl);
+    }
+    setCapturedPhoto(null);
+    void startWebcamStream();
+  };
+
+  const handleConfirmSnapshot = async () => {
+    if (!webcamActivity || !capturedPhoto) return;
+    const targetAct = webcamActivity;
+    const fileToSend = capturedPhoto.file;
+    closeWebcamModal();
+    await handleUploadEvidence(targetAct, fileToSend);
+  };
+
   const handleUploadEvidence = async (
     actividad: ActividadDiaria,
     file: File | undefined
@@ -388,6 +547,16 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     setUploadFeedback(null);
     try {
       const res = await uploadEvidenciaFoto(file, 'actividades', sucursal.id);
+      if (!res.uploadedToSupabase || !res.url) {
+        setUploadFeedback({
+          type: 'error',
+          message:
+            res.error ||
+            `No se pudo subir la evidencia de "${actividad.titulo}" a Supabase Storage.`,
+        });
+        return;
+      }
+
       const updated: ActividadDiaria = {
         ...actividad,
         estatus: 'Completada',
@@ -395,13 +564,30 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         fecha: todayStr,
         evidencia_url: res.url,
       };
-      await onUpdateActividad(updated);
-      setUploadFeedback(
-        res.uploadedToSupabase
-          ? `Evidencia de "${actividad.titulo}" guardada en Supabase.`
-          : res.error ||
-              `Evidencia de "${actividad.titulo}" guardada localmente.`
-      );
+
+      const saveRes = await onUpdateActividad(updated);
+      if (!saveRes.ok) {
+        setUploadFeedback({
+          type: 'error',
+          message:
+            saveRes.error ||
+            `La foto subió, pero falló el guardado de "${actividad.titulo}" en actividades_diarias.`,
+        });
+        return;
+      }
+
+      setUploadFeedback({
+        type: 'success',
+        message: `Evidencia de "${actividad.titulo}" guardada en Supabase.`,
+      });
+    } catch (err) {
+      setUploadFeedback({
+        type: 'error',
+        message:
+          err instanceof Error
+            ? err.message
+            : `Ocurrió un error al guardar "${actividad.titulo}".`,
+      });
     } finally {
       setUploadingId(null);
     }
@@ -624,12 +810,30 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
 
       {/* Feedback Banner */}
       {uploadFeedback && (
-        <div className="rounded-2xl bg-[#F3ECFC] border border-[#DDD6FE] px-4 py-3 text-xs font-medium text-[#5B21B6] flex items-center justify-between">
-          <span>{uploadFeedback}</span>
+        <div
+          role="alert"
+          className={`rounded-2xl px-4 py-3 text-xs sm:text-sm font-medium flex items-center justify-between gap-3 border ${
+            uploadFeedback.type === 'error'
+              ? 'bg-[#FFF1F2] border-[#FECDD3] text-[#BE123C]'
+              : 'bg-[#ECFDF5] border-[#A7F3D0] text-[#065F46]'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {uploadFeedback.type === 'error' ? (
+              <AlertCircle className="h-4 w-4 shrink-0 text-[#E11D48]" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-[#15803D]" />
+            )}
+            <span className="break-words">{uploadFeedback.message}</span>
+          </div>
           <button
             type="button"
             onClick={() => setUploadFeedback(null)}
-            className="text-[#7C3AED] font-bold hover:underline ml-3"
+            className={`font-bold hover:underline shrink-0 ${
+              uploadFeedback.type === 'error'
+                ? 'text-[#BE123C]'
+                : 'text-[#065F46]'
+            }`}
           >
             Cerrar
           </button>
@@ -741,55 +945,64 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Right: Camera & Gallery Upload Buttons */}
+                  {/* Right: Camera & Gallery Upload Controls */}
                   <div className="flex items-center gap-2.5 shrink-0 pl-13 md:pl-0">
-                    <input
-                      ref={(el) => {
-                        cameraInputRefs.current[act.id] = el;
-                      }}
-                      type="file"
-                      accept="image/*"
-                      capture="environment"
-                      className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        handleUploadEvidence(act, file);
-                        e.currentTarget.value = '';
-                      }}
-                    />
-                    <input
-                      ref={(el) => {
-                        galleryInputRefs.current[act.id] = el;
-                      }}
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        handleUploadEvidence(act, file);
-                        e.currentTarget.value = '';
-                      }}
-                    />
+                    {isMobileDevice ? (
+                      <label
+                        className={`inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors whitespace-nowrap select-none ${
+                          isUploading
+                            ? 'opacity-50 pointer-events-none'
+                            : 'cursor-pointer'
+                        }`}
+                      >
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          disabled={isUploading}
+                          className="sr-only"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            e.currentTarget.value = '';
+                            if (file) void handleUploadEvidence(act, file);
+                          }}
+                        />
+                        <Camera className="h-4 w-4" />
+                        {isUploading ? 'Subiendo...' : 'Cámara'}
+                      </label>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={isUploading}
+                        onClick={() => openWebcamModal(act)}
+                        className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors disabled:opacity-50 whitespace-nowrap"
+                      >
+                        <Camera className="h-4 w-4" />
+                        {isUploading ? 'Subiendo...' : 'Cámara'}
+                      </button>
+                    )}
 
-                    <button
-                      type="button"
-                      disabled={isUploading}
-                      onClick={() => cameraInputRefs.current[act.id]?.click()}
-                      className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white transition-colors disabled:opacity-50 whitespace-nowrap"
+                    <label
+                      className={`inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-white border border-[#C4B5FD] text-[#6D28D9] hover:bg-[#FAF7FF] transition-colors whitespace-nowrap select-none ${
+                        isUploading
+                          ? 'opacity-50 pointer-events-none'
+                          : 'cursor-pointer'
+                      }`}
                     >
-                      <Camera className="h-4 w-4" />
-                      {isUploading ? 'Subiendo...' : 'Cámara'}
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={isUploading}
-                      onClick={() => galleryInputRefs.current[act.id]?.click()}
-                      className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-white border border-[#C4B5FD] text-[#6D28D9] hover:bg-[#FAF7FF] transition-colors disabled:opacity-50 whitespace-nowrap"
-                    >
+                      <input
+                        type="file"
+                        accept="image/*"
+                        disabled={isUploading}
+                        className="sr-only"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          e.currentTarget.value = '';
+                          if (file) void handleUploadEvidence(act, file);
+                        }}
+                      />
                       <ImageIcon className="h-4 w-4" />
                       Galería
-                    </button>
+                    </label>
                   </div>
                 </article>
               );
@@ -842,6 +1055,131 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
           ))}
         </div>
       </section>
+
+      {/* Desktop Live Camera Capture Modal */}
+      {webcamActivity && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/70 backdrop-blur-[2px]"
+          onClick={closeWebcamModal}
+        >
+          <div
+            className="max-w-lg w-full bg-white rounded-2xl overflow-hidden shadow-2xl border border-[#E6DDF5]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#F1ECF9]">
+              <div className="min-w-0">
+                <p className="text-sm font-bold text-[#1F172B] truncate">
+                  Capturar evidencia — {webcamActivity.titulo}
+                </p>
+                <p className="text-[11px] text-[#7A6B93]">
+                  Toma la fotografía en vivo y confirma el envío a Supabase
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeWebcamModal}
+                className="p-1.5 rounded-lg text-[#6E5F87] hover:bg-[#F5F0FC]"
+                aria-label="Cerrar cámara"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="p-4 bg-[#FAF7FF] space-y-4">
+              {capturedPhoto ? (
+                <div className="rounded-xl overflow-hidden bg-black flex items-center justify-center max-h-[60vh]">
+                  <img
+                    src={capturedPhoto.previewUrl}
+                    alt="Captura de evidencia"
+                    className="max-h-[58vh] w-full object-contain"
+                  />
+                </div>
+              ) : webcamError ? (
+                <div className="rounded-xl bg-[#FFF1F2] border border-[#FECDD3] p-4 text-xs text-[#BE123C] space-y-3">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-[#E11D48]" />
+                    <p>{webcamError}</p>
+                  </div>
+                  <label className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#7C3AED] hover:bg-[#6D28D9] text-white font-semibold cursor-pointer">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="sr-only"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        e.currentTarget.value = '';
+                        if (file && webcamActivity) {
+                          const targetAct = webcamActivity;
+                          closeWebcamModal();
+                          void handleUploadEvidence(targetAct, file);
+                        }
+                      }}
+                    />
+                    <ImageIcon className="h-4 w-4" />
+                    Seleccionar imagen desde archivo
+                  </label>
+                </div>
+              ) : (
+                <div className="relative rounded-xl overflow-hidden bg-[#1F172B] aspect-video flex items-center justify-center">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover"
+                  />
+                  {webcamLoading && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-[#1F172B]/75 text-white text-xs font-medium">
+                      Iniciando cámara...
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={closeWebcamModal}
+                  className="px-4 py-2.5 rounded-xl text-xs font-semibold bg-white border border-[#DDD6FE] text-[#6E5F87] hover:bg-[#F5F0FC]"
+                >
+                  Cancelar
+                </button>
+
+                {capturedPhoto ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleRetakeSnapshot}
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-white border border-[#C4B5FD] text-[#6D28D9] hover:bg-[#FAF7FF]"
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                      Volver a tomar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleConfirmSnapshot()}
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white"
+                    >
+                      <CheckCircle2 className="h-4 w-4" />
+                      Confirmar y enviar
+                    </button>
+                  </>
+                ) : !webcamError ? (
+                  <button
+                    type="button"
+                    disabled={webcamLoading}
+                    onClick={handleCaptureSnapshot}
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
+                  >
+                    <Camera className="h-4 w-4" />
+                    Tomar foto
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Lightbox for uploaded evidence */}
       {previewImg && (
