@@ -79,11 +79,18 @@ export interface PlantillaWhatsApp {
   es_oficial?: boolean;
 }
 
+export interface FraseMotivacional {
+  id: string;
+  texto: string;
+  activa: boolean;
+}
+
 export interface CatalogosControlOps {
   id: string;
   tareas_obligatorias: TareaCatalogo[];
   opciones_llamada: string[];
   plantillas_whatsapp?: PlantillaWhatsApp[];
+  frases_motivacionales?: FraseMotivacional[];
 }
 
 export type ReporteCajeraOpcion = string;
@@ -111,6 +118,7 @@ export interface LlamadaSucursal {
   cajera_nombre: string;
   cajera_id?: string;
   llamada_registrada: boolean;
+  realizada?: boolean;
   estatus?: 'Pendiente' | 'Realizada';
   estado?: 'Pendiente' | 'Realizada';
   hora_llamada?: string;
@@ -197,7 +205,9 @@ export interface BranchMetricSummary {
   excesoDinero: number;
   excesoPorcentaje: number;
   pctUsoPresupuesto: number;
+  porcentajeUsoPresupuesto?: number;
   excedioPresupuesto: boolean;
+  alertaPreventivaPresupuesto: boolean;
   refrendosRealizados: number;
   refrendosMeta: number;
   montoRefrendos: number;

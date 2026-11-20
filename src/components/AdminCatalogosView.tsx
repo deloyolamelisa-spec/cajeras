@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Building2,
   Target,
@@ -15,11 +15,14 @@ import {
   Clock,
   X,
   AlertTriangle,
+  Award,
+  RotateCcw,
 } from 'lucide-react';
 import {
   ActividadDiaria,
   CatalogosControlOps,
   DiaSemana,
+  FraseMotivacional,
   MetaSucursal,
   RolUsuario,
   Sucursal,
@@ -35,6 +38,7 @@ import {
   isFixedBaseTask,
   parseMoneyInput,
 } from '../utils/calculations';
+import { DEFAULT_FRASES_MOTIVACIONALES } from '../data/mockData';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface AdminCatalogosViewProps {
@@ -89,7 +93,7 @@ const DIA_SHORT: Record<DiaSemana, string> = {
   domingo: 'Dom',
 };
 
-type AdminTab = 'sucursales' | 'metas' | 'catalogos' | 'usuarios';
+type AdminTab = 'sucursales' | 'metas' | 'catalogos' | 'ajustes' | 'usuarios';
 
 export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
   sucursales,
@@ -155,6 +159,23 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
 
   // --- Catalogos State ---
   const [newCallOption, setNewCallOption] = useState('');
+
+  // --- Frases Motivacionales (Ajustes) ---
+  const [frasesDraft, setFrasesDraft] = useState<FraseMotivacional[]>(() =>
+    Array.isArray(catalogos.frases_motivacionales)
+      ? catalogos.frases_motivacionales
+      : DEFAULT_FRASES_MOTIVACIONALES
+  );
+  const [newFraseText, setNewFraseText] = useState('');
+  const [savingFrases, setSavingFrases] = useState(false);
+
+  useEffect(() => {
+    setFrasesDraft(
+      Array.isArray(catalogos.frases_motivacionales)
+        ? catalogos.frases_motivacionales
+        : DEFAULT_FRASES_MOTIVACIONALES
+    );
+  }, [catalogos.frases_motivacionales]);
 
   // --- Actividades Base del Catálogo (catalogos_controlops) ---
   const [editingTask, setEditingTask] = useState<TareaCatalogo | null>(null);
@@ -458,6 +479,83 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
     notify(`Opción "${opt}" eliminada.`);
   };
 
+  const persistFrases = async (
+    nextFrases: FraseMotivacional[],
+    successMessage: string
+  ) => {
+    setSavingFrases(true);
+    setErrorAlert(null);
+    try {
+      const res = await onSaveCatalogos({
+        ...catalogos,
+        id: catalogos.id || 'cat-global',
+        frases_motivacionales: nextFrases,
+      });
+      if (!res.ok) {
+        fail(res.error);
+        return false;
+      }
+      setFrasesDraft(nextFrases);
+      notify(successMessage);
+      return true;
+    } finally {
+      setSavingFrases(false);
+    }
+  };
+
+  const handleAddFrase = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const texto = newFraseText.trim();
+    if (!texto) return;
+    const nueva: FraseMotivacional = {
+      id: `frase-${Date.now()}`,
+      texto,
+      activa: true,
+    };
+    const ok = await persistFrases(
+      [...frasesDraft, nueva],
+      'Frase motivacional agregada y guardada en Supabase.'
+    );
+    if (ok) {
+      setNewFraseText('');
+    }
+  };
+
+  const handleToggleFrase = async (fraseId: string) => {
+    const nextList = frasesDraft.map((f) =>
+      f.id === fraseId ? { ...f, activa: !f.activa } : f
+    );
+    await persistFrases(
+      nextList,
+      'Estado de frase motivacional actualizado en Supabase.'
+    );
+  };
+
+  const handleSaveFrasesEdits = async () => {
+    const cleaned = frasesDraft
+      .map((f) => ({ ...f, texto: f.texto.trim() }))
+      .filter((f) => f.texto.length > 0);
+    await persistFrases(
+      cleaned,
+      'Frases motivacionales guardadas en Supabase para todas las cajeras.'
+    );
+  };
+
+  const handleDeleteFrase = async (fraseId: string) => {
+    const nextList = frasesDraft.filter((f) => f.id !== fraseId);
+    await persistFrases(
+      nextList,
+      'Frase motivacional eliminada de Supabase.'
+    );
+  };
+
+  const handleResetFrasesDefaults = async () => {
+    await persistFrases(
+      DEFAULT_FRASES_MOTIVACIONALES,
+      'Frases motivacionales predeterminadas restauradas en Supabase.'
+    );
+  };
+
   const handleAddUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newUser.nombre.trim() || !newUser.correo.trim() || !newUser.password.trim())
@@ -578,6 +676,11 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
                 id: 'catalogos',
                 label: 'Catálogo Actividades y Opciones',
                 icon: ListChecks,
+              },
+              {
+                id: 'ajustes',
+                label: 'Frases y Ajustes',
+                icon: Award,
               },
               {
                 id: 'usuarios',
@@ -1470,6 +1573,152 @@ export const AdminCatalogosView: React.FC<AdminCatalogosViewProps> = ({
             </div>
           </section>
           </div>
+        </div>
+      )}
+
+      {/* TAB 3.5: AJUSTES Y FRASES MOTIVACIONALES */}
+      {tab === 'ajustes' && (
+        <div className="space-y-5">
+          <section className="bg-white rounded-2xl border border-[#EAE3F5] p-5 md:p-6 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h2 className="font-display text-sm font-bold text-[#1F172B]">
+                  Frases motivacionales y de felicitación al cerrar actividades
+                </h2>
+                <p className="text-xs text-[#7A6B93] mt-0.5">
+                  Cuando una cajera completa todas sus actividades del día, ControlOps elige al azar una frase activa de esta lista y la muestra en su tarjeta y modal de felicitación.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={savingFrases}
+                  onClick={handleResetFrasesDefaults}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#FAF8FC] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#E6DDF5] disabled:opacity-50"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Restaurar base
+                </button>
+                <button
+                  type="button"
+                  disabled={savingFrases}
+                  onClick={handleSaveFrasesEdits}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white disabled:opacity-50"
+                >
+                  <Save className="h-3.5 w-3.5" />
+                  {savingFrases ? 'Guardando...' : 'Guardar cambios'}
+                </button>
+              </div>
+            </div>
+
+            <form onSubmit={handleAddFrase} className="flex flex-col sm:flex-row gap-2.5">
+              <input
+                type="text"
+                required
+                value={newFraseText}
+                onChange={(e) => setNewFraseText(e.target.value)}
+                placeholder="Escribe una nueva frase de felicitación o motivación..."
+                className="flex-1 px-3.5 py-2.5 rounded-xl border border-[#E6DDF5] bg-[#FAF8FC] text-xs text-[#1F172B] focus:outline-none focus:border-[#7C3AED] focus:bg-white"
+              />
+              <button
+                type="submit"
+                disabled={savingFrases}
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-[#DB2777] hover:bg-[#BE185D] text-white disabled:opacity-50 whitespace-nowrap"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Agregar frase
+              </button>
+            </form>
+
+            <div className="divide-y divide-[#F1ECF9] border border-[#EAE3F5] rounded-xl overflow-hidden">
+              {frasesDraft.length === 0 ? (
+                <div className="p-6 text-center text-xs text-[#7A6B93]">
+                  No hay frases configuradas. Agrega una arriba o restaura las frases base (se usará el respaldo predeterminado si todas están vacías).
+                </div>
+              ) : (
+                frasesDraft.map((frase, idx) => (
+                  <div
+                    key={frase.id}
+                    className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white hover:bg-[#FCFAFE]"
+                  >
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                      <span className="font-mono-num text-[11px] font-bold text-[#7C3AED] bg-[#F3ECFC] px-2 py-1 rounded-md shrink-0">
+                        #{idx + 1}
+                      </span>
+                      <input
+                        type="text"
+                        aria-label={`Texto de frase ${idx + 1}`}
+                        value={frase.texto}
+                        onChange={(e) => {
+                          const nextVal = e.target.value;
+                          setFrasesDraft((prev) =>
+                            prev.map((f) =>
+                              f.id === frase.id ? { ...f, texto: nextVal } : f
+                            )
+                          );
+                        }}
+                        className={`flex-1 min-w-0 px-3 py-1.5 rounded-lg border border-[#E6DDF5] text-xs focus:outline-none focus:border-[#7C3AED] ${
+                          frase.activa
+                            ? 'bg-[#FAF8FC] text-[#1F172B] font-medium'
+                            : 'bg-[#F9FAFB] text-[#9D8FB5]'
+                        }`}
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                      <button
+                        type="button"
+                        disabled={savingFrases}
+                        onClick={() => void handleToggleFrase(frase.id)}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors ${
+                          frase.activa
+                            ? 'bg-[#F0FDF4] border-[#BBF7D0] text-[#15803D]'
+                            : 'bg-[#FAF8FC] border-[#E6DDF5] text-[#8B7CA5]'
+                        }`}
+                      >
+                        <Power className="h-3 w-3" />
+                        {frase.activa ? 'Activa' : 'Inactiva'}
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={savingFrases}
+                        onClick={() => void handleSaveFrasesEdits()}
+                        title="Guardar frase"
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-[#F3ECFC] hover:bg-[#E7DAFA] text-[#5B21B6]"
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        Guardar
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={savingFrases}
+                        onClick={() => void handleDeleteFrase(frase.id)}
+                        title="Eliminar frase"
+                        className="p-1.5 rounded-lg text-[#BE123C] hover:bg-[#FFF1F2]"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="rounded-xl bg-[#FAF8FC] border border-[#EAE3F5] px-4 py-3 text-[11px] text-[#6E5F87] flex flex-wrap items-center justify-between gap-2">
+              <span>
+                Frases activas en rotación aleatoria:{' '}
+                <strong className="font-mono-num text-[#5B21B6]">
+                  {frasesDraft.filter((f) => f.activa && f.texto.trim()).length}
+                </strong>{' '}
+                de {frasesDraft.length}
+              </span>
+              <span>
+                Guardado en Supabase (<span className="font-mono-num">catalogos_controlops</span>)
+              </span>
+            </div>
+          </section>
         </div>
       )}
 

@@ -270,6 +270,25 @@ export function getCurrentLocalHHMM(): string {
   return getMexicoNowParts().hhmm;
 }
 
+export function getMinutesUntilHHMM(
+  targetHHMM: string | null | undefined,
+  referenceHHMM: string = getCurrentLocalHHMM()
+): number | null {
+  if (!targetHHMM || !/^\d{1,2}:\d{2}/.test(targetHHMM.trim())) return null;
+  if (!referenceHHMM || !/^\d{1,2}:\d{2}/.test(referenceHHMM.trim())) return null;
+  const [th, tm] = targetHHMM.trim().split(':').map(Number);
+  const [rh, rm] = referenceHHMM.trim().split(':').map(Number);
+  if (
+    Number.isNaN(th) ||
+    Number.isNaN(tm) ||
+    Number.isNaN(rh) ||
+    Number.isNaN(rm)
+  ) {
+    return null;
+  }
+  return th * 60 + tm - (rh * 60 + rm);
+}
+
 export function getTodayLocalYYYYMMDD(): string {
   return getMexicoNowParts().yyyyMmDd;
 }
@@ -333,7 +352,98 @@ export function extractLlamadaBatchInfo(
   return null;
 }
 
+export function normalizeBranchKey(value?: string | null): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\bsucursal\b/gi, ' ')
+    .replace(/\bsuc\.?\b/gi, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+export function matchesSucursalRecord(
+  record: {
+    sucursal_id?: string | null;
+    sucursal_nombre?: string | null;
+    sucursal?: string | null;
+  },
+  sucursalOrId:
+    | string
+    | Pick<Sucursal, 'id' | 'nombre' | 'codigo'>
+    | undefined
+): boolean {
+  if (!sucursalOrId) return false;
+  if (typeof sucursalOrId === 'string') {
+    const targetRaw = sucursalOrId.trim().toLowerCase();
+    if (!targetRaw || targetRaw === 'todas') return true;
+    const recCandidates = [
+      record.sucursal_id,
+      record.sucursal_nombre,
+      record.sucursal,
+    ]
+      .map((v) => String(v ?? '').trim())
+      .filter(Boolean);
+    if (recCandidates.some((c) => c.toLowerCase() === targetRaw)) return true;
+    const targetKey = normalizeBranchKey(sucursalOrId);
+    if (!targetKey) return false;
+    return recCandidates.some((c) => normalizeBranchKey(c) === targetKey);
+  }
+
+  const sucRawIds = [sucursalOrId.id, sucursalOrId.nombre, sucursalOrId.codigo]
+    .map((v) => String(v ?? '').trim())
+    .filter(Boolean);
+  const recCandidates = [
+    record.sucursal_id,
+    record.sucursal_nombre,
+    record.sucursal,
+  ]
+    .map((v) => String(v ?? '').trim())
+    .filter(Boolean);
+
+  for (const r of recCandidates) {
+    const rLow = r.toLowerCase();
+    if (sucRawIds.some((s) => s.toLowerCase() === rLow)) return true;
+  }
+
+  const sucKeys = sucRawIds.map(normalizeBranchKey).filter(Boolean);
+  if (sucKeys.length === 0) return false;
+  return recCandidates.some((r) => {
+    const rKey = normalizeBranchKey(r);
+    return Boolean(rKey) && sucKeys.includes(rKey);
+  });
+}
+
+export function isLlamadaRealizadaRecord(row: {
+  realizada?: unknown;
+  llamada_registrada?: unknown;
+  estatus?: unknown;
+  estado?: unknown;
+}): boolean {
+  if (
+    row.realizada === true ||
+    row.realizada === 'true' ||
+    row.realizada === 1
+  ) {
+    return true;
+  }
+  if (
+    row.llamada_registrada === true ||
+    row.llamada_registrada === 'true' ||
+    row.llamada_registrada === 1
+  ) {
+    return true;
+  }
+  const estatus = String(row.estatus ?? '').trim().toLowerCase();
+  const estado = String(row.estado ?? '').trim().toLowerCase();
+  return estatus === 'realizada' || estado === 'realizada';
+}
+
 export function getLlamadaLocalDate(llamada: LlamadaSucursal): string {
+  if (llamada.fecha_llamada && /^\d{4}-\d{2}-\d{2}/.test(llamada.fecha_llamada)) {
+    return toLocalYYYYMMDD(llamada.fecha_llamada);
+  }
   const batchInfo = extractLlamadaBatchInfo(llamada);
   if (batchInfo?.fecha) return batchInfo.fecha;
   return toLocalYYYYMMDD(llamada.fecha_registro);
@@ -361,12 +471,16 @@ export interface DailyBatchSummary {
 
 export function getDailyBatchSummaryForBranch(
   llamadas: LlamadaSucursal[],
-  sucursalId: string,
+  sucursalIdOrObj: string | Pick<Sucursal, 'id' | 'nombre' | 'codigo'>,
   fechaStr: string = getTodayLocalYYYYMMDD()
 ): DailyBatchSummary {
   const maxBases = 3;
+  const sucursalId =
+    typeof sucursalIdOrObj === 'string' ? sucursalIdOrObj : sucursalIdOrObj.id;
   const branchTodayCalls = llamadas.filter(
-    (l) => l.sucursal_id === sucursalId && getLlamadaLocalDate(l) === fechaStr
+    (l) =>
+      matchesSucursalRecord(l, sucursalIdOrObj) &&
+      getLlamadaLocalDate(l) === fechaStr
   );
 
   const grouped = new Map<
@@ -381,16 +495,19 @@ export function getDailyBatchSummaryForBranch(
 
   for (const item of branchTodayCalls) {
     const info = extractLlamadaBatchInfo(item);
-    if (!info) continue;
-    const existing = grouped.get(info.batchKey);
+    const done = isLlamadaRealizadaRecord(item);
+    const fallbackKey = `${fechaStr}__${sucursalId}__db-${(item.fecha_registro || fechaStr).slice(0, 16)}`;
+    const batchKey = info?.batchKey || fallbackKey;
+    const loteNum = info?.loteNum ?? null;
+    const existing = grouped.get(batchKey);
     if (existing) {
       existing.totalRegistros += 1;
-      if (item.llamada_registrada) existing.llamadasRealizadas += 1;
+      if (done) existing.llamadasRealizadas += 1;
     } else {
-      grouped.set(info.batchKey, {
-        loteNum: info.loteNum,
+      grouped.set(batchKey, {
+        loteNum,
         totalRegistros: 1,
-        llamadasRealizadas: item.llamada_registrada ? 1 : 0,
+        llamadasRealizadas: done ? 1 : 0,
         firstTs: item.fecha_registro || '',
       });
     }
@@ -427,8 +544,8 @@ export function getDailyBatchSummaryForBranch(
 
   const count = orderedBatches.length;
   const totalHoyClientes = branchTodayCalls.length;
-  const totalHoyRegistradas = branchTodayCalls.filter(
-    (l) => l.llamada_registrada
+  const totalHoyRegistradas = branchTodayCalls.filter((l) =>
+    isLlamadaRealizadaRecord(l)
   ).length;
 
   return {
@@ -777,6 +894,7 @@ export function calcularExcesoPresupuesto(
   presupuestoLimite: number
 ): {
   excedido: boolean;
+  alertaPreventiva: boolean;
   excesoDinero: number;
   excesoPorcentaje: number;
   margenDisponible: number;
@@ -785,6 +903,7 @@ export function calcularExcesoPresupuesto(
   if (presupuestoLimite <= 0) {
     return {
       excedido: montoReal > 0,
+      alertaPreventiva: false,
       excesoDinero: montoReal > 0 ? montoReal : 0,
       excesoPorcentaje: 0,
       margenDisponible: 0,
@@ -799,9 +918,11 @@ export function calcularExcesoPresupuesto(
     : 0;
   const margenDisponible = !excedido ? presupuestoLimite - montoReal : 0;
   const porcentajeUso = (montoReal / presupuestoLimite) * 100;
+  const alertaPreventiva = !excedido && porcentajeUso >= 85;
 
   return {
     excedido,
+    alertaPreventiva,
     excesoDinero,
     excesoPorcentaje,
     margenDisponible,
@@ -896,7 +1017,7 @@ export function computeBranchSummaries(
           s.responsable_caja.trim().toLowerCase() === cajeraFilter ||
           llamadas.some(
             (l) =>
-              l.sucursal_id === s.id &&
+              matchesSucursalRecord(l, s) &&
               l.cajera_nombre.trim().toLowerCase() === cajeraFilter
           )
       )
@@ -906,7 +1027,7 @@ export function computeBranchSummaries(
     const metaConfig = metasSucursal.find((m) => m.sucursal_id === sucursal.id);
 
     const llamadasSuc = llamadas.filter((l) => {
-      if (l.sucursal_id !== sucursal.id) return false;
+      if (!matchesSucursalRecord(l, sucursal)) return false;
       if (!matchesLlamadaDate(getLlamadaLocalDate(l))) return false;
       if (
         cajeraFilter &&
@@ -917,8 +1038,8 @@ export function computeBranchSummaries(
       }
       return true;
     });
-    const llamadasRegistradas = llamadasSuc.filter(
-      (l) => l.llamada_registrada
+    const llamadasRegistradas = llamadasSuc.filter((l) =>
+      isLlamadaRealizadaRecord(l)
     ).length;
     const llamadasVerificadas = llamadasSuc.filter(
       (l) => l.estatus_auditoria === 'Verificada'
@@ -980,7 +1101,7 @@ export function computeBranchSummaries(
       actividadesTotal > 0 ? (actividadesCompletadas / actividadesTotal) * 100 : 0;
 
     const gastosSuc = gastosYRefrendos.filter((g) => {
-      if (g.sucursal_id !== sucursal.id || g.tipo !== 'Gasto') return false;
+      if (!matchesSucursalRecord(g, sucursal) || g.tipo !== 'Gasto') return false;
       if (!matchesFinanceDate(g.fecha || '')) return false;
       if (
         cajeraFilter &&
@@ -1008,7 +1129,7 @@ export function computeBranchSummaries(
     );
 
     const refrendosSuc = gastosYRefrendos.filter((g) => {
-      if (g.sucursal_id !== sucursal.id || g.tipo !== 'Refrendo') return false;
+      if (!matchesSucursalRecord(g, sucursal) || g.tipo !== 'Refrendo') return false;
       if (!matchesFinanceDate(g.fecha || '')) return false;
       if (
         cajeraFilter &&
@@ -1067,6 +1188,7 @@ export function computeBranchSummaries(
       excesoPorcentaje: gastoCalc.excesoPorcentaje,
       pctUsoPresupuesto: gastoCalc.porcentajeUso,
       excedioPresupuesto: gastoCalc.excedido,
+      alertaPreventivaPresupuesto: gastoCalc.alertaPreventiva,
       refrendosRealizados,
       refrendosMeta,
       montoRefrendos,

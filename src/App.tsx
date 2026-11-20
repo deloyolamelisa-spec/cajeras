@@ -35,6 +35,7 @@ import {
   deleteLlamadaRecord,
   deleteSucursalRecord,
   deleteUsuarioRecord,
+  fetchLlamadasParaSucursalHoy,
   getSavedSessionUser,
   loadAllOperationalData,
   resetDemoLocalData,
@@ -50,6 +51,7 @@ import {
   saveSessionUser,
   saveSucursal,
   saveSucursalesBatch,
+  updateLlamadaById,
   updateUsuario,
 } from './services/controlOpsService';
 import {
@@ -58,6 +60,7 @@ import {
   getTodayDiaSemana,
   getTodayLocalYYYYMMDD,
   isFixedBaseTask,
+  matchesSucursalRecord,
 } from './utils/calculations';
 import { isSupabaseConfigured } from './lib/supabaseConfig';
 import { INITIAL_CATALOGOS } from './data/mockData';
@@ -166,7 +169,12 @@ export default function App() {
     setMetas(loaded.metas);
     setCatalogos(loaded.catalogos);
     setUsuarios(loaded.usuarios);
-    setLlamadas(loaded.llamadas);
+
+    const callsErrored = Boolean(loaded.warning?.includes('llamadas_sucursal'));
+    if (!callsErrored || loaded.llamadas.length > 0) {
+      setLlamadas(loaded.llamadas);
+    }
+
     setActividades(loaded.actividades);
     setGastosYRefrendos(loaded.gastosYRefrendos);
     setHorarios(loaded.horarios);
@@ -175,23 +183,66 @@ export default function App() {
     setSupabaseWarning(loaded.warning);
     if (loaded.warning) {
       setSyncError(loaded.warning);
+    } else {
+      setSyncError(null);
     }
+
     const savedUser = getSavedSessionUser();
+    let effectiveUser = savedUser;
     if (savedUser && loaded.source === 'supabase' && loaded.usuarios.length > 0) {
       const freshUser = loaded.usuarios.find((u) => u.id === savedUser.id);
       if (freshUser) {
         if (!freshUser.activo) {
           setCurrentUser(null);
           saveSessionUser(null);
+          effectiveUser = null;
         } else {
           setCurrentUser(freshUser);
           saveSessionUser(freshUser);
+          effectiveUser = freshUser;
           if (freshUser.rol === 'cajera') {
             setSelectedSucursalId(freshUser.sucursal_id);
           }
         }
       }
     }
+
+    if (effectiveUser?.rol === 'cajera' && loaded.source === 'supabase') {
+      const matchedSuc =
+        loaded.sucursales.find((s) =>
+          matchesSucursalRecord(
+            {
+              sucursal_id: effectiveUser.sucursal_id,
+              sucursal_nombre: effectiveUser.sucursal_id,
+              sucursal: effectiveUser.sucursal_id,
+            },
+            s
+          )
+        ) || effectiveUser.sucursal_id;
+
+      const cajeraRes = await fetchLlamadasParaSucursalHoy(
+        matchedSuc,
+        loaded.sucursales,
+        getTodayLocalYYYYMMDD()
+      );
+      if (cajeraRes.ok && Array.isArray(cajeraRes.data)) {
+        const freshBranchRows = cajeraRes.data;
+        setLlamadas((prev) => {
+          const branchIds = new Set(freshBranchRows.map((r) => r.id));
+          const otherBranches = prev.filter(
+            (r) =>
+              !branchIds.has(r.id) &&
+              !matchesSucursalRecord(r, matchedSuc)
+          );
+          return [...freshBranchRows, ...otherBranches].sort((a, b) =>
+            (b.fecha_registro || '').localeCompare(a.fecha_registro || '')
+          );
+        });
+      } else if (!cajeraRes.ok && cajeraRes.error) {
+        setSyncError(cajeraRes.error);
+      }
+    }
+
     setLoading(false);
   }, []);
 
@@ -229,12 +280,14 @@ export default function App() {
 
   const resolvedCajeraSucursal = useMemo(() => {
     if (currentUser?.rol !== 'cajera') return undefined;
-    const target = (currentUser.sucursal_id || '').trim().toLowerCase();
+    const target = (currentUser.sucursal_id || '').trim();
     return (
-      sucursales.find((s) => s.id.toLowerCase() === target) ||
-      sucursales.find((s) => s.nombre.trim().toLowerCase() === target) ||
-      sucursales.find((s) => s.codigo.trim().toLowerCase() === target) ||
-      sucursales[0]
+      sucursales.find((s) =>
+        matchesSucursalRecord(
+          { sucursal_id: target, sucursal_nombre: target, sucursal: target },
+          s
+        )
+      ) || sucursales[0]
     );
   }, [currentUser, sucursales]);
 
@@ -249,13 +302,15 @@ export default function App() {
       if (currentUser?.rol === 'cajera' && resolvedCajeraSucursal) {
         return resolvedCajeraSucursal;
       }
-      const idNorm = (sucId || '').trim().toLowerCase();
-      const nameNorm = (sucName || '').trim().toLowerCase();
+      const idRaw = (sucId || '').trim();
+      const nameRaw = (sucName || '').trim();
       return (
-        sucursales.find((s) => s.id.toLowerCase() === idNorm) ||
-        sucursales.find((s) => s.nombre.trim().toLowerCase() === nameNorm) ||
-        sucursales.find((s) => s.nombre.trim().toLowerCase() === idNorm) ||
-        sucursales[0]
+        sucursales.find((s) =>
+          matchesSucursalRecord(
+            { sucursal_id: idRaw, sucursal_nombre: nameRaw, sucursal: nameRaw },
+            s
+          )
+        ) || sucursales[0]
       );
     },
     [currentUser, resolvedCajeraSucursal, sucursales]
@@ -420,7 +475,10 @@ export default function App() {
   const branchAlerts = useMemo(() => {
     const map: Record<string, boolean> = {};
     for (const s of branchSummaries) {
-      map[s.sucursal.id] = s.excedioPresupuesto || s.llamadasFalsas > 0;
+      map[s.sucursal.id] =
+        s.excedioPresupuesto ||
+        s.alertaPreventivaPresupuesto ||
+        s.llamadasFalsas > 0;
     }
     return map;
   }, [branchSummaries]);
@@ -430,7 +488,7 @@ export default function App() {
   ): Promise<ServiceResult<LlamadaSucursal>> => {
     const enriched = enrichLlamadaWithAuth(updated);
     const next = llamadas.map((l) => (l.id === enriched.id ? enriched : l));
-    const res = await saveLlamada(enriched, next);
+    const res = await updateLlamadaById(enriched, next);
     if (!res.ok) {
       if (res.error) setSyncError(`Supabase (${res.error})`);
       return res;
@@ -1147,6 +1205,7 @@ export default function App() {
                       gastosYRefrendos={gastosYRefrendos}
                       horarios={horarios}
                       diaActivo={diaActivo}
+                      frasesMotivacionales={catalogos.frases_motivacionales}
                       onUpdateActividad={handleUpdateActividad}
                     />
                   )}
@@ -1239,6 +1298,7 @@ export default function App() {
                     registros={gastosYRefrendos}
                     summaries={branchSummaries}
                     sucursales={sucursales}
+                    metas={metas}
                     selectedSucursalId={effectiveSucursalId}
                     userRole={currentUser.rol}
                     currentUserId={currentUser.id}

@@ -13,6 +13,7 @@ import {
 import {
   BranchMetricSummary,
   GastoYRefrendo,
+  MetaSucursal,
   RolUsuario,
   Sucursal,
 } from '../types/controlops';
@@ -21,6 +22,7 @@ import {
   formatMXN,
   formatPercent,
   getTodayLocalYYYYMMDD,
+  matchesSucursalRecord,
   parseMoneyInput,
   roundMoney2,
 } from '../utils/calculations';
@@ -31,6 +33,7 @@ interface GastosRefrendosViewProps {
   registros: GastoYRefrendo[];
   summaries: BranchMetricSummary[];
   sucursales: Sucursal[];
+  metas?: MetaSucursal[];
   selectedSucursalId: string;
   userRole: RolUsuario;
   currentUserId?: string;
@@ -48,6 +51,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
   registros,
   summaries,
   sucursales,
+  metas,
   selectedSucursalId,
   userRole,
   currentUserId,
@@ -64,6 +68,14 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
   const isCreador = userRole === 'creador';
   const canMutateModal = isCajera || isCreador;
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [budgetAlert, setBudgetAlert] = useState<{
+    level: 'warning' | 'danger';
+    sucursalNombre: string;
+    acumulado: number;
+    techo: number;
+    pct: number;
+    exceso: number;
+  } | null>(null);
   const [subTab, setSubTab] = useState<'gastos' | 'refrendos' | 'bitacora'>(
     fixedTab ?? 'gastos'
   );
@@ -183,10 +195,19 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
     [visibleSummaries]
   );
 
+  const enAlertaPreventiva = useMemo(
+    () => visibleSummaries.filter((s) => s.alertaPreventivaPresupuesto),
+    [visibleSummaries]
+  );
+
   const scopedRegistros = useMemo(() => {
     if (selectedSucursalId === 'todas') return registros;
+    const targetSuc = sucursales.find((s) => s.id === selectedSucursalId);
+    if (targetSuc) {
+      return registros.filter((r) => matchesSucursalRecord(r, targetSuc));
+    }
     return registros.filter((r) => r.sucursal_id === selectedSucursalId);
-  }, [registros, selectedSucursalId]);
+  }, [registros, selectedSucursalId, sucursales]);
 
   const periodRollup = useMemo(() => {
     const monthPrefix = todayStr.slice(0, 7);
@@ -259,6 +280,61 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
         ? form.fecha || getTodayLocalYYYYMMDD()
         : getTodayLocalYYYYMMDD();
 
+      const evaluateBudgetCeilingAfterSave = (savedRecord: GastoYRefrendo) => {
+        if (savedRecord.tipo !== 'Gasto') {
+          setBudgetAlert(null);
+          return;
+        }
+        const monthPrefix = (savedRecord.fecha || todayStr).slice(0, 7);
+        const branchMeta = metas?.find(
+          (m) => m.sucursal_id === (suc?.id || targetSucId)
+        );
+        const techo = roundMoney2(
+          branchMeta?.techo_gasto_mensual ?? suc?.techo_gasto_mensual ?? 0
+        );
+        if (techo <= 0) {
+          setBudgetAlert(null);
+          return;
+        }
+        const otherMonthlyExpenses = registros.filter(
+          (r) =>
+            r.id !== savedRecord.id &&
+            r.tipo === 'Gasto' &&
+            (r.fecha || '').startsWith(monthPrefix) &&
+            (suc
+              ? matchesSucursalRecord(r, suc)
+              : r.sucursal_id === savedRecord.sucursal_id)
+        );
+        const acumulado = roundMoney2(
+          otherMonthlyExpenses.reduce(
+            (acc, r) => acc + (Number(r.monto_real) || 0),
+            0
+          ) + (Number(savedRecord.monto_real) || 0)
+        );
+        const pct = roundMoney2((acumulado / techo) * 100);
+        if (acumulado > techo) {
+          setBudgetAlert({
+            level: 'danger',
+            sucursalNombre: safeSucursalNombre,
+            acumulado,
+            techo,
+            pct,
+            exceso: roundMoney2(acumulado - techo),
+          });
+        } else if (pct >= 85) {
+          setBudgetAlert({
+            level: 'warning',
+            sucursalNombre: safeSucursalNombre,
+            acumulado,
+            techo,
+            pct,
+            exceso: 0,
+          });
+        } else {
+          setBudgetAlert(null);
+        }
+      };
+
       if (editingRegistro && onUpdateRegistro) {
         const updated: GastoYRefrendo = {
           ...editingRegistro,
@@ -286,6 +362,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
           );
           return;
         }
+        evaluateBudgetCeilingAfterSave(updated);
         setReceiptFile(null);
         closeModal();
         return;
@@ -324,6 +401,7 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
         );
         return;
       }
+      evaluateBudgetCeilingAfterSave(nuevo);
       setForm({
         ...form,
         concepto: '',
@@ -348,6 +426,48 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
             type="button"
             onClick={() => setSaveError(null)}
             className="font-bold underline shrink-0"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {budgetAlert && (
+        <div
+          role="alert"
+          className={`rounded-2xl px-4 py-3.5 text-xs sm:text-sm flex items-start justify-between gap-3 border ${
+            budgetAlert.level === 'danger'
+              ? 'bg-[#FFF1F2] border-[#FECDD3] text-[#BE123C]'
+              : 'bg-[#FFFBEB] border-[#FDE68A] text-[#92400E]'
+          }`}
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle
+              className={`h-4 w-4 shrink-0 mt-0.5 ${
+                budgetAlert.level === 'danger'
+                  ? 'text-[#E11D48]'
+                  : 'text-[#D97706]'
+              }`}
+            />
+            <div>
+              <p className="font-bold">
+                {budgetAlert.level === 'danger'
+                  ? `Sobrepaso de techo de gasto en ${budgetAlert.sucursalNombre} (${budgetAlert.pct.toFixed(1)}%)`
+                  : `Alerta preventiva: ${budgetAlert.sucursalNombre} alcanzó el ${budgetAlert.pct.toFixed(1)}% de su techo de gasto`}
+              </p>
+              <p className="text-xs mt-0.5 font-mono-num">
+                Acumulado del mes: {formatCurrencyClean(budgetAlert.acumulado)} /
+                Techo autorizado: {formatCurrencyClean(budgetAlert.techo)}
+                {budgetAlert.level === 'danger'
+                  ? ` · Excedido por ${formatCurrencyClean(budgetAlert.exceso)}`
+                  : ` · Disponible: ${formatCurrencyClean(Math.max(0, budgetAlert.techo - budgetAlert.acumulado))}`}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setBudgetAlert(null)}
+            className="font-bold underline shrink-0 text-xs"
           >
             Cerrar
           </button>
@@ -430,15 +550,15 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
 
       {activeTab === 'gastos' && (
         <div className="space-y-6">
-          {/* Alert Banner for Over-Budget Branches */}
-          {excedidas.length > 0 ? (
+          {/* Alert Banners for Over-Budget (>100%) and Preventive (>=85%) Branches */}
+          {excedidas.length > 0 && (
             <section className="rounded-2xl bg-[#FFF1F2] border border-[#FECDD3] p-5 space-y-3">
               <div className="flex items-start gap-3">
                 <AlertTriangle className="h-5 w-5 text-[#BE123C] shrink-0 mt-0.5" />
                 <div>
                   <h3 className="font-display text-sm font-bold text-[#881337]">
-                    Alerta de sobrecosto: {excedidas.length} sucursal(es)
-                    superaron su techo máximo autorizado
+                    Alerta roja de sobrecosto: {excedidas.length} sucursal(es)
+                    superaron su techo máximo autorizado (&gt;100%)
                   </h3>
                   <p className="text-xs text-[#9F1239] mt-0.5">
                     El presupuesto funciona como límite superior estricto.
@@ -474,11 +594,60 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                 ))}
               </div>
             </section>
-          ) : (
+          )}
+
+          {enAlertaPreventiva.length > 0 && (
+            <section className="rounded-2xl bg-[#FFFBEB] border border-[#FDE68A] p-5 space-y-3">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="h-5 w-5 text-[#D97706] shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="font-display text-sm font-bold text-[#92400E]">
+                    Alerta preventiva (≥85%): {enAlertaPreventiva.length}{' '}
+                    sucursal(es) próximas a su techo máximo de gasto
+                  </h3>
+                  <p className="text-xs text-[#B45309] mt-0.5">
+                    Controla los egresos restantes del mes para evitar superar el presupuesto autorizado en metas_sucursal.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                {enAlertaPreventiva.map((s) => (
+                  <div
+                    key={s.sucursal.id}
+                    className="rounded-xl bg-white border border-[#FCD34D] px-4 py-3 flex items-center justify-between gap-3"
+                  >
+                    <div>
+                      <p className="text-sm font-bold text-[#1F172B]">
+                        {s.sucursal.nombre}
+                      </p>
+                      <p className="text-xs text-[#6E5F87] font-mono-num">
+                        Real: {formatCurrencyClean(s.gastoRealTotal)} vs Techo:{' '}
+                        {formatCurrencyClean(s.gastoPresupuestoTotal)}
+                      </p>
+                    </div>
+                    <div className="text-right font-mono-num">
+                      <p className="text-sm font-bold text-[#B45309]">
+                        {formatPercent(s.pctUsoPresupuesto)} usado
+                      </p>
+                      <p className="text-xs font-semibold text-[#92400E]">
+                        Margen:{' '}
+                        {formatCurrencyClean(
+                          Math.max(0, s.gastoPresupuestoTotal - s.gastoRealTotal)
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {excedidas.length === 0 && enAlertaPreventiva.length === 0 && (
             <section className="rounded-2xl bg-[#F0FDF4] border border-[#BBF7D0] p-4 flex items-center gap-3">
               <CheckCircle2 className="h-5 w-5 text-[#15803D] shrink-0" />
               <p className="text-xs font-medium text-[#166534]">
-                Todas las sucursales visibles operan dentro de su techo máximo
+                Todas las sucursales visibles operan debajo del 85% de su techo máximo
                 de gasto autorizado.
               </p>
             </section>
@@ -502,10 +671,14 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                   </span>
                 </p>
               </div>
-              <div className="flex items-center gap-4 text-xs text-[#55476E]">
+              <div className="flex flex-wrap items-center gap-4 text-xs text-[#55476E]">
                 <span className="inline-flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-xs bg-[#8B5CF6]" />
                   Dentro del límite
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-xs bg-[#D97706]" />
+                  Preventiva (≥85%)
                 </span>
                 <span className="inline-flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-xs bg-[#E11D48]" />
@@ -538,13 +711,15 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                           className={`font-bold ${
                             s.excedioPresupuesto
                               ? 'text-[#BE123C]'
-                              : 'text-[#15803D]'
+                              : s.alertaPreventivaPresupuesto
+                                ? 'text-[#B45309]'
+                                : 'text-[#15803D]'
                           }`}
                         >
                           Real: {formatCurrencyClean(s.gastoRealTotal)}
                           {s.excedioPresupuesto
                             ? ` (+${formatCurrencyClean(s.excesoDinero)} / +${formatPercent(s.excesoPorcentaje)})`
-                            : ` (Margen ${formatCurrencyClean(s.gastoPresupuestoTotal - s.gastoRealTotal)})`}
+                            : ` (${formatPercent(s.pctUsoPresupuesto)} · Margen ${formatCurrencyClean(s.gastoPresupuestoTotal - s.gastoRealTotal)})`}
                         </span>
                       </div>
                     </div>
@@ -555,7 +730,9 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                         className={`h-full rounded-lg transition-all duration-300 ${
                           s.excedioPresupuesto
                             ? 'bg-gradient-to-r from-[#FB7185] to-[#E11D48]'
-                            : 'bg-gradient-to-r from-[#A78BFA] to-[#7C3AED]'
+                            : s.alertaPreventivaPresupuesto
+                              ? 'bg-gradient-to-r from-[#FBBF24] to-[#D97706]'
+                              : 'bg-gradient-to-r from-[#A78BFA] to-[#7C3AED]'
                         }`}
                         style={{
                           width: `${Math.min(100, Math.max(2, realPct))}%`,
@@ -613,7 +790,9 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                           className={`py-3.5 px-4 text-right font-mono-num font-semibold ${
                             s.excedioPresupuesto
                               ? 'text-[#BE123C]'
-                              : 'text-[#15803D]'
+                              : s.alertaPreventivaPresupuesto
+                                ? 'text-[#B45309]'
+                                : 'text-[#15803D]'
                           }`}
                         >
                           {s.excedioPresupuesto
@@ -624,7 +803,9 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                           className={`py-3.5 px-4 text-right font-mono-num font-semibold ${
                             s.excedioPresupuesto
                               ? 'text-[#BE123C]'
-                              : 'text-[#5B21B6]'
+                              : s.alertaPreventivaPresupuesto
+                                ? 'text-[#B45309]'
+                                : 'text-[#5B21B6]'
                           }`}
                         >
                           {s.excedioPresupuesto
@@ -636,6 +817,11 @@ export const GastosRefrendosView: React.FC<GastosRefrendosViewProps> = ({
                             <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#BE123C]">
                               <AlertTriangle className="h-3.5 w-3.5" />
                               Excedido
+                            </span>
+                          ) : s.alertaPreventivaPresupuesto ? (
+                            <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#B45309]">
+                              <AlertTriangle className="h-3.5 w-3.5 text-[#D97706]" />
+                              Preventiva (≥85%)
                             </span>
                           ) : (
                             <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#15803D]">

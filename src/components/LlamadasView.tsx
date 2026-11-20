@@ -37,6 +37,8 @@ import {
   getLlamadaLocalDate,
   getMexicoNowParts,
   getTodayLocalYYYYMMDD,
+  isLlamadaRealizadaRecord,
+  matchesSucursalRecord,
   MEXICO_TIMEZONE,
   parseMoneyInput,
   renderWhatsAppTemplate,
@@ -306,8 +308,11 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
   const scopedLlamadas = useMemo(() => {
     if (selectedSucursalId === 'todas') return llamadas;
-    return llamadas.filter((l) => l.sucursal_id === selectedSucursalId);
-  }, [llamadas, selectedSucursalId]);
+    const targetSuc = sucursales.find((s) => s.id === selectedSucursalId);
+    return llamadas.filter((l) =>
+      matchesSucursalRecord(l, targetSuc || selectedSucursalId)
+    );
+  }, [llamadas, sucursales, selectedSucursalId]);
 
   const activeBranchForBatch =
     selectedSucursalId !== 'todas'
@@ -321,8 +326,12 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
   const dailyBatchSummary = useMemo(
     () =>
-      getDailyBatchSummaryForBranch(llamadas, activeBranchForBatch, todayStr),
-    [llamadas, activeBranchForBatch, todayStr]
+      getDailyBatchSummaryForBranch(
+        llamadas,
+        activeBranchObj || activeBranchForBatch,
+        todayStr
+      ),
+    [llamadas, activeBranchObj, activeBranchForBatch, todayStr]
   );
 
   const todayAllBranchesStats = useMemo(() => {
@@ -331,7 +340,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     );
     return {
       totalHoyClientes: todayScoped.length,
-      totalHoyRegistradas: todayScoped.filter((l) => l.llamada_registrada).length,
+      totalHoyRegistradas: todayScoped.filter((l) =>
+        isLlamadaRealizadaRecord(l)
+      ).length,
     };
   }, [scopedLlamadas, todayStr]);
 
@@ -341,8 +352,12 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     );
     const currentMonthPrefix = todayStr.slice(0, 7);
     const totalBaseHoy = todayScoped.length;
-    const registradas = todayScoped.filter((l) => l.llamada_registrada).length;
-    const pendientes = todayScoped.filter((l) => !l.llamada_registrada).length;
+    const registradas = todayScoped.filter((l) =>
+      isLlamadaRealizadaRecord(l)
+    ).length;
+    const pendientes = todayScoped.filter(
+      (l) => !isLlamadaRealizadaRecord(l)
+    ).length;
     const verificadas = todayScoped.filter(
       (l) => l.estatus_auditoria === 'Verificada'
     ).length;
@@ -354,7 +369,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     ).length;
     const registradasMes = scopedLlamadas.filter(
       (l) =>
-        l.llamada_registrada &&
+        isLlamadaRealizadaRecord(l) &&
         getLlamadaLocalDate(l).startsWith(currentMonthPrefix)
     ).length;
 
@@ -409,9 +424,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
       if (filterAuditoria !== 'todos') {
         if (filterAuditoria === 'pendiente_marcar') {
-          if (item.llamada_registrada) return false;
+          if (isLlamadaRealizadaRecord(item)) return false;
         } else if (filterAuditoria === 'marcadas') {
-          if (!item.llamada_registrada) return false;
+          if (!isLlamadaRealizadaRecord(item)) return false;
         } else if (canAuditCalls && item.estatus_auditoria !== filterAuditoria) {
           return false;
         }
@@ -481,12 +496,12 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   ]);
 
   const cajeraPendientes = useMemo(
-    () => filteredLlamadas.filter((item) => !item.llamada_registrada),
+    () => filteredLlamadas.filter((item) => !isLlamadaRealizadaRecord(item)),
     [filteredLlamadas]
   );
 
   const cajeraRealizadas = useMemo(
-    () => filteredLlamadas.filter((item) => item.llamada_registrada),
+    () => filteredLlamadas.filter((item) => isLlamadaRealizadaRecord(item)),
     [filteredLlamadas]
   );
 
@@ -606,6 +621,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       cajera_nombre: currentUserName || suc.responsable_caja,
       cajera_id: currentUserId || '',
       llamada_registrada: true,
+      realizada: true,
       estatus: 'Realizada',
       estado: 'Realizada',
       hora_llamada: getMexicoExactTimeHHMMSS(now),
@@ -1915,11 +1931,11 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                       <div className="text-xs text-[#6E5F87] space-y-1.5">
                         <div className="flex flex-wrap items-center gap-1.5 font-medium text-[#1F172B]">
                           <span>
-                            {item.llamada_registrada
+                            {isLlamadaRealizadaRecord(item)
                               ? 'Realizada'
                               : 'Pendiente'}
                           </span>
-                          {item.llamada_registrada && callTimeDisplay && (
+                          {isLlamadaRealizadaRecord(item) && callTimeDisplay && (
                             <span className="font-mono-num text-[11px] text-[#5B21B6] bg-[#F3ECFC] px-1.5 py-0.5 rounded">
                               {callTimeDisplay}
                             </span>
@@ -1959,19 +1975,19 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                       </label>
                       {!canAuditCalls && (
                         <div className="flex items-center gap-1.5">
-                          {item.llamada_registrada && callTimeDisplay && (
+                          {isLlamadaRealizadaRecord(item) && callTimeDisplay && (
                             <span className="font-mono-num text-[11px] font-semibold text-[#5B21B6]">
                               {callTimeDisplay}
                             </span>
                           )}
                           <span
                             className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${
-                              item.llamada_registrada
+                              isLlamadaRealizadaRecord(item)
                                 ? 'bg-[#ECFDF5] text-[#15803D]'
                                 : 'bg-[#FEF9C3] text-[#A16207]'
                             }`}
                           >
-                            {item.llamada_registrada
+                            {isLlamadaRealizadaRecord(item)
                               ? 'Realizada'
                               : 'Pendiente'}
                           </span>
@@ -1980,7 +1996,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                     </div>
 
                     {isCajera ? (
-                      !item.llamada_registrada ? (
+                      !isLlamadaRealizadaRecord(item) ? (
                         <div className="space-y-2">
                           <div className="flex flex-col sm:flex-row gap-2">
                             <select
@@ -2015,8 +2031,20 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                                     ...item,
                                     monto_prestamo: loanAmount,
                                     monto: loanAmount,
+                                    sucursal_id:
+                                      item.sucursal_id ||
+                                      activeBranchObj?.id ||
+                                      selectedSucursalId,
+                                    sucursal_nombre:
+                                      item.sucursal_nombre ||
+                                      item.sucursal ||
+                                      activeBranchObj?.nombre ||
+                                      '',
                                     sucursal:
-                                      item.sucursal || item.sucursal_nombre,
+                                      item.sucursal ||
+                                      item.sucursal_nombre ||
+                                      activeBranchObj?.nombre ||
+                                      '',
                                     cajera_nombre:
                                       currentUserName || item.cajera_nombre,
                                     cajera_id:
@@ -2025,6 +2053,7 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                                     respuesta: selectedResponse,
                                     observaciones_admin: freeNoteValue.trim(),
                                     llamada_registrada: true,
+                                    realizada: true,
                                     estatus: 'Realizada',
                                     estado: 'Realizada',
                                     hora_llamada: exactTime,

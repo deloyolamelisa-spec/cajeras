@@ -10,6 +10,7 @@ import {
   DiaSemana,
   PlantillaWhatsApp,
   TareaCatalogo,
+  FraseMotivacional,
 } from '../types/controlops';
 
 export const DIAS_SEMANA: { key: DiaSemana; label: string; short: string }[] = [
@@ -376,6 +377,37 @@ export const DEFAULT_WHATSAPP_TEMPLATES: PlantillaWhatsApp[] = [
   },
 ];
 
+export const DEFAULT_FRASES_MOTIVACIONALES: FraseMotivacional[] = [
+  {
+    id: 'frase-01',
+    texto:
+      '¡Excelente cierre hoy! Tu orden y puntualidad marcan la diferencia en la sucursal',
+    activa: true,
+  },
+  {
+    id: 'frase-02',
+    texto: '¡Día completado! Gracias por tu compromiso y atención a clientes',
+    activa: true,
+  },
+  {
+    id: 'frase-03',
+    texto: '¡Gran jornada! Cerraste todas tus actividades del día',
+    activa: true,
+  },
+  {
+    id: 'frase-04',
+    texto:
+      '¡Meta diaria cumplida! Tu constancia mantiene a la sucursal al 100%',
+    activa: true,
+  },
+  {
+    id: 'frase-05',
+    texto:
+      '¡Impecable trabajo hoy! Cada evidencia enviada suma a la excelencia del equipo',
+    activa: true,
+  },
+];
+
 export const INITIAL_CATALOGOS: CatalogosControlOps = {
   id: 'cat-global',
   tareas_obligatorias: BASE_DAILY_TASKS,
@@ -386,6 +418,7 @@ export const INITIAL_CATALOGOS: CatalogosControlOps = {
     'Irá a sucursal',
   ],
   plantillas_whatsapp: DEFAULT_WHATSAPP_TEMPLATES,
+  frases_motivacionales: DEFAULT_FRASES_MOTIVACIONALES,
 };
 
 export const INITIAL_USUARIOS: UsuarioControlOps[] = [

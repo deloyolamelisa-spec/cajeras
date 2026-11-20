@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
+  Award,
   BellOff,
+  BellRing,
   Camera,
   CheckCircle2,
   ClipboardCheck,
@@ -9,6 +12,7 @@ import {
   Image as ImageIcon,
   MapPin,
   PhoneCall,
+  RefreshCw,
   RotateCcw,
   TrendingUp,
   Wallet,
@@ -17,6 +21,7 @@ import {
 import {
   ActividadDiaria,
   DiaSemana,
+  FraseMotivacional,
   GastoYRefrendo,
   HorarioSucursalDia,
   LlamadaSucursal,
@@ -36,10 +41,15 @@ import {
   getCurrentLocalHHMM,
   getDiaSemanaFromDate,
   getLlamadaLocalDate,
+  getMexicoNowParts,
+  getMinutesUntilHHMM,
   getTodayLocalYYYYMMDD,
+  isLlamadaRealizadaRecord,
+  matchesSucursalRecord,
   resolveDailyTasksForBranch,
   roundMoney2,
 } from '../utils/calculations';
+import { DEFAULT_FRASES_MOTIVACIONALES } from '../data/mockData';
 import {
   ServiceResult,
   uploadEvidenciaFoto,
@@ -55,6 +65,7 @@ interface CajeraMiDiaViewProps {
   gastosYRefrendos: GastoYRefrendo[];
   horarios: HorarioSucursalDia[];
   diaActivo: DiaSemana;
+  frasesMotivacionales?: FraseMotivacional[];
   onUpdateActividad: (updated: ActividadDiaria) => Promise<ServiceResult>;
 }
 
@@ -68,9 +79,20 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
   gastosYRefrendos,
   horarios,
   diaActivo,
+  frasesMotivacionales,
   onUpdateActividad,
 }) => {
-  const [notifDenied, setNotifDenied] = useState(false);
+  const [notifPermission, setNotifPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      return 'unsupported';
+    }
+    return Notification.permission;
+  });
+  const notifDenied = notifPermission === 'denied';
+  const [nowHHMM, setNowHHMM] = useState<string>(() => getMexicoNowParts().hhmm);
+  const notifiedTasksRef = useRef<Set<string>>(new Set());
   const [uploadingId, setUploadingId] = useState<string | null>(null);
   const [uploadFeedback, setUploadFeedback] = useState<{
     type: 'success' | 'error';
@@ -118,7 +140,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
 
   useEffect(() => {
     if (typeof window !== 'undefined' && 'Notification' in window) {
-      setNotifDenied(Notification.permission === 'denied');
+      setNotifPermission(Notification.permission);
     }
     return () => {
       stopWebcamStream();
@@ -130,17 +152,21 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
   );
 
   useEffect(() => {
-    const syncToday = () => {
-      const latest = getTodayLocalYYYYMMDD();
-      setTodayStr((prev) => (prev === latest ? prev : latest));
+    const syncClockAndDay = () => {
+      const { yyyyMmDd, hhmm } = getMexicoNowParts();
+      setTodayStr((prev) => (prev === yyyyMmDd ? prev : yyyyMmDd));
+      setNowHHMM((prev) => (prev === hhmm ? prev : hhmm));
+      if (typeof window !== 'undefined' && 'Notification' in window) {
+        setNotifPermission(Notification.permission);
+      }
     };
-    const interval = window.setInterval(syncToday, 30000);
-    window.addEventListener('focus', syncToday);
-    document.addEventListener('visibilitychange', syncToday);
+    const interval = window.setInterval(syncClockAndDay, 15000);
+    window.addEventListener('focus', syncClockAndDay);
+    document.addEventListener('visibilitychange', syncClockAndDay);
     return () => {
       window.clearInterval(interval);
-      window.removeEventListener('focus', syncToday);
-      document.removeEventListener('visibilitychange', syncToday);
+      window.removeEventListener('focus', syncClockAndDay);
+      document.removeEventListener('visibilitychange', syncClockAndDay);
     };
   }, []);
 
@@ -203,13 +229,13 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
   );
 
   const branchLlamadas = useMemo(
-    () => llamadas.filter((l) => l.sucursal_id === sucursal.id),
-    [llamadas, sucursal.id]
+    () => llamadas.filter((l) => matchesSucursalRecord(l, sucursal)),
+    [llamadas, sucursal]
   );
 
   const branchGastosRefrendos = useMemo(
-    () => gastosYRefrendos.filter((g) => g.sucursal_id === sucursal.id),
-    [gastosYRefrendos, sucursal.id]
+    () => gastosYRefrendos.filter((g) => matchesSucursalRecord(g, sucursal)),
+    [gastosYRefrendos, sucursal]
   );
 
   // KPI 1: ACTIVIDADES DIARIAS (monthly & today)
@@ -305,6 +331,11 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     const exceso = excedido ? roundMoney2(gastoAcumulado - techo) : 0;
     const disponible =
       !sinTecho && !excedido ? roundMoney2(techo - gastoAcumulado) : 0;
+    const rawPct =
+      !sinTecho && techo > 0
+        ? roundMoney2((gastoAcumulado / techo) * 100)
+        : 0;
+    const alertaPreventiva = !sinTecho && !excedido && rawPct >= 85;
     const pct =
       !sinTecho && techo > 0
         ? Math.min(100, Math.round((gastoAcumulado / techo) * 100))
@@ -316,11 +347,155 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
       techo,
       sinTecho,
       excedido,
+      alertaPreventiva,
       exceso,
       disponible,
+      rawPct,
       pct,
     };
   }, [branchGastosRefrendos, currentMonthPrefix, todayStr, metaSucursal, sucursal]);
+
+  // 10-minute upcoming deadline reminders for pending activities
+  const upcomingReminders = useMemo(() => {
+    const items: {
+      actividad: ActividadDiaria;
+      horaLimite: string;
+      minsLeft: number;
+    }[] = [];
+
+    for (const act of tareasHoy) {
+      if (act.estatus === 'Completada') continue;
+      const evalInfo = evaluarVencimientoActividad(act, horarioHoy, nowHHMM);
+      if (act.sin_horario_limite || !evalInfo.horaLimite) continue;
+      const minsLeft = getMinutesUntilHHMM(evalInfo.horaLimite, nowHHMM);
+      if (minsLeft !== null && minsLeft > 0 && minsLeft <= 10) {
+        items.push({
+          actividad: act,
+          horaLimite: evalInfo.horaLimite,
+          minsLeft,
+        });
+      }
+    }
+    return items.sort((a, b) => a.minsLeft - b.minsLeft);
+  }, [tareasHoy, horarioHoy, nowHHMM]);
+
+  useEffect(() => {
+    if (
+      typeof window === 'undefined' ||
+      !('Notification' in window) ||
+      notifPermission !== 'granted' ||
+      upcomingReminders.length === 0
+    ) {
+      return;
+    }
+
+    for (const rem of upcomingReminders) {
+      const storageKey = `controlops_notif_${todayStr}_${currentUser.id}_${rem.actividad.id}`;
+      if (notifiedTasksRef.current.has(storageKey)) continue;
+      let alreadySent = false;
+      try {
+        alreadySent = window.sessionStorage.getItem(storageKey) === '1';
+      } catch {
+        alreadySent = false;
+      }
+      if (alreadySent) {
+        notifiedTasksRef.current.add(storageKey);
+        continue;
+      }
+
+      try {
+        new Notification('Recordatorio de actividad · ControlOps', {
+          body: `"${rem.actividad.titulo}" vence en ${rem.minsLeft} min (${formatHora12h(rem.horaLimite)}). Sube tu evidencia a tiempo.`,
+          tag: storageKey,
+        });
+        notifiedTasksRef.current.add(storageKey);
+        try {
+          window.sessionStorage.setItem(storageKey, '1');
+        } catch {
+          // Ignore storage quota errors
+        }
+      } catch {
+        // Ignore browsers blocking constructor notifications
+      }
+    }
+  }, [upcomingReminders, notifPermission, todayStr, currentUser.id]);
+
+  const handleRequestNotifPermission = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    try {
+      const result = await Notification.requestPermission();
+      setNotifPermission(result);
+    } catch {
+      setNotifPermission(Notification.permission);
+    }
+  };
+
+  // Random motivational closing phrase when all daily activities are completed
+  const activeFrases = useMemo(() => {
+    const customActive = (frasesMotivacionales || []).filter(
+      (f) => f.activa && f.texto.trim().length > 0
+    );
+    if (customActive.length > 0) return customActive;
+    return DEFAULT_FRASES_MOTIVACIONALES.filter(
+      (f) => f.activa && f.texto.trim().length > 0
+    );
+  }, [frasesMotivacionales]);
+
+  const allDailyCompleted = useMemo(
+    () =>
+      tareasHoy.length > 0 && tareasHoy.every((t) => t.estatus === 'Completada'),
+    [tareasHoy]
+  );
+
+  const pickRandomFrase = () => {
+    const pool = activeFrases.length > 0 ? activeFrases : DEFAULT_FRASES_MOTIVACIONALES;
+    const idx = Math.floor(Math.random() * pool.length);
+    return pool[idx]?.texto || '¡Excelente cierre hoy! Completaste todas tus actividades del día.';
+  };
+
+  const [congratsPhrase, setCongratsPhrase] = useState<string>(() =>
+    pickRandomFrase()
+  );
+  const [congratsModalOpen, setCongratsModalOpen] = useState(false);
+  const prevAllCompletedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    const prev = prevAllCompletedRef.current;
+    prevAllCompletedRef.current = allDailyCompleted;
+    if (!allDailyCompleted) {
+      setCongratsModalOpen(false);
+      return;
+    }
+
+    const picked = pickRandomFrase();
+    setCongratsPhrase(picked);
+
+    const modalKey = `controlops_congrats_${todayStr}_${currentUser.id}`;
+    if (!prev) {
+      let alreadyDismissed = false;
+      try {
+        alreadyDismissed = window.sessionStorage.getItem(modalKey) === 'dismissed';
+      } catch {
+        alreadyDismissed = false;
+      }
+      if (!alreadyDismissed) {
+        setCongratsModalOpen(true);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allDailyCompleted, todayStr, currentUser.id]);
+
+  const dismissCongratsModal = () => {
+    setCongratsModalOpen(false);
+    try {
+      window.sessionStorage.setItem(
+        `controlops_congrats_${todayStr}_${currentUser.id}`,
+        'dismissed'
+      );
+    } catch {
+      // Ignore storage errors
+    }
+  };
 
   // KPI 4: LLAMADAS DE TU BASE (HOY) — sin exponer metas diarias/mensuales a cajeras
   const kpiLlamadas = useMemo(() => {
@@ -329,12 +504,12 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     ).length;
 
     const realizadasHoy = branchLlamadas.filter(
-      (l) => l.llamada_registrada && getLlamadaLocalDate(l) === todayStr
+      (l) => isLlamadaRealizadaRecord(l) && getLlamadaLocalDate(l) === todayStr
     ).length;
 
     const registradasMes = branchLlamadas.filter(
       (l) =>
-        l.llamada_registrada &&
+        isLlamadaRealizadaRecord(l) &&
         getLlamadaLocalDate(l).startsWith(currentMonthPrefix)
     ).length;
 
@@ -382,7 +557,9 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         (l) => getLlamadaLocalDate(l) === dateStr
       );
       const totalBaseDia = callsDia.length;
-      const llamadasCount = callsDia.filter((l) => l.llamada_registrada).length;
+      const llamadasCount = callsDia.filter((l) =>
+        isLlamadaRealizadaRecord(l)
+      ).length;
 
       const refrendosMonto = roundMoney2(
         branchGastosRefrendos
@@ -647,7 +824,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Notification Permission Alert Banner */}
+      {/* Notification Permission & 10-Min Upcoming Activity Reminders */}
       {notifDenied && (
         <div
           role="alert"
@@ -658,6 +835,94 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
             Notificaciones bloqueadas: Permite las notificaciones de este sitio
             en los ajustes de tu navegador
           </span>
+        </div>
+      )}
+
+      {notifPermission === 'default' && !allDailyCompleted && (
+        <div className="rounded-2xl bg-[#FAF5FF] border border-[#E6DDF5] px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-[#5B21B6]">
+          <div className="flex items-center gap-2.5">
+            <BellRing className="h-4 w-4 shrink-0 text-[#7C3AED]" />
+            <span>
+              Activa los avisos del navegador para recibir un recordatorio automático 10 minutos antes de cada actividad límite.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleRequestNotifPermission()}
+            className="px-3.5 py-1.5 rounded-xl bg-[#7C3AED] hover:bg-[#6D28D9] text-white font-semibold whitespace-nowrap self-start sm:self-auto"
+          >
+            Activar avisos
+          </button>
+        </div>
+      )}
+
+      {upcomingReminders.length > 0 && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-[#FFFBEB] border border-[#FDE68A] px-4 py-3.5 space-y-2 text-xs text-[#92400E]"
+        >
+          <div className="flex items-center gap-2 font-bold text-[#B45309]">
+            <BellRing className="h-4 w-4 shrink-0 text-[#D97706]" />
+            <span>
+              Recordatorio: {upcomingReminders.length}{' '}
+              {upcomingReminders.length === 1
+                ? 'actividad vence en menos de 10 minutos'
+                : 'actividades vencen en menos de 10 minutos'}
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {upcomingReminders.map((rem) => (
+              <span
+                key={rem.actividad.id}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-[#FCD34D] text-[11px] font-semibold text-[#92400E]"
+              >
+                <Clock className="h-3 w-3 text-[#D97706]" />
+                {rem.actividad.titulo} · faltan {rem.minsLeft} min (límite{' '}
+                {formatHora12h(rem.horaLimite)})
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Branch Expense Ceiling Alerts (85% Preventive Yellow / >100% Red Overspend) */}
+      {kpiGastos.excedido && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3.5 flex items-start gap-3 text-xs sm:text-sm text-[#BE123C]"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-[#E11D48]" />
+          <div>
+            <p className="font-bold">
+              Alerta roja: Techo de gastos de {sucursal.nombre} superado (
+              {kpiGastos.rawPct.toFixed(1)}%)
+            </p>
+            <p className="text-xs mt-0.5 text-[#9F1239] font-mono-num">
+              Acumulado del mes: {formatCurrencyClean(kpiGastos.gastoAcumulado)} /
+              Techo: {formatCurrencyClean(kpiGastos.techo)} · Sobrepaso de{' '}
+              {formatCurrencyClean(kpiGastos.exceso)}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {!kpiGastos.excedido && kpiGastos.alertaPreventiva && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-[#FFFBEB] border border-[#FDE68A] px-4 py-3.5 flex items-start gap-3 text-xs sm:text-sm text-[#92400E]"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-[#D97706]" />
+          <div>
+            <p className="font-bold text-[#B45309]">
+              Alerta preventiva de gastos ({kpiGastos.rawPct.toFixed(1)}% del techo mensual)
+            </p>
+            <p className="text-xs mt-0.5 font-mono-num">
+              Acumulado en {sucursal.nombre}:{' '}
+              {formatCurrencyClean(kpiGastos.gastoAcumulado)} de{' '}
+              {formatCurrencyClean(kpiGastos.techo)} · Disponible:{' '}
+              {formatCurrencyClean(kpiGastos.disponible)}
+            </p>
+          </div>
         </div>
       )}
 
@@ -771,12 +1036,28 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
           </div>
 
           {/* KPI 3: TECHO DE GASTOS */}
-          <div className="bg-white rounded-2xl border border-[#EAE3F5] p-5 flex flex-col justify-between gap-3 shadow-[0_2px_10px_rgba(124,58,237,0.03)]">
+          <div
+            className={`bg-white rounded-2xl border p-5 flex flex-col justify-between gap-3 shadow-[0_2px_10px_rgba(124,58,237,0.03)] ${
+              kpiGastos.excedido
+                ? 'border-[#FECDD3]'
+                : kpiGastos.alertaPreventiva
+                  ? 'border-[#FDE68A]'
+                  : 'border-[#EAE3F5]'
+            }`}
+          >
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold tracking-wider text-[#7A6B93] uppercase">
                 TECHO DE GASTOS
               </span>
-              <div className="h-8 w-8 rounded-xl bg-[#EEF2FF] text-[#4F46E5] flex items-center justify-center">
+              <div
+                className={`h-8 w-8 rounded-xl flex items-center justify-center ${
+                  kpiGastos.excedido
+                    ? 'bg-[#FFF1F2] text-[#E11D48]'
+                    : kpiGastos.alertaPreventiva
+                      ? 'bg-[#FFFBEB] text-[#D97706]'
+                      : 'bg-[#EEF2FF] text-[#4F46E5]'
+                }`}
+              >
                 <Wallet className="h-4 w-4" />
               </div>
             </div>
@@ -795,7 +1076,11 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                 <div className="flex-1 h-2 rounded-full bg-[#EFE9F8] overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all ${
-                      kpiGastos.excedido ? 'bg-[#E11D48]' : 'bg-[#7C3AED]'
+                      kpiGastos.excedido
+                        ? 'bg-[#E11D48]'
+                        : kpiGastos.alertaPreventiva
+                          ? 'bg-[#D97706]'
+                          : 'bg-[#7C3AED]'
                     }`}
                     style={{
                       width: `${kpiGastos.sinTecho ? 0 : kpiGastos.pct}%`,
@@ -804,7 +1089,11 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                 </div>
                 <span
                   className={`font-mono-num text-xs font-bold ${
-                    kpiGastos.excedido ? 'text-[#E11D48]' : 'text-[#7C3AED]'
+                    kpiGastos.excedido
+                      ? 'text-[#E11D48]'
+                      : kpiGastos.alertaPreventiva
+                        ? 'text-[#B45309]'
+                        : 'text-[#7C3AED]'
                   }`}
                 >
                   {kpiGastos.sinTecho ? '—' : `${kpiGastos.pct}%`}
@@ -816,6 +1105,11 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                 ) : kpiGastos.excedido ? (
                   <p className="font-semibold text-[#BE123C]">
                     Techo excedido por {formatCurrencyClean(kpiGastos.exceso)}
+                  </p>
+                ) : kpiGastos.alertaPreventiva ? (
+                  <p className="font-semibold text-[#B45309]">
+                    Alerta preventiva (≥85%) · Disponible:{' '}
+                    {formatCurrencyClean(kpiGastos.disponible)}
                   </p>
                 ) : (
                   <p className="text-[#6E5F87]">
@@ -901,6 +1195,45 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         </div>
       )}
 
+      {/* Inline Congratulations Card when all daily tasks are completed */}
+      {allDailyCompleted && (
+        <section
+          aria-label="Felicitación por actividades completadas"
+          className="rounded-2xl bg-gradient-to-r from-[#F3ECFC] via-[#FDF2F8] to-[#ECFDF5] border border-[#DDD6FE] p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-[0_2px_12px_rgba(124,58,237,0.06)]"
+        >
+          <div className="flex items-start gap-3.5 min-w-0">
+            <div className="h-11 w-11 rounded-2xl bg-white border border-[#E6DDF5] text-[#DB2777] flex items-center justify-center shrink-0">
+              <Award className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="font-display text-sm sm:text-base font-extrabold text-[#1F172B]">
+                  ¡Felicidades, {currentUser.nombre}! Completaste tus{' '}
+                  {tareasHoy.length} actividades del día
+                </h2>
+                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#ECFDF5] text-[#15803D] border border-[#BBF7D0]">
+                  100% completado
+                </span>
+              </div>
+              <p className="text-xs sm:text-sm font-medium text-[#5B21B6]">
+                “{congratsPhrase}”
+              </p>
+            </div>
+          </div>
+
+          {activeFrases.length > 1 && (
+            <button
+              type="button"
+              onClick={() => setCongratsPhrase(pickRandomFrase())}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white hover:bg-[#FAF7FF] text-[#5B21B6] border border-[#E6DDF5] shrink-0 self-start sm:self-auto"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Otro mensaje
+            </button>
+          )}
+        </section>
+      )}
+
       {/* Section: Tareas de hoy */}
       <section className="space-y-3.5">
         <div className="flex items-center justify-between">
@@ -920,7 +1253,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         ) : (
           <div className="space-y-3">
             {tareasHoy.map((act) => {
-              const evalInfo = evaluarVencimientoActividad(act, horarioHoy);
+              const evalInfo = evaluarVencimientoActividad(act, horarioHoy, nowHHMM);
               const isCompleted = act.estatus === 'Completada';
               const isObservada = act.estatus === 'Observada';
               const isVencida = !isCompleted && !isObservada && evalInfo.vencidaPorHora;
@@ -928,17 +1261,27 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
               const isLateSubmission =
                 act.puntualidad === 'A destiempo' ||
                 evalInfo.etiqueta === 'Completada con retraso';
+              const minsLeft =
+                !isCompleted && !act.sin_horario_limite && evalInfo.horaLimite
+                  ? getMinutesUntilHHMM(evalInfo.horaLimite, nowHHMM)
+                  : null;
+              const isDueSoon =
+                minsLeft !== null && minsLeft > 0 && minsLeft <= 10;
 
               const circleStyle = isCompleted
                 ? 'bg-[#ECFDF5] text-[#15803D]'
                 : isObservada || isVencida
                   ? 'bg-[#FFF1F2] text-[#E11D48]'
-                  : 'bg-[#F3ECFC] text-[#7C3AED]';
+                  : isDueSoon
+                    ? 'bg-[#FFFBEB] text-[#D97706]'
+                    : 'bg-[#F3ECFC] text-[#7C3AED]';
 
               return (
                 <article
                   key={act.id}
-                  className="bg-white rounded-2xl border border-[#EAE3F5] p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-[0_2px_10px_rgba(124,58,237,0.02)]"
+                  className={`bg-white rounded-2xl border p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-[0_2px_10px_rgba(124,58,237,0.02)] ${
+                    isDueSoon ? 'border-[#FCD34D]' : 'border-[#EAE3F5]'
+                  }`}
                 >
                   {/* Left: Icon + Details + Pills */}
                   <div className="flex items-start gap-3.5 min-w-0">
@@ -978,6 +1321,13 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                             ? `Límite ${formatHora12h(evalInfo.horaLimite)}`
                             : 'Sin horario límite'}
                         </span>
+
+                        {isDueSoon && (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-[#FFFBEB] border border-[#FDE68A] text-[#B45309]">
+                            <BellRing className="h-3 w-3 text-[#D97706]" />
+                            Vence en {minsLeft} min
+                          </span>
+                        )}
 
                         {/* Dynamic Status Pill */}
                         {isCompleted ? (
@@ -1310,6 +1660,77 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                 referrerPolicy="no-referrer"
                 className="max-h-[70vh] rounded-xl object-contain"
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Closing Congratulations Modal */}
+      {congratsModalOpen && allDailyCompleted && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/60 backdrop-blur-[2px]"
+          onClick={dismissCongratsModal}
+        >
+          <div
+            className="max-w-md w-full bg-white rounded-2xl overflow-hidden shadow-2xl border border-[#E6DDF5]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-gradient-to-r from-[#7C3AED] to-[#DB2777] px-6 py-5 text-white flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+                  <Award className="h-5 w-5 text-white" />
+                </div>
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-white/85">
+                    Cierre diario completado
+                  </p>
+                  <h3 className="font-display text-lg font-extrabold">
+                    ¡Excelente trabajo, {currentUser.nombre}!
+                  </h3>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={dismissCongratsModal}
+                className="p-1.5 rounded-lg text-white/80 hover:bg-white/15"
+                aria-label="Cerrar felicitación"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="rounded-xl bg-[#FAF7FF] border border-[#EAE3F5] p-4 space-y-1.5">
+                <p className="text-xs font-semibold text-[#7C3AED]">
+                  {sucursal.nombre} · {tareasHoy.length}/{tareasHoy.length}{' '}
+                  actividades del día completadas
+                </p>
+                <p className="text-sm sm:text-base font-bold text-[#1F172B] leading-relaxed">
+                  “{congratsPhrase}”
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                {activeFrases.length > 1 ? (
+                  <button
+                    type="button"
+                    onClick={() => setCongratsPhrase(pickRandomFrase())}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#FAF8FC] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#E6DDF5]"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Cambiar frase
+                  </button>
+                ) : (
+                  <span />
+                )}
+                <button
+                  type="button"
+                  onClick={dismissCongratsModal}
+                  className="px-5 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white"
+                >
+                  Continuar
+                </button>
+              </div>
             </div>
           </div>
         </div>

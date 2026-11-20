@@ -320,6 +320,9 @@ export const RankingView: React.FC<RankingViewProps> = ({
       (s) => s.refrendosMeta >= 500
     );
     const excedidas = activeSummaries.filter((s) => s.excedioPresupuesto).length;
+    const enAlertaPreventiva = activeSummaries.filter(
+      (s) => s.alertaPreventivaPresupuesto
+    ).length;
     const dentroLimite = activeSummaries.length - excedidas;
     const totalActividadesCompletadas = activeSummaries.reduce(
       (acc, s) => acc + s.actividadesCompletadas,
@@ -344,6 +347,7 @@ export const RankingView: React.FC<RankingViewProps> = ({
       totalGastosTecho,
       hasMonetaryRefrendoMeta,
       excedidas,
+      enAlertaPreventiva,
       dentroLimite,
       totalActividadesCompletadas,
       totalActividadesAsignadas,
@@ -575,6 +579,17 @@ export const RankingView: React.FC<RankingViewProps> = ({
           severity: 'danger',
           targetSection: 'gastos',
         });
+      } else if (item.alertaPreventivaPresupuesto) {
+        alerts.push({
+          id: `alert-gasto-prev-${item.sucursal.id}`,
+          sucursalId: item.sucursal.id,
+          sucursalNombre: item.sucursal.nombre,
+          cajera: item.sucursal.responsable_caja,
+          tipo: 'Alerta preventiva gasto (≥85%)',
+          detalle: `${formatCurrencyClean(item.gastoRealTotal)} de ${formatCurrencyClean(item.gastoPresupuestoTotal)} (${formatPercent(item.pctUsoPresupuesto, 1)} usado)`,
+          severity: 'warn',
+          targetSection: 'gastos',
+        });
       }
       if (item.actividadesVencidas > 0) {
         alerts.push({
@@ -676,9 +691,17 @@ export const RankingView: React.FC<RankingViewProps> = ({
           pct: Math.min(100, s.pctUsoPresupuesto),
           display: s.excedioPresupuesto
             ? `${formatCurrencyClean(s.gastoRealTotal)} / ${formatCurrencyClean(s.gastoPresupuestoTotal)} (+${formatPercent(s.excesoPorcentaje)})`
-            : `${formatCurrencyClean(s.gastoRealTotal)} / ${formatCurrencyClean(s.gastoPresupuestoTotal)} (${formatPercent(s.pctUsoPresupuesto, 0)})`,
-          status: s.excedioPresupuesto ? 'Techo excedido' : 'Dentro del límite',
-          tone: s.excedioPresupuesto ? 'danger' : 'good',
+            : `${formatCurrencyClean(s.gastoRealTotal)} / ${formatCurrencyClean(s.gastoPresupuestoTotal)} (${formatPercent(s.pctUsoPresupuesto, 1)})`,
+          status: s.excedioPresupuesto
+            ? 'Techo excedido'
+            : s.alertaPreventivaPresupuesto
+              ? 'Alerta preventiva (≥85%)'
+              : 'Dentro del límite',
+          tone: s.excedioPresupuesto
+            ? 'danger'
+            : s.alertaPreventivaPresupuesto
+              ? 'warn'
+              : 'good',
         };
       case 'refrendos':
         return {
@@ -990,12 +1013,20 @@ export const RankingView: React.FC<RankingViewProps> = ({
             <div className="text-right">
               <span
                 className={`block text-xs font-medium ${
-                  totals.excedidas > 0 ? 'text-[#BE123C]' : 'text-[#15803D]'
+                  totals.excedidas > 0
+                    ? 'text-[#BE123C]'
+                    : totals.enAlertaPreventiva > 0
+                      ? 'text-[#B45309]'
+                      : 'text-[#15803D]'
                 }`}
               >
-                {totals.excedidas > 0
-                  ? `${totals.excedidas} excedieron techo`
-                  : 'Todas dentro del límite'}
+                {totals.excedidas > 0 && totals.enAlertaPreventiva > 0
+                  ? `${totals.excedidas} excedieron · ${totals.enAlertaPreventiva} ≥85%`
+                  : totals.excedidas > 0
+                    ? `${totals.excedidas} excedieron techo`
+                    : totals.enAlertaPreventiva > 0
+                      ? `${totals.enAlertaPreventiva} en preventiva (≥85%)`
+                      : 'Todas dentro del límite'}
               </span>
               <span className="font-mono-num text-[11px] text-[#6E5F87]">
                 {formatCurrencyClean(totals.totalGastosReal)} /{' '}
@@ -1686,6 +1717,10 @@ export const RankingView: React.FC<RankingViewProps> = ({
                           +{formatCurrencyClean(item.excesoDinero)} (+
                           {formatPercent(item.excesoPorcentaje)}) excedido
                         </div>
+                      ) : item.alertaPreventivaPresupuesto ? (
+                        <div className="text-xs font-semibold text-[#B45309]">
+                          Alerta preventiva ({formatPercent(item.pctUsoPresupuesto, 1)})
+                        </div>
                       ) : (
                         <div className="text-xs text-[#15803D]">
                           Dentro del límite (
@@ -1731,6 +1766,11 @@ export const RankingView: React.FC<RankingViewProps> = ({
                         <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#BE123C]">
                           <AlertTriangle className="h-3.5 w-3.5" />
                           Techo excedido
+                        </span>
+                      ) : item.alertaPreventivaPresupuesto ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#B45309]">
+                          <AlertTriangle className="h-3.5 w-3.5 text-[#D97706]" />
+                          Preventiva gasto (≥85%)
                         </span>
                       ) : item.puntajeGlobal >= 75 ? (
                         <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#15803D]">
@@ -1953,9 +1993,22 @@ export const RankingView: React.FC<RankingViewProps> = ({
               });
               return;
             }
+            const techoSuc = roundMoney2(
+              metas.find((m) => m.sucursal_id === branchObj.id)
+                ?.techo_gasto_mensual ?? branchObj.techo_gasto_mensual ?? 0
+            );
+            let gastoNote = '';
+            if (tipo === 'Gasto' && techoSuc > 0) {
+              const pctAfter = roundMoney2((desired / techoSuc) * 100);
+              if (desired > techoSuc) {
+                gastoNote = ` · ALERTA ROJA: supera el techo de ${formatCurrencyClean(techoSuc)} (${pctAfter.toFixed(1)}%).`;
+              } else if (pctAfter >= 85) {
+                gastoNote = ` · ALERTA PREVENTIVA: alcanza el ${pctAfter.toFixed(1)}% del techo (${formatCurrencyClean(techoSuc)}).`;
+              }
+            }
             setAdjustFeedback({
               type: 'success',
-              message: `Acumulado de ${tipo.toLowerCase()}s ajustado a ${formatCurrencyClean(desired)} en Supabase.`,
+              message: `Acumulado de ${tipo.toLowerCase()}s ajustado a ${formatCurrencyClean(desired)} en Supabase.${gastoNote}`,
             });
           } finally {
             setSavingAdjust(false);
@@ -2015,6 +2068,36 @@ export const RankingView: React.FC<RankingViewProps> = ({
               });
               return;
             }
+            const savedType = adjustRecordForm.tipo;
+            const savedFecha = adjustRecordForm.fecha || todayStr;
+            const savedMonto = payloadRec.monto_real;
+            const techoSuc = roundMoney2(
+              metas.find((m) => m.sucursal_id === branchObj.id)
+                ?.techo_gasto_mensual ?? branchObj.techo_gasto_mensual ?? 0
+            );
+            let ceilingMsg = '';
+            if (savedType === 'Gasto' && techoSuc > 0) {
+              const monthKey = savedFecha.slice(0, 7);
+              const existingMonthGastos = gastosYRefrendos.filter(
+                (r) =>
+                  r.id !== payloadRec.id &&
+                  r.tipo === 'Gasto' &&
+                  r.sucursal_id === branchObj.id &&
+                  (r.fecha || '').startsWith(monthKey)
+              );
+              const newTotal = roundMoney2(
+                existingMonthGastos.reduce(
+                  (acc, r) => acc + (Number(r.monto_real) || 0),
+                  0
+                ) + savedMonto
+              );
+              const pct = roundMoney2((newTotal / techoSuc) * 100);
+              if (newTotal > techoSuc) {
+                ceilingMsg = ` · ALERTA ROJA: acumulado ${formatCurrencyClean(newTotal)} supera el techo de ${formatCurrencyClean(techoSuc)} (${pct.toFixed(1)}%).`;
+              } else if (pct >= 85) {
+                ceilingMsg = ` · ALERTA PREVENTIVA: acumulado ${formatCurrencyClean(newTotal)} al ${pct.toFixed(1)}% del techo (${formatCurrencyClean(techoSuc)}).`;
+              }
+            }
             setAdjustRecordForm({
               editingId: '',
               tipo: adjustRecordForm.tipo,
@@ -2027,9 +2110,11 @@ export const RankingView: React.FC<RankingViewProps> = ({
             });
             setAdjustFeedback({
               type: 'success',
-              message: existingRec
-                ? 'Registro actualizado en Supabase.'
-                : 'Movimiento registrado en Supabase.',
+              message: `${
+                existingRec
+                  ? 'Registro actualizado en Supabase.'
+                  : 'Movimiento registrado en Supabase.'
+              }${ceilingMsg}`,
             });
           } finally {
             setSavingAdjust(false);
