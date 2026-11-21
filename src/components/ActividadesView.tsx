@@ -1,5 +1,8 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Award,
+  BellOff,
+  BellRing,
   Camera,
   CheckCircle2,
   Clock,
@@ -10,6 +13,7 @@ import {
   Upload,
   Trash2,
   Pencil,
+  RefreshCw,
   RotateCcw,
   Save,
   Maximize2,
@@ -18,22 +22,42 @@ import {
   ActividadDiaria,
   DiaSemana,
   EstatusActividad,
+  FraseMotivacional,
   HorarioSucursalDia,
   RolUsuario,
   Sucursal,
   TareaCatalogo,
 } from '../types/controlops';
-import { DIAS_SEMANA } from '../data/mockData';
+import { DEFAULT_FRASES_MOTIVACIONALES, DIAS_SEMANA } from '../data/mockData';
 import {
   evaluarVencimientoActividad,
   extractCatalogTaskId,
+  formatHora12h,
   getCurrentLocalHHMM,
+  getMexicoNowParts,
+  getMinutesUntilHHMM,
   getTodayLocalYYYYMMDD,
   isFixedBaseTask,
   resolveDailyTasksForBranch,
 } from '../utils/calculations';
 import { ServiceResult, uploadEvidenciaFoto } from '../services/controlOpsService';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
+import {
+  DailyTriggeredMotivation,
+  NotificationPermissionRecord,
+  NotificationPermissionState,
+  ensureDailyLuckyTask,
+  evaluateLuckyMotivationOnTaskCompleted,
+  getBrowserNotificationPermission,
+  getRegisteredNotificationPermission,
+  getTodayTriggeredMotivation,
+  pickRandomMotivationalPhrase,
+  registerNotificationPermissionRecord,
+  requestAndRegisterNotificationPermission,
+  sendActivityDeadlineNotificationOnce,
+  sendTestBrowserNotification,
+  subscribeNotificationPermissionChanges,
+} from '../utils/notifications';
 
 interface ActividadesViewProps {
   actividades: ActividadDiaria[];
@@ -42,6 +66,9 @@ interface ActividadesViewProps {
   selectedSucursalId: string;
   diaActivo: DiaSemana;
   userRole: RolUsuario;
+  currentUserId?: string;
+  currentUserName?: string;
+  frasesMotivacionales?: FraseMotivacional[];
   tareasCatalogo: TareaCatalogo[];
   onChangeDiaActivo: (dia: DiaSemana) => void;
   onSelectSucursal?: (id: string) => void;
@@ -88,6 +115,9 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   selectedSucursalId,
   diaActivo,
   userRole,
+  currentUserId,
+  currentUserName,
+  frasesMotivacionales,
   tareasCatalogo,
   onChangeDiaActivo,
   onSelectSucursal,
@@ -107,6 +137,36 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
   const isCreador = userRole === 'creador';
   const isSupervisor = userRole === 'supervisor';
   const isAuditor = isCreador || isSupervisor;
+  const effectiveUserId = currentUserId || `cajera_${selectedSucursalId}`;
+
+  const [todayStr, setTodayStr] = useState<string>(() =>
+    getTodayLocalYYYYMMDD()
+  );
+  const [nowHHMM, setNowHHMM] = useState<string>(() => getMexicoNowParts().hhmm);
+  const [notifPermission, setNotifPermission] =
+    useState<NotificationPermissionState>(() => getBrowserNotificationPermission());
+  const [notifRecord, setNotifRecord] =
+    useState<NotificationPermissionRecord | null>(() =>
+      getRegisteredNotificationPermission(effectiveUserId)
+    );
+  const [notifTestSent, setNotifTestSent] = useState(false);
+  const notifiedTasksRef = useRef<Set<string>>(new Set());
+
+  const activeFrases = useMemo(() => {
+    const customActive = (frasesMotivacionales || []).filter(
+      (f) => f.activa && f.texto.trim().length > 0
+    );
+    if (customActive.length > 0) return customActive;
+    return DEFAULT_FRASES_MOTIVACIONALES.filter(
+      (f) => f.activa && f.texto.trim().length > 0
+    );
+  }, [frasesMotivacionales]);
+
+  const [dailyMotivation, setDailyMotivation] =
+    useState<DailyTriggeredMotivation | null>(() =>
+      getTodayTriggeredMotivation(todayStr, effectiveUserId)
+    );
+  const [motivationModalOpen, setMotivationModalOpen] = useState(false);
 
   const [filterEstatus, setFilterEstatus] = useState<string>('todas');
   const [filterFecha, setFilterFecha] = useState<string>('');
@@ -318,6 +378,126 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
     };
   }, [horarios, selectedSucursalId, diaActivo]);
 
+  useEffect(() => {
+    if (!isCajera) return;
+    const unsubscribe = subscribeNotificationPermissionChanges(
+      effectiveUserId,
+      (perm, record) => {
+        setNotifPermission(perm);
+        setNotifRecord(record);
+      }
+    );
+    const syncClock = () => {
+      const { yyyyMmDd, hhmm } = getMexicoNowParts();
+      setTodayStr((prev) => (prev === yyyyMmDd ? prev : yyyyMmDd));
+      setNowHHMM((prev) => (prev === hhmm ? prev : hhmm));
+      const livePerm = getBrowserNotificationPermission();
+      setNotifPermission((prev) => {
+        if (prev !== livePerm) {
+          const rec = registerNotificationPermissionRecord(
+            effectiveUserId,
+            livePerm,
+            'sync'
+          );
+          setNotifRecord(rec);
+        }
+        return livePerm;
+      });
+    };
+    const interval = window.setInterval(syncClock, 15000);
+    window.addEventListener('focus', syncClock);
+    document.addEventListener('visibilitychange', syncClock);
+    return () => {
+      unsubscribe();
+      window.clearInterval(interval);
+      window.removeEventListener('focus', syncClock);
+      document.removeEventListener('visibilitychange', syncClock);
+    };
+  }, [isCajera, effectiveUserId]);
+
+  const upcomingReminders = useMemo(() => {
+    if (!isCajera) return [];
+    const items: {
+      actividad: ActividadDiaria;
+      horaLimite: string;
+      minsLeft: number;
+    }[] = [];
+
+    for (const act of dayScopedActividades) {
+      if (act.estatus === 'Completada') continue;
+      const hSuc = horarios.find(
+        (h) => h.sucursal_id === act.sucursal_id && h.dia === diaActivo
+      );
+      const evalInfo = evaluarVencimientoActividad(act, hSuc, nowHHMM);
+      if (act.sin_horario_limite || !evalInfo.horaLimite) continue;
+      const minsLeft = getMinutesUntilHHMM(evalInfo.horaLimite, nowHHMM);
+      if (minsLeft !== null && minsLeft > 0 && minsLeft <= 10) {
+        items.push({
+          actividad: act,
+          horaLimite: evalInfo.horaLimite,
+          minsLeft,
+        });
+      }
+    }
+    return items.sort((a, b) => a.minsLeft - b.minsLeft);
+  }, [isCajera, dayScopedActividades, horarios, diaActivo, nowHHMM]);
+
+  useEffect(() => {
+    if (!isCajera || notifPermission !== 'granted' || upcomingReminders.length === 0) {
+      return;
+    }
+    for (const rem of upcomingReminders) {
+      sendActivityDeadlineNotificationOnce({
+        userId: effectiveUserId,
+        todayStr,
+        actividadId: rem.actividad.id,
+        titulo: rem.actividad.titulo,
+        horaLimite: rem.horaLimite,
+        minsLeft: rem.minsLeft,
+        notifiedRef: notifiedTasksRef,
+      });
+    }
+  }, [isCajera, notifPermission, upcomingReminders, effectiveUserId, todayStr]);
+
+  useEffect(() => {
+    if (!isCajera) return;
+    setDailyMotivation(getTodayTriggeredMotivation(todayStr, effectiveUserId));
+    ensureDailyLuckyTask(todayStr, effectiveUserId, dayScopedActividades);
+  }, [isCajera, todayStr, effectiveUserId, dayScopedActividades]);
+
+  const handleRequestNotifPermission = async () => {
+    const { permission, record } =
+      await requestAndRegisterNotificationPermission(effectiveUserId);
+    setNotifPermission(permission);
+    setNotifRecord(record);
+  };
+
+  const handleSendTestNotification = () => {
+    const sent = sendTestBrowserNotification(effectiveUserId);
+    if (sent) {
+      setNotifRecord(getRegisteredNotificationPermission(effectiveUserId));
+      setNotifTestSent(true);
+      window.setTimeout(() => setNotifTestSent(false), 3500);
+    }
+  };
+
+  const maybeTriggerLuckyMotivation = (
+    completedTask: Pick<ActividadDiaria, 'id' | 'titulo'>
+  ) => {
+    if (!isCajera) return;
+    const triggered = evaluateLuckyMotivationOnTaskCompleted({
+      todayStr,
+      userId: effectiveUserId,
+      completedTask,
+      tasksBeforeCompletion: dayScopedActividades,
+      frases: activeFrases,
+    });
+    if (triggered) {
+      setDailyMotivation(triggered);
+      setMotivationModalOpen(true);
+    }
+  };
+
   const triggerPhotoUpload = (actividad: ActividadDiaria) => {
     if (!isCajera) return;
     targetActivityRef.current = actividad;
@@ -362,6 +542,7 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
       setUploadNotice(
         'Fotografía guardada correctamente en evidencias_controlops y actividades_diarias.'
       );
+      maybeTriggerLuckyMotivation(target);
     } finally {
       setUploadingId(null);
       targetActivityRef.current = null;
@@ -389,14 +570,19 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
         sucursal_nombre: suc.nombre,
         titulo: newForm.titulo.trim(),
         categoria: newForm.categoria,
-        responsable: suc.responsable_caja,
+        responsable: currentUserName || suc.responsable_caja,
         fecha: getTodayLocalYYYYMMDD(),
         hora_completada: newForm.estatus === 'Completada' ? nowTime : null,
         estatus: newForm.estatus,
         evidencia_url: evidenciaUrl,
         observaciones: newForm.observaciones.trim(),
       };
-      await onCreateActividad(nueva);
+      const createRes = (await onCreateActividad(nueva)) as
+        | ServiceResult
+        | undefined;
+      if ((!createRes || createRes.ok) && nueva.estatus === 'Completada') {
+        maybeTriggerLuckyMotivation(nueva);
+      }
       setNewForm({
         sucursal_id: defaultSucursal,
         titulo: '',
@@ -679,6 +865,141 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
         </div>
       </section>
 
+      {/* Web Notifications Permission & 10-Min Reminders (Cajera view) */}
+      {isCajera && notifPermission === 'denied' && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3 flex items-center justify-between gap-3 text-xs text-[#BE123C] font-medium"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <BellOff className="h-4 w-4 shrink-0 text-[#E11D48]" />
+            <span>
+              Notificaciones bloqueadas: Permite las notificaciones de este sitio
+              en los ajustes de tu navegador para recibir alertas 10 minutos antes de cada actividad.
+            </span>
+          </div>
+          <span className="shrink-0 text-[11px] font-semibold px-2 py-0.5 rounded-lg bg-white border border-[#FECDD3]">
+            Permiso: Denegado
+          </span>
+        </div>
+      )}
+
+      {isCajera && notifPermission === 'default' && (
+        <div className="rounded-2xl bg-[#FAF5FF] border border-[#E6DDF5] px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-[#5B21B6]">
+          <div className="flex items-center gap-2.5">
+            <BellRing className="h-4 w-4 shrink-0 text-[#7C3AED]" />
+            <span>
+              Activa las notificaciones del navegador para recibir un aviso automático 10 minutos antes de que venza cada actividad pendiente del día.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleRequestNotifPermission()}
+            className="px-3.5 py-1.5 rounded-xl bg-[#7C3AED] hover:bg-[#6D28D9] text-white font-semibold whitespace-nowrap self-start sm:self-auto"
+          >
+            Activar notificaciones
+          </button>
+        </div>
+      )}
+
+      {isCajera && notifPermission === 'granted' && (
+        <div className="rounded-2xl bg-[#FAF8FF] border border-[#E6DDF5] px-4 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-[#5B21B6]">
+          <div className="flex items-center gap-2 min-w-0">
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-[#15803D]" />
+            <span className="truncate">
+              Notificaciones activas · Permiso registrado
+              {currentUserName ? ` para ${currentUserName}` : ''} (aviso 10 min antes)
+            </span>
+            {notifRecord?.registeredAt && (
+              <span className="hidden md:inline text-[11px] text-[#7A6B93]">
+                · Registrado
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {notifTestSent && (
+              <span className="text-[11px] font-semibold text-[#15803D]">
+                Aviso enviado
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleSendTestNotification}
+              className="px-3 py-1 rounded-lg bg-white border border-[#DDD6FE] hover:bg-[#F3ECFC] text-[#5B21B6] font-semibold text-[11px]"
+            >
+              Probar aviso
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isCajera && upcomingReminders.length > 0 && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-[#FFFBEB] border border-[#FDE68A] px-4 py-3.5 space-y-2 text-xs text-[#92400E]"
+        >
+          <div className="flex items-center gap-2 font-bold text-[#B45309]">
+            <BellRing className="h-4 w-4 shrink-0 text-[#D97706]" />
+            <span>
+              Recordatorio: {upcomingReminders.length}{' '}
+              {upcomingReminders.length === 1
+                ? 'actividad vence en menos de 10 minutos'
+                : 'actividades vencen en menos de 10 minutos'}
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {upcomingReminders.map((rem) => (
+              <span
+                key={rem.actividad.id}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-[#FCD34D] text-[11px] font-semibold text-[#92400E]"
+              >
+                <Clock className="h-3 w-3 text-[#D97706]" />
+                {rem.actividad.titulo} · faltan {rem.minsLeft} min (límite{' '}
+                {formatHora12h(rem.horaLimite)})
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isCajera && dailyMotivation && (
+        <section
+          aria-label="Mensaje motivacional por actividad completada"
+          className="rounded-2xl bg-gradient-to-r from-[#F3ECFC] via-[#FDF2F8] to-[#ECFDF5] border border-[#DDD6FE] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+        >
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="h-10 w-10 rounded-xl bg-white border border-[#E6DDF5] text-[#DB2777] flex items-center justify-center shrink-0">
+              <Award className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-xs font-extrabold text-[#1F172B]">
+                ¡Felicidades{currentUserName ? `, ${currentUserName}` : ''}! Completaste “
+                {dailyMotivation.taskTitle}”
+              </p>
+              <p className="text-xs font-medium text-[#5B21B6]">
+                “{dailyMotivation.phrase}”
+              </p>
+            </div>
+          </div>
+          {activeFrases.length > 1 && (
+            <button
+              type="button"
+              onClick={() =>
+                setDailyMotivation((prev) =>
+                  prev
+                    ? { ...prev, phrase: pickRandomMotivationalPhrase(activeFrases) }
+                    : prev
+                )
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-[#FAF7FF] text-[#5B21B6] border border-[#E6DDF5] shrink-0 self-start sm:self-auto"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Otro mensaje
+            </button>
+          )}
+        </section>
+      )}
+
       {uploadNotice && (
         <div className="rounded-xl px-4 py-3 bg-[#FAF5FF] border border-[#DDD6FE] text-xs font-medium text-[#5B21B6] flex items-center justify-between">
           <span>{uploadNotice}</span>
@@ -861,17 +1182,22 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
                       <select
                         aria-label="Estatus de actividad"
                         value={act.estatus}
-                        onChange={(e) => {
+                        onChange={async (e) => {
                           const nextStatus = e.target.value as EstatusActividad;
-                          onUpdateActividad({
+                          const res = (await onUpdateActividad({
                             ...act,
                             estatus: nextStatus,
                             hora_completada:
                               nextStatus === 'Completada'
-                                ? act.hora_completada ||
-                                  new Date().toTimeString().slice(0, 5)
+                                ? act.hora_completada || getCurrentLocalHHMM()
                                 : null,
-                          });
+                          })) as ServiceResult | undefined;
+                          if (
+                            nextStatus === 'Completada' &&
+                            (!res || res.ok)
+                          ) {
+                            maybeTriggerLuckyMotivation(act);
+                          }
                         }}
                         className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border focus:outline-none shrink-0 ${
                           act.estatus === 'Completada'
@@ -1649,6 +1975,86 @@ export const ActividadesView: React.FC<ActividadesViewProps> = ({
           }
         }}
       />
+
+      {/* Random Activity Motivational Congratulation Modal (1 random task per day) */}
+      {isCajera && motivationModalOpen && dailyMotivation && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/60 backdrop-blur-[2px]"
+          onClick={() => setMotivationModalOpen(false)}
+        >
+          <div
+            className="max-w-md w-full bg-white rounded-2xl overflow-hidden shadow-2xl border border-[#E6DDF5]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-gradient-to-r from-[#7C3AED] to-[#DB2777] px-6 py-5 text-white flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+                  <Award className="h-5 w-5 text-white" />
+                </div>
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-white/85">
+                    Actividad completada
+                  </p>
+                  <h3 className="font-display text-lg font-extrabold">
+                    ¡Excelente trabajo
+                    {currentUserName ? `, ${currentUserName}` : ''}!
+                  </h3>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMotivationModalOpen(false)}
+                className="p-1.5 rounded-lg text-white/80 hover:bg-white/15"
+                aria-label="Cerrar felicitación"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="rounded-xl bg-[#FAF7FF] border border-[#EAE3F5] p-4 space-y-1.5">
+                <p className="text-xs font-semibold text-[#7C3AED]">
+                  Completaste “{dailyMotivation.taskTitle}”
+                </p>
+                <p className="text-sm sm:text-base font-bold text-[#1F172B] leading-relaxed">
+                  “{dailyMotivation.phrase}”
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                {activeFrases.length > 1 ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setDailyMotivation((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              phrase: pickRandomMotivationalPhrase(activeFrases),
+                            }
+                          : prev
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#FAF8FC] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#E6DDF5]"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Cambiar frase
+                  </button>
+                ) : (
+                  <span />
+                )}
+                <button
+                  type="button"
+                  onClick={() => setMotivationModalOpen(false)}
+                  className="px-5 py-2.5 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white"
+                >
+                  Continuar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

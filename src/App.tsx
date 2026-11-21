@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Menu, RefreshCw } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { LoginScreen } from './components/LoginScreen';
@@ -57,11 +57,20 @@ import {
 import {
   computeBranchSummaries,
   ensureBaseDailyCatalogTasks,
+  evaluarVencimientoActividad,
+  getDiaSemanaFromDate,
+  getMexicoNowParts,
+  getMinutesUntilHHMM,
   getTodayDiaSemana,
   getTodayLocalYYYYMMDD,
   isFixedBaseTask,
   matchesSucursalRecord,
+  resolveDailyTasksForBranch,
 } from './utils/calculations';
+import {
+  getBrowserNotificationPermission,
+  sendActivityDeadlineNotificationOnce,
+} from './utils/notifications';
 import { isSupabaseConfigured } from './lib/supabaseConfig';
 import { INITIAL_CATALOGOS } from './data/mockData';
 
@@ -482,6 +491,61 @@ export default function App() {
     }
     return map;
   }, [branchSummaries]);
+
+  const bgNotifiedTasksRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (currentUser?.rol !== 'cajera' || !resolvedCajeraSucursal) return;
+
+    const checkUpcomingActivityNotifications = () => {
+      if (getBrowserNotificationPermission() !== 'granted') return;
+      const { yyyyMmDd, hhmm } = getMexicoNowParts();
+      const diaHoy = getDiaSemanaFromDate(yyyyMmDd);
+      const horarioHoy = horarios.find(
+        (h) => h.sucursal_id === resolvedCajeraSucursal.id && h.dia === diaHoy
+      );
+      const tareasHoy = resolveDailyTasksForBranch(
+        resolvedCajeraSucursal,
+        guaranteedTareasCatalogo,
+        actividades,
+        diaHoy,
+        yyyyMmDd,
+        { id: currentUser.id, nombre: currentUser.nombre }
+      );
+
+      for (const act of tareasHoy) {
+        if (act.estatus === 'Completada') continue;
+        const evalInfo = evaluarVencimientoActividad(act, horarioHoy, hhmm);
+        if (act.sin_horario_limite || !evalInfo.horaLimite) continue;
+        const minsLeft = getMinutesUntilHHMM(evalInfo.horaLimite, hhmm);
+        if (minsLeft !== null && minsLeft > 0 && minsLeft <= 10) {
+          sendActivityDeadlineNotificationOnce({
+            userId: currentUser.id,
+            todayStr: yyyyMmDd,
+            actividadId: act.id,
+            titulo: act.titulo,
+            horaLimite: evalInfo.horaLimite,
+            minsLeft,
+            notifiedRef: bgNotifiedTasksRef,
+          });
+        }
+      }
+    };
+
+    checkUpcomingActivityNotifications();
+    const interval = window.setInterval(checkUpcomingActivityNotifications, 15000);
+    window.addEventListener('focus', checkUpcomingActivityNotifications);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', checkUpcomingActivityNotifications);
+    };
+  }, [
+    currentUser,
+    resolvedCajeraSucursal,
+    guaranteedTareasCatalogo,
+    actividades,
+    horarios,
+  ]);
 
   const handleUpdateLlamada = async (
     updated: LlamadaSucursal
@@ -1275,6 +1339,9 @@ export default function App() {
                     selectedSucursalId={effectiveSucursalId}
                     diaActivo={diaActivo}
                     userRole={currentUser.rol}
+                    currentUserId={currentUser.id}
+                    currentUserName={currentUser.nombre}
+                    frasesMotivacionales={catalogos.frases_motivacionales}
                     tareasCatalogo={guaranteedTareasCatalogo}
                     onChangeDiaActivo={setDiaActivo}
                     onSelectSucursal={setSelectedSucursalId}

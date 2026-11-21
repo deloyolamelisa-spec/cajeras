@@ -54,6 +54,22 @@ import {
   ServiceResult,
   uploadEvidenciaFoto,
 } from '../services/controlOpsService';
+import {
+  DailyTriggeredMotivation,
+  NotificationPermissionRecord,
+  NotificationPermissionState,
+  ensureDailyLuckyTask,
+  evaluateLuckyMotivationOnTaskCompleted,
+  getBrowserNotificationPermission,
+  getRegisteredNotificationPermission,
+  getTodayTriggeredMotivation,
+  pickRandomMotivationalPhrase,
+  registerNotificationPermissionRecord,
+  requestAndRegisterNotificationPermission,
+  sendActivityDeadlineNotificationOnce,
+  sendTestBrowserNotification,
+  subscribeNotificationPermissionChanges,
+} from '../utils/notifications';
 
 interface CajeraMiDiaViewProps {
   currentUser: UsuarioControlOps;
@@ -82,14 +98,13 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
   frasesMotivacionales,
   onUpdateActividad,
 }) => {
-  const [notifPermission, setNotifPermission] = useState<
-    NotificationPermission | 'unsupported'
-  >(() => {
-    if (typeof window === 'undefined' || !('Notification' in window)) {
-      return 'unsupported';
-    }
-    return Notification.permission;
-  });
+  const [notifPermission, setNotifPermission] =
+    useState<NotificationPermissionState>(() => getBrowserNotificationPermission());
+  const [notifRecord, setNotifRecord] =
+    useState<NotificationPermissionRecord | null>(() =>
+      getRegisteredNotificationPermission(currentUser.id)
+    );
+  const [notifTestSent, setNotifTestSent] = useState(false);
   const notifDenied = notifPermission === 'denied';
   const [nowHHMM, setNowHHMM] = useState<string>(() => getMexicoNowParts().hhmm);
   const notifiedTasksRef = useRef<Set<string>>(new Set());
@@ -139,13 +154,18 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
   };
 
   useEffect(() => {
-    if (typeof window !== 'undefined' && 'Notification' in window) {
-      setNotifPermission(Notification.permission);
-    }
+    const unsubscribe = subscribeNotificationPermissionChanges(
+      currentUser.id,
+      (perm, record) => {
+        setNotifPermission(perm);
+        setNotifRecord(record);
+      }
+    );
     return () => {
+      unsubscribe();
       stopWebcamStream();
     };
-  }, []);
+  }, [currentUser.id]);
 
   const [todayStr, setTodayStr] = useState<string>(() =>
     getTodayLocalYYYYMMDD()
@@ -156,9 +176,18 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
       const { yyyyMmDd, hhmm } = getMexicoNowParts();
       setTodayStr((prev) => (prev === yyyyMmDd ? prev : yyyyMmDd));
       setNowHHMM((prev) => (prev === hhmm ? prev : hhmm));
-      if (typeof window !== 'undefined' && 'Notification' in window) {
-        setNotifPermission(Notification.permission);
-      }
+      const livePerm = getBrowserNotificationPermission();
+      setNotifPermission((prev) => {
+        if (prev !== livePerm) {
+          const rec = registerNotificationPermissionRecord(
+            currentUser.id,
+            livePerm,
+            'sync'
+          );
+          setNotifRecord(rec);
+        }
+        return livePerm;
+      });
     };
     const interval = window.setInterval(syncClockAndDay, 15000);
     window.addEventListener('focus', syncClockAndDay);
@@ -168,7 +197,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
       window.removeEventListener('focus', syncClockAndDay);
       document.removeEventListener('visibilitychange', syncClockAndDay);
     };
-  }, []);
+  }, [currentUser.id]);
 
   const [currentYear, currentMonthNum, currentDay] = useMemo(() => {
     const [y, m, d] = todayStr.split('-').map(Number);
@@ -380,57 +409,40 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
   }, [tareasHoy, horarioHoy, nowHHMM]);
 
   useEffect(() => {
-    if (
-      typeof window === 'undefined' ||
-      !('Notification' in window) ||
-      notifPermission !== 'granted' ||
-      upcomingReminders.length === 0
-    ) {
+    if (notifPermission !== 'granted' || upcomingReminders.length === 0) {
       return;
     }
 
     for (const rem of upcomingReminders) {
-      const storageKey = `controlops_notif_${todayStr}_${currentUser.id}_${rem.actividad.id}`;
-      if (notifiedTasksRef.current.has(storageKey)) continue;
-      let alreadySent = false;
-      try {
-        alreadySent = window.sessionStorage.getItem(storageKey) === '1';
-      } catch {
-        alreadySent = false;
-      }
-      if (alreadySent) {
-        notifiedTasksRef.current.add(storageKey);
-        continue;
-      }
-
-      try {
-        new Notification('Recordatorio de actividad · ControlOps', {
-          body: `"${rem.actividad.titulo}" vence en ${rem.minsLeft} min (${formatHora12h(rem.horaLimite)}). Sube tu evidencia a tiempo.`,
-          tag: storageKey,
-        });
-        notifiedTasksRef.current.add(storageKey);
-        try {
-          window.sessionStorage.setItem(storageKey, '1');
-        } catch {
-          // Ignore storage quota errors
-        }
-      } catch {
-        // Ignore browsers blocking constructor notifications
-      }
+      sendActivityDeadlineNotificationOnce({
+        userId: currentUser.id,
+        todayStr,
+        actividadId: rem.actividad.id,
+        titulo: rem.actividad.titulo,
+        horaLimite: rem.horaLimite,
+        minsLeft: rem.minsLeft,
+        notifiedRef: notifiedTasksRef,
+      });
     }
   }, [upcomingReminders, notifPermission, todayStr, currentUser.id]);
 
   const handleRequestNotifPermission = async () => {
-    if (typeof window === 'undefined' || !('Notification' in window)) return;
-    try {
-      const result = await Notification.requestPermission();
-      setNotifPermission(result);
-    } catch {
-      setNotifPermission(Notification.permission);
+    const { permission, record } =
+      await requestAndRegisterNotificationPermission(currentUser.id);
+    setNotifPermission(permission);
+    setNotifRecord(record);
+  };
+
+  const handleSendTestNotification = () => {
+    const sent = sendTestBrowserNotification(currentUser.id);
+    if (sent) {
+      setNotifRecord(getRegisteredNotificationPermission(currentUser.id));
+      setNotifTestSent(true);
+      window.setTimeout(() => setNotifTestSent(false), 3500);
     }
   };
 
-  // Random motivational closing phrase when all daily activities are completed
+  // Random motivational phrase triggered strictly for 1 randomly chosen activity per day
   const activeFrases = useMemo(() => {
     const customActive = (frasesMotivacionales || []).filter(
       (f) => f.activa && f.texto.trim().length > 0
@@ -447,54 +459,19 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
     [tareasHoy]
   );
 
-  const pickRandomFrase = () => {
-    const pool = activeFrases.length > 0 ? activeFrases : DEFAULT_FRASES_MOTIVACIONALES;
-    const idx = Math.floor(Math.random() * pool.length);
-    return pool[idx]?.texto || '¡Excelente cierre hoy! Completaste todas tus actividades del día.';
-  };
-
-  const [congratsPhrase, setCongratsPhrase] = useState<string>(() =>
-    pickRandomFrase()
-  );
+  const [dailyMotivation, setDailyMotivation] =
+    useState<DailyTriggeredMotivation | null>(() =>
+      getTodayTriggeredMotivation(todayStr, currentUser.id)
+    );
   const [congratsModalOpen, setCongratsModalOpen] = useState(false);
-  const prevAllCompletedRef = useRef<boolean>(false);
 
   useEffect(() => {
-    const prev = prevAllCompletedRef.current;
-    prevAllCompletedRef.current = allDailyCompleted;
-    if (!allDailyCompleted) {
-      setCongratsModalOpen(false);
-      return;
-    }
-
-    const picked = pickRandomFrase();
-    setCongratsPhrase(picked);
-
-    const modalKey = `controlops_congrats_${todayStr}_${currentUser.id}`;
-    if (!prev) {
-      let alreadyDismissed = false;
-      try {
-        alreadyDismissed = window.sessionStorage.getItem(modalKey) === 'dismissed';
-      } catch {
-        alreadyDismissed = false;
-      }
-      if (!alreadyDismissed) {
-        setCongratsModalOpen(true);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allDailyCompleted, todayStr, currentUser.id]);
+    setDailyMotivation(getTodayTriggeredMotivation(todayStr, currentUser.id));
+    ensureDailyLuckyTask(todayStr, currentUser.id, tareasHoy);
+  }, [todayStr, currentUser.id, tareasHoy]);
 
   const dismissCongratsModal = () => {
     setCongratsModalOpen(false);
-    try {
-      window.sessionStorage.setItem(
-        `controlops_congrats_${todayStr}_${currentUser.id}`,
-        'dismissed'
-      );
-    } catch {
-      // Ignore storage errors
-    }
   };
 
   // KPI 4: LLAMADAS DE TU BASE (HOY) — sin exponer metas diarias/mensuales a cajeras
@@ -809,6 +786,18 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         type: 'success',
         message: `Evidencia de "${actividad.titulo}" guardada en Supabase (${puntualidad}${horaCompletada ? ` · ${formatHora12h(horaCompletada)}` : ''}).`,
       });
+
+      const triggered = evaluateLuckyMotivationOnTaskCompleted({
+        todayStr,
+        userId: currentUser.id,
+        completedTask: actividad,
+        tasksBeforeCompletion: tareasHoy,
+        frases: activeFrases,
+      });
+      if (triggered) {
+        setDailyMotivation(triggered);
+        setCongratsModalOpen(true);
+      }
     } catch (err) {
       setUploadFeedback({
         type: 'error',
@@ -828,22 +817,27 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
       {notifDenied && (
         <div
           role="alert"
-          className="rounded-2xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3 flex items-center gap-3 text-xs sm:text-sm text-[#BE123C] font-medium"
+          className="rounded-2xl bg-[#FFF1F2] border border-[#FECDD3] px-4 py-3 flex items-center justify-between gap-3 text-xs sm:text-sm text-[#BE123C] font-medium"
         >
-          <BellOff className="h-4 w-4 shrink-0 text-[#E11D48]" />
-          <span>
-            Notificaciones bloqueadas: Permite las notificaciones de este sitio
-            en los ajustes de tu navegador
+          <div className="flex items-center gap-2.5 min-w-0">
+            <BellOff className="h-4 w-4 shrink-0 text-[#E11D48]" />
+            <span>
+              Notificaciones bloqueadas: Permite las notificaciones de este sitio
+              en los ajustes de tu navegador para recibir alertas 10 minutos antes de cada actividad.
+            </span>
+          </div>
+          <span className="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-white border border-[#FECDD3] text-[#BE123C]">
+            Permiso: Denegado
           </span>
         </div>
       )}
 
-      {notifPermission === 'default' && !allDailyCompleted && (
+      {notifPermission === 'default' && (
         <div className="rounded-2xl bg-[#FAF5FF] border border-[#E6DDF5] px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-[#5B21B6]">
           <div className="flex items-center gap-2.5">
             <BellRing className="h-4 w-4 shrink-0 text-[#7C3AED]" />
             <span>
-              Activa los avisos del navegador para recibir un recordatorio automático 10 minutos antes de cada actividad límite.
+              Activa las notificaciones del navegador para recibir un recordatorio automático 10 minutos antes de que venza cada actividad pendiente del día.
             </span>
           </div>
           <button
@@ -851,8 +845,49 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
             onClick={() => void handleRequestNotifPermission()}
             className="px-3.5 py-1.5 rounded-xl bg-[#7C3AED] hover:bg-[#6D28D9] text-white font-semibold whitespace-nowrap self-start sm:self-auto"
           >
-            Activar avisos
+            Activar notificaciones
           </button>
+        </div>
+      )}
+
+      {notifPermission === 'granted' && (
+        <div className="rounded-2xl bg-[#FAF8FF] border border-[#E6DDF5] px-4 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs text-[#5B21B6]">
+          <div className="flex items-center gap-2 min-w-0">
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-[#15803D]" />
+            <span className="truncate">
+              Notificaciones activas · Permiso registrado para{' '}
+              <strong className="font-semibold">{currentUser.nombre}</strong>{' '}
+              (aviso 10 min antes de cada tarea pendiente)
+            </span>
+            {notifRecord?.registeredAt && (
+              <span className="hidden md:inline text-[11px] text-[#7A6B93]">
+                · Registrado
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {notifTestSent && (
+              <span className="text-[11px] font-semibold text-[#15803D]">
+                Aviso enviado
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleSendTestNotification}
+              className="px-3 py-1 rounded-lg bg-white border border-[#DDD6FE] hover:bg-[#F3ECFC] text-[#5B21B6] font-semibold text-[11px]"
+            >
+              Probar aviso
+            </button>
+          </div>
+        </div>
+      )}
+
+      {notifPermission === 'unsupported' && (
+        <div className="rounded-2xl bg-[#FAF8FC] border border-[#EAE3F5] px-4 py-2.5 flex items-center gap-2.5 text-xs text-[#6E5F87]">
+          <BellOff className="h-4 w-4 shrink-0 text-[#8B7CA5]" />
+          <span>
+            Este navegador no admite notificaciones de escritorio; los recordatorios de 10 minutos antes aparecerán aquí en pantalla.
+          </span>
         </div>
       )}
 
@@ -1195,10 +1230,10 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         </div>
       )}
 
-      {/* Inline Congratulations Card when all daily tasks are completed */}
-      {allDailyCompleted && (
+      {/* Inline Random Activity Motivational Congratulation Card (1 random activity per day) */}
+      {dailyMotivation && (
         <section
-          aria-label="Felicitación por actividades completadas"
+          aria-label="Mensaje motivacional por actividad completada"
           className="rounded-2xl bg-gradient-to-r from-[#F3ECFC] via-[#FDF2F8] to-[#ECFDF5] border border-[#DDD6FE] p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-[0_2px_12px_rgba(124,58,237,0.06)]"
         >
           <div className="flex items-start gap-3.5 min-w-0">
@@ -1208,15 +1243,17 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
             <div className="min-w-0 space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <h2 className="font-display text-sm sm:text-base font-extrabold text-[#1F172B]">
-                  ¡Felicidades, {currentUser.nombre}! Completaste tus{' '}
-                  {tareasHoy.length} actividades del día
+                  ¡Felicidades, {currentUser.nombre}! Completaste “
+                  {dailyMotivation.taskTitle}”
                 </h2>
-                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#ECFDF5] text-[#15803D] border border-[#BBF7D0]">
-                  100% completado
-                </span>
+                {allDailyCompleted && (
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#ECFDF5] text-[#15803D] border border-[#BBF7D0]">
+                    Día 100% completado
+                  </span>
+                )}
               </div>
               <p className="text-xs sm:text-sm font-medium text-[#5B21B6]">
-                “{congratsPhrase}”
+                “{dailyMotivation.phrase}”
               </p>
             </div>
           </div>
@@ -1224,7 +1261,13 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
           {activeFrases.length > 1 && (
             <button
               type="button"
-              onClick={() => setCongratsPhrase(pickRandomFrase())}
+              onClick={() =>
+                setDailyMotivation((prev) =>
+                  prev
+                    ? { ...prev, phrase: pickRandomMotivationalPhrase(activeFrases) }
+                    : prev
+                )
+              }
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white hover:bg-[#FAF7FF] text-[#5B21B6] border border-[#E6DDF5] shrink-0 self-start sm:self-auto"
             >
               <RefreshCw className="h-3.5 w-3.5" />
@@ -1665,8 +1708,8 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
         </div>
       )}
 
-      {/* Closing Congratulations Modal */}
-      {congratsModalOpen && allDailyCompleted && (
+      {/* Random Activity Motivational Congratulation Modal (1 random task per day) */}
+      {congratsModalOpen && dailyMotivation && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1F172B]/60 backdrop-blur-[2px]"
           onClick={dismissCongratsModal}
@@ -1682,7 +1725,7 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                 </div>
                 <div>
                   <p className="text-[11px] font-bold uppercase tracking-wider text-white/85">
-                    Cierre diario completado
+                    Actividad completada
                   </p>
                   <h3 className="font-display text-lg font-extrabold">
                     ¡Excelente trabajo, {currentUser.nombre}!
@@ -1702,11 +1745,10 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
             <div className="p-6 space-y-4">
               <div className="rounded-xl bg-[#FAF7FF] border border-[#EAE3F5] p-4 space-y-1.5">
                 <p className="text-xs font-semibold text-[#7C3AED]">
-                  {sucursal.nombre} · {tareasHoy.length}/{tareasHoy.length}{' '}
-                  actividades del día completadas
+                  {sucursal.nombre} · Completaste “{dailyMotivation.taskTitle}”
                 </p>
                 <p className="text-sm sm:text-base font-bold text-[#1F172B] leading-relaxed">
-                  “{congratsPhrase}”
+                  “{dailyMotivation.phrase}”
                 </p>
               </div>
 
@@ -1714,7 +1756,16 @@ export const CajeraMiDiaView: React.FC<CajeraMiDiaViewProps> = ({
                 {activeFrases.length > 1 ? (
                   <button
                     type="button"
-                    onClick={() => setCongratsPhrase(pickRandomFrase())}
+                    onClick={() =>
+                      setDailyMotivation((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              phrase: pickRandomMotivationalPhrase(activeFrases),
+                            }
+                          : prev
+                      )
+                    }
                     className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#FAF8FC] hover:bg-[#F3ECFC] text-[#5B21B6] border border-[#E6DDF5]"
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
