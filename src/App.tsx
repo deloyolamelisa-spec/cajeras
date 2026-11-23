@@ -168,6 +168,7 @@ export default function App() {
   const [supabaseWarning, setSupabaseWarning] = useState<string | undefined>();
   const [syncError, setSyncError] = useState<string | null>(null);
   const [pendingLlamadasWrites, setPendingLlamadasWrites] = useState(0);
+  const llamadasMutationEpochRef = useRef(0);
 
   useEffect(() => {
     if (pendingLlamadasWrites <= 0) return;
@@ -278,6 +279,74 @@ export default function App() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    if (
+      loading ||
+      dataSource !== 'supabase' ||
+      !currentUser ||
+      pendingLlamadasWrites > 0 ||
+      (activeSection !== 'llamadas' && activeSection !== 'mi_dia')
+    ) {
+      return;
+    }
+    const startEpoch = llamadasMutationEpochRef.current;
+    const todayMexico = getTodayLocalYYYYMMDD();
+    const targetBranch =
+      currentUser.rol === 'cajera'
+        ? sucursales.find((s) =>
+            matchesSucursalRecord(
+              {
+                sucursal_id: currentUser.sucursal_id,
+                sucursal_nombre: currentUser.sucursal_id,
+                sucursal: currentUser.sucursal_id,
+              },
+              s
+            )
+          ) || currentUser.sucursal_id
+        : selectedSucursalId || 'todas';
+
+    let cancelled = false;
+    fetchLlamadasParaSucursalHoy(targetBranch, sucursales, todayMexico).then(
+      (res) => {
+        if (
+          cancelled ||
+          llamadasMutationEpochRef.current !== startEpoch ||
+          !res.ok ||
+          !Array.isArray(res.data)
+        ) {
+          return;
+        }
+        const freshRows = res.data;
+        setLlamadas((prev) => {
+          const freshIds = new Set(freshRows.map((r) => r.id));
+          const preserved = prev.filter(
+            (r) =>
+              !freshIds.has(r.id) &&
+              !(
+                (targetBranch === 'todas' ||
+                  matchesSucursalRecord(r, targetBranch)) &&
+                getLlamadaLocalDate(r) === todayMexico
+              )
+          );
+          return [...freshRows, ...preserved].sort((a, b) =>
+            (b.fecha_registro || '').localeCompare(a.fecha_registro || '')
+          );
+        });
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeSection,
+    loading,
+    dataSource,
+    currentUser,
+    selectedSucursalId,
+    sucursales,
+    pendingLlamadasWrites,
+  ]);
 
   const handleLogin = async (
     correo: string,
@@ -586,6 +655,7 @@ export default function App() {
   ): Promise<ServiceResult<LlamadaSucursal>> => {
     const enriched = enrichLlamadaWithAuth(updated);
     const next = llamadas.map((l) => (l.id === enriched.id ? enriched : l));
+    llamadasMutationEpochRef.current += 1;
     setPendingLlamadasWrites((c) => c + 1);
     try {
       const res = await updateLlamadaById(enriched, next);
@@ -609,6 +679,7 @@ export default function App() {
   ): Promise<ServiceResult<LlamadaSucursal>> => {
     const enriched = enrichLlamadaWithAuth(nueva);
     const next = [enriched, ...llamadas];
+    llamadasMutationEpochRef.current += 1;
     setPendingLlamadasWrites((c) => c + 1);
     try {
       const res = await saveLlamada(enriched, next);
@@ -631,6 +702,7 @@ export default function App() {
     if (nuevas.length === 0) return { ok: true, insertedCount: 0, data: [] };
     const enrichedList = nuevas.map(enrichLlamadaWithAuth);
     const provisional = [...enrichedList, ...llamadas];
+    llamadasMutationEpochRef.current += 1;
     setPendingLlamadasWrites((c) => c + 1);
     try {
       const res = await saveLlamadasBatch(enrichedList, provisional);

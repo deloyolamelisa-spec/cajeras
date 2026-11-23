@@ -794,10 +794,11 @@ function normalizeLlamadaFromDb(
     String(row.respuesta ?? row.reporte_cajera ?? 'Sin reporte').trim() ||
     'Sin reporte';
   const hasExplicitStatus =
-    row.realizada !== undefined && row.realizada !== null ||
-    row.llamada_registrada !== undefined && row.llamada_registrada !== null ||
+    (row.realizada !== undefined && row.realizada !== null) ||
+    (row.llamada_registrada !== undefined && row.llamada_registrada !== null) ||
     (row.estatus !== undefined && row.estatus !== null && String(row.estatus).trim() !== '') ||
-    (row.estado !== undefined && row.estado !== null && String(row.estado).trim() !== '');
+    (row.estado !== undefined && row.estado !== null && String(row.estado).trim() !== '') ||
+    (row.estatus_llamada !== undefined && row.estatus_llamada !== null && String(row.estatus_llamada).trim() !== '');
   const isRealizada = hasExplicitStatus
     ? isLlamadaRealizadaRecord(row)
     : reporteCajera !== 'Sin reporte' && reporteCajera !== 'Pendiente';
@@ -903,8 +904,13 @@ function normalizeLlamadaFromDb(
   };
 }
 
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function isClientTempId(id: string): boolean {
-  return !id || id.startsWith('ll-') || id.startsWith('temp-');
+  const trimmed = String(id || '').trim();
+  if (!trimmed) return true;
+  return !UUID_REGEX.test(trimmed) && !/^\d+$/.test(trimmed);
 }
 
 async function discoverLlamadasSchema(): Promise<void> {

@@ -932,12 +932,14 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     try {
       const res = await onImportLlamadas(parsedImportRows);
       if (!res || !res.ok) {
-        setImportError(
+        const msg =
           res?.error ||
-            'No se pudo guardar la base en Supabase. Intenta de nuevo.'
-        );
+          'No se pudo guardar la base en Supabase. Intenta de nuevo.';
+        setImportError(msg);
+        setRowErrorToast(msg);
         return;
       }
+      setRowErrorToast(null);
       const loteLabel = isCajera
         ? ` (Base ${dailyBatchSummary.nextLoteNum} de 3 del día)`
         : '';
@@ -952,11 +954,12 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       setImportFileName('');
       setTimeout(() => setImportToast(null), 6000);
     } catch (err) {
-      setImportError(
+      const msg =
         err instanceof Error
           ? err.message
-          : 'Error inesperado al guardar la base en Supabase.'
-      );
+          : 'Error inesperado al guardar la base en Supabase.';
+      setImportError(msg);
+      setRowErrorToast(msg);
     } finally {
       setImporting(false);
     }
