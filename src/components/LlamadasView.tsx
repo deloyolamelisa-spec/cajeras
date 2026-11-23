@@ -40,8 +40,10 @@ import {
   isLlamadaRealizadaRecord,
   matchesSucursalRecord,
   MEXICO_TIMEZONE,
+  normalizeSucursalNameForDb,
   parseMoneyInput,
   renderWhatsAppTemplate,
+  roundMoney2,
   toLocalYYYYMMDD,
 } from '../utils/calculations';
 import { DEFAULT_WHATSAPP_TEMPLATES } from '../data/mockData';
@@ -133,8 +135,12 @@ function getDisplayCallTime(item: LlamadaSucursal): string {
   if (item.hora_llamada && item.hora_llamada.trim()) {
     return item.hora_llamada.trim();
   }
-  if (!item.fecha_registro) return '';
-  const dt = new Date(item.fecha_registro);
+  const ts = item.created_at || item.fecha_registro || '';
+  if (!ts || !ts.includes('T')) return '';
+  if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.0+)?(?:Z|\+00:00)?$/i.test(ts.trim())) {
+    return '';
+  }
+  const dt = new Date(ts);
   if (Number.isNaN(dt.getTime())) return '';
   return getMexicoExactTimeHHMMSS(dt);
 }
@@ -185,6 +191,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   const [filterFecha, setFilterFecha] = useState<'hoy' | 'todos'>(() =>
     isCajera ? 'hoy' : 'todos'
   );
+  useEffect(() => {
+    if (isCajera) setFilterFecha('hoy');
+  }, [isCajera]);
   const [filterVencimiento, setFilterVencimiento] = useState<string>('todos');
   const [venceDesde, setVenceDesde] = useState<string>('');
   const [venceHasta, setVenceHasta] = useState<string>('');
@@ -199,7 +208,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     {}
   );
   const [savedToastId, setSavedToastId] = useState<string | null>(null);
-  const [registeringRowId, setRegisteringRowId] = useState<string | null>(null);
+  const [registeringRowIds, setRegisteringRowIds] = useState<
+    Record<string, boolean>
+  >({});
   const [rowErrorToast, setRowErrorToast] = useState<string | null>(null);
   const [callActionToast, setCallActionToast] = useState<string | null>(null);
 
@@ -263,6 +274,21 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [importToast, setImportToast] = useState<string | null>(null);
+
+  const hasPendingCallWrites =
+    importing || Object.keys(registeringRowIds).length > 0;
+
+  useEffect(() => {
+    if (!hasPendingCallWrites) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue =
+        'Aún se están guardando llamadas en Supabase. Espera un momento antes de salir.';
+      return e.returnValue;
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [hasPendingCallWrites]);
 
   // Form state for new call
   const defaultSucursal =
@@ -583,10 +609,17 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       draftObs[item.id] !== undefined
         ? draftObs[item.id]
         : item.observaciones_admin;
-    await onUpdateLlamada({
+    const res = await onUpdateLlamada({
       ...item,
       observaciones_admin: obs,
     });
+    if (res && !res.ok) {
+      setRowErrorToast(
+        res.error || 'No se pudo guardar la observación en Supabase.'
+      );
+      return;
+    }
+    setRowErrorToast(null);
     setSavedToastId(item.id);
     setTimeout(() => setSavedToastId(null), 1600);
   };
@@ -599,12 +632,12 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     const suc =
       sucursales.find((s) => s.id === targetSucId) || sucursales[0];
     const now = new Date();
-    const parsedMonto = parseMoneyInput(newForm.monto_prestamo);
+    const parsedMonto = roundMoney2(parseMoneyInput(newForm.monto_prestamo));
     const nueva: LlamadaSucursal = {
       id: `ll-${Date.now()}`,
       sucursal_id: suc.id,
       sucursal_nombre: suc.nombre,
-      sucursal: suc.nombre,
+      sucursal: normalizeSucursalNameForDb(suc.nombre),
       cliente_nombre: newForm.cliente_nombre.trim(),
       contrato:
         newForm.contrato.trim() ||
@@ -626,28 +659,39 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
       estado: 'Realizada',
       hora_llamada: getMexicoExactTimeHHMMSS(now),
       fecha_llamada: todayStr,
-      fecha_registro: now.toISOString(),
+      fecha: todayStr,
+      fecha_registro: todayStr,
+      lote_base: 1,
+      created_at: now.toISOString(),
     };
 
-    const res = await onCreateLlamada(nueva);
-    if (res && res.ok === false) {
+    try {
+      const res = await onCreateLlamada(nueva);
+      if (!res || !res.ok) {
+        setRowErrorToast(
+          res?.error || 'No se pudo registrar la llamada en Supabase.'
+        );
+        return;
+      }
+      setRowErrorToast(null);
+      setNewForm({
+        sucursal_id: defaultSucursal,
+        cliente_nombre: '',
+        contrato: '',
+        telefono: '',
+        monto_prestamo: '8500',
+        estatus_vencimiento: 'Por vencer',
+        reporte_cajera: 'Promesa de pago',
+        observaciones_admin: '',
+      });
+      closeModal();
+    } catch (err) {
       setRowErrorToast(
-        res.error || 'No se pudo registrar la llamada en Supabase.'
+        err instanceof Error
+          ? err.message
+          : 'Error inesperado al registrar la llamada en Supabase.'
       );
-      return;
     }
-    setRowErrorToast(null);
-    setNewForm({
-      sucursal_id: defaultSucursal,
-      cliente_nombre: '',
-      contrato: '',
-      telefono: '',
-      monto_prestamo: '8500',
-      estatus_vencimiento: 'Por vencer',
-      reporte_cajera: 'Promesa de pago',
-      observaciones_admin: '',
-    });
-    closeModal();
   };
 
   const handleDownloadTemplateCSV = () => {
@@ -831,18 +875,19 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                 ? 'Al corriente'
                 : computeVencimientoFromDate(fechaVenc);
 
+        const safeMonto = roundMoney2(parsedMonto);
         built.push({
           id: `ll-lote-${loteNum}__${todayStr}__${matchedSuc.id}__${batchStamp}-${idx}`,
           sucursal_id: matchedSuc.id,
           sucursal_nombre: matchedSuc.nombre,
-          sucursal: matchedSuc.nombre,
+          sucursal: normalizeSucursalNameForDb(matchedSuc.nombre),
           cliente_nombre: cliente,
           contrato:
             contrato ||
             `${matchedSuc.codigo.split('-')[0]}-2026-${Math.floor(1000 + Math.random() * 9000)}`,
           telefono: telefonoRaw,
-          monto_prestamo: parsedMonto,
-          monto: parsedMonto,
+          monto_prestamo: safeMonto,
+          monto: safeMonto,
           estatus_vencimiento: estatusVenc,
           fecha_vencimiento: fechaVenc,
           reporte_cajera: 'Sin reporte',
@@ -853,9 +898,13 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
             : matchedSuc.responsable_caja,
           cajera_id: isCajera ? currentUserId || '' : '',
           llamada_registrada: false,
+          realizada: false,
           estatus: 'Pendiente',
           estado: 'Pendiente',
-          fecha_registro: nowIso,
+          fecha: todayStr,
+          fecha_registro: todayStr,
+          lote_base: loteNum,
+          created_at: nowIso,
         });
       });
 
@@ -882,25 +931,32 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
     setImportError(null);
     try {
       const res = await onImportLlamadas(parsedImportRows);
-      if (res && res.ok === false) {
+      if (!res || !res.ok) {
         setImportError(
-          res.error || 'No se pudo guardar la base en Supabase. Intenta de nuevo.'
+          res?.error ||
+            'No se pudo guardar la base en Supabase. Intenta de nuevo.'
         );
         return;
       }
       const loteLabel = isCajera
         ? ` (Base ${dailyBatchSummary.nextLoteNum} de 3 del día)`
         : '';
-      const countSaved = res?.insertedCount ?? parsedImportRows.length;
-      const warnSuffix = res?.warning ? ` · Aviso: ${res.warning}` : '';
+      const countSaved = res.insertedCount ?? parsedImportRows.length;
+      const warnSuffix = res.warning ? ` · Aviso: ${res.warning}` : '';
       setImportToast(
-        `${countSaved} registro(s) sumados y guardados en llamadas_sucursal${loteLabel}.${warnSuffix}`
+        `${countSaved} registro(s) guardados en Supabase (llamadas_sucursal)${loteLabel}.${warnSuffix}`
       );
       setShowImportModal(false);
       setParsedImportRows([]);
       setImportWarnings([]);
       setImportFileName('');
       setTimeout(() => setImportToast(null), 6000);
+    } catch (err) {
+      setImportError(
+        err instanceof Error
+          ? err.message
+          : 'Error inesperado al guardar la base en Supabase.'
+      );
     } finally {
       setImporting(false);
     }
@@ -1768,9 +1824,9 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                       <span className="font-semibold text-sm text-[#1F172B]">
                         {item.cliente_nombre}
                       </span>
-                      {batchInfo?.loteNum && (
+                      {(item.lote_base || batchInfo?.loteNum) && (
                         <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-[#F3ECFC] text-[#5B21B6]">
-                          Base {batchInfo.loteNum}
+                          Base {item.lote_base || batchInfo?.loteNum}
                         </span>
                       )}
                     </div>
@@ -2019,14 +2075,22 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
 
                             <button
                               type="button"
-                              disabled={registeringRowId === item.id}
+                              disabled={Boolean(registeringRowIds[item.id])}
                               onClick={async () => {
-                                setRegisteringRowId(item.id);
+                                setRegisteringRowIds((prev) => ({
+                                  ...prev,
+                                  [item.id]: true,
+                                }));
                                 setRowErrorToast(null);
                                 try {
                                   const now = new Date();
                                   const exactTime =
                                     getMexicoExactTimeHHMMSS(now);
+                                  const resolvedSucName =
+                                    item.sucursal_nombre ||
+                                    item.sucursal ||
+                                    activeBranchObj?.nombre ||
+                                    '';
                                   const res = await onUpdateLlamada({
                                     ...item,
                                     monto_prestamo: loanAmount,
@@ -2035,16 +2099,10 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                                       item.sucursal_id ||
                                       activeBranchObj?.id ||
                                       selectedSucursalId,
-                                    sucursal_nombre:
-                                      item.sucursal_nombre ||
-                                      item.sucursal ||
-                                      activeBranchObj?.nombre ||
-                                      '',
-                                    sucursal:
-                                      item.sucursal ||
-                                      item.sucursal_nombre ||
-                                      activeBranchObj?.nombre ||
-                                      '',
+                                    sucursal_nombre: resolvedSucName,
+                                    sucursal: normalizeSucursalNameForDb(
+                                      item.sucursal || resolvedSucName
+                                    ),
                                     cajera_nombre:
                                       currentUserName || item.cajera_nombre,
                                     cajera_id:
@@ -2058,12 +2116,18 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                                     estado: 'Realizada',
                                     hora_llamada: exactTime,
                                     fecha_llamada: todayStr,
-                                    fecha_registro: now.toISOString(),
+                                    fecha: item.fecha || todayStr,
+                                    fecha_registro:
+                                      item.fecha_registro || todayStr,
+                                    lote_base:
+                                      item.lote_base ??
+                                      batchInfo?.loteNum ??
+                                      undefined,
                                   });
 
-                                  if (res && res.ok === false) {
+                                  if (!res || !res.ok) {
                                     setRowErrorToast(
-                                      res.error ||
+                                      res?.error ||
                                         'Error al guardar la llamada en Supabase.'
                                     );
                                     return;
@@ -2090,14 +2154,24 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
                                         : prev
                                     );
                                   }, 4000);
+                                } catch (err) {
+                                  setRowErrorToast(
+                                    err instanceof Error
+                                      ? err.message
+                                      : 'Error inesperado al registrar la llamada en Supabase.'
+                                  );
                                 } finally {
-                                  setRegisteringRowId(null);
+                                  setRegisteringRowIds((prev) => {
+                                    const next = { ...prev };
+                                    delete next[item.id];
+                                    return next;
+                                  });
                                 }
                               }}
                               className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-[#7C3AED] hover:bg-[#6D28D9] text-white shadow-xs disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
                             >
                               <CheckCircle2 className="h-3.5 w-3.5" />
-                              {registeringRowId === item.id
+                              {registeringRowIds[item.id]
                                 ? 'Guardando...'
                                 : 'Registrar llamada'}
                             </button>
@@ -2675,6 +2749,26 @@ export const LlamadasView: React.FC<LlamadasViewProps> = ({
           }
         }}
       />
+
+      {/* Floating Error Banner so scrolled users never miss a failed Supabase save */}
+      {rowErrorToast && (
+        <div
+          role="alert"
+          className="fixed bottom-4 right-4 z-50 max-w-md rounded-2xl px-4 py-3 bg-[#FFF1F2] border border-[#FDA4AF] shadow-xl text-xs font-semibold text-[#BE123C] flex items-start justify-between gap-3"
+        >
+          <div className="flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+            <span>{rowErrorToast}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRowErrorToast(null)}
+            className="underline shrink-0"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
     </div>
   );
 };

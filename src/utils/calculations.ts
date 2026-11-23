@@ -298,6 +298,13 @@ export function toLocalYYYYMMDD(dateInput?: string | Date | null): string {
   if (typeof dateInput === 'string') {
     const trimmed = dateInput.trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+    if (
+      /^\d{4}-\d{2}-\d{2}[T ]00:00:00(?:\.0+)?(?:Z|\+00(?::00)?)$/i.test(
+        trimmed
+      )
+    ) {
+      return trimmed.slice(0, 10);
+    }
     const parsed = new Date(trimmed);
     if (!Number.isNaN(parsed.getTime())) {
       return getMexicoNowParts(parsed).yyyyMmDd;
@@ -349,6 +356,20 @@ export function extractLlamadaBatchInfo(
     };
   }
 
+  // Persisted DB rows with lote_base column
+  const dbLoteNum = Number(llamada.lote_base);
+  if (Number.isInteger(dbLoteNum) && dbLoteNum >= 1 && dbLoteNum <= 10) {
+    const fecha = llamada.fecha
+      ? toLocalYYYYMMDD(llamada.fecha)
+      : toLocalYYYYMMDD(llamada.fecha_registro);
+    return {
+      loteNum: dbLoteNum,
+      fecha,
+      sucursalId: llamada.sucursal_id,
+      batchKey: `${fecha}__${llamada.sucursal_id}__lote-${dbLoteNum}`,
+    };
+  }
+
   return null;
 }
 
@@ -361,6 +382,16 @@ export function normalizeBranchKey(value?: string | null): string {
     .replace(/\bsuc\.?\b/gi, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
+}
+
+export function normalizeSucursalNameForDb(value?: string | null): string {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 'SUCURSAL';
+  const stripped = raw
+    .replace(/^\s*(?:sucursal|suc\.?)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (stripped || raw).toUpperCase();
 }
 
 export function matchesSucursalRecord(
@@ -420,6 +451,7 @@ export function isLlamadaRealizadaRecord(row: {
   llamada_registrada?: unknown;
   estatus?: unknown;
   estado?: unknown;
+  estatus_llamada?: unknown;
 }): boolean {
   if (
     row.realizada === true ||
@@ -437,11 +469,22 @@ export function isLlamadaRealizadaRecord(row: {
   }
   const estatus = String(row.estatus ?? '').trim().toLowerCase();
   const estado = String(row.estado ?? '').trim().toLowerCase();
-  return estatus === 'realizada' || estado === 'realizada';
+  const estatusLlamada = String(row.estatus_llamada ?? '').trim().toLowerCase();
+  return (
+    estatus === 'realizada' ||
+    estado === 'realizada' ||
+    estatusLlamada === 'realizada'
+  );
 }
 
 export function getLlamadaLocalDate(llamada: LlamadaSucursal): string {
-  if (llamada.fecha_llamada && /^\d{4}-\d{2}-\d{2}/.test(llamada.fecha_llamada)) {
+  if (llamada.fecha && /^\d{4}-\d{2}-\d{2}/.test(llamada.fecha)) {
+    return toLocalYYYYMMDD(llamada.fecha);
+  }
+  if (
+    llamada.fecha_llamada &&
+    /^\d{4}-\d{2}-\d{2}/.test(llamada.fecha_llamada)
+  ) {
     return toLocalYYYYMMDD(llamada.fecha_llamada);
   }
   const batchInfo = extractLlamadaBatchInfo(llamada);
@@ -496,9 +539,14 @@ export function getDailyBatchSummaryForBranch(
   for (const item of branchTodayCalls) {
     const info = extractLlamadaBatchInfo(item);
     const done = isLlamadaRealizadaRecord(item);
-    const fallbackKey = `${fechaStr}__${sucursalId}__db-${(item.fecha_registro || fechaStr).slice(0, 16)}`;
+    const tsSource = item.created_at || item.fecha_registro || fechaStr;
+    const dbLote = Number(item.lote_base);
+    const fallbackKey =
+      Number.isInteger(dbLote) && dbLote >= 1
+        ? `${fechaStr}__${sucursalId}__lote-${dbLote}`
+        : `${fechaStr}__${sucursalId}__db-${tsSource.slice(0, 16)}`;
     const batchKey = info?.batchKey || fallbackKey;
-    const loteNum = info?.loteNum ?? null;
+    const loteNum = info?.loteNum ?? (Number.isInteger(dbLote) && dbLote >= 1 ? dbLote : null);
     const existing = grouped.get(batchKey);
     if (existing) {
       existing.totalRegistros += 1;
@@ -508,7 +556,7 @@ export function getDailyBatchSummaryForBranch(
         loteNum,
         totalRegistros: 1,
         llamadasRealizadas: done ? 1 : 0,
-        firstTs: item.fecha_registro || '',
+        firstTs: tsSource,
       });
     }
   }

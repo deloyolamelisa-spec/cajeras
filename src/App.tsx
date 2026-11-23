@@ -59,13 +59,16 @@ import {
   ensureBaseDailyCatalogTasks,
   evaluarVencimientoActividad,
   getDiaSemanaFromDate,
+  getLlamadaLocalDate,
   getMexicoNowParts,
   getMinutesUntilHHMM,
   getTodayDiaSemana,
   getTodayLocalYYYYMMDD,
   isFixedBaseTask,
   matchesSucursalRecord,
+  normalizeSucursalNameForDb,
   resolveDailyTasksForBranch,
+  toLocalYYYYMMDD,
 } from './utils/calculations';
 import {
   getBrowserNotificationPermission,
@@ -164,6 +167,19 @@ export default function App() {
   const [remoteCounts, setRemoteCounts] = useState<Record<string, number>>({});
   const [supabaseWarning, setSupabaseWarning] = useState<string | undefined>();
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [pendingLlamadasWrites, setPendingLlamadasWrites] = useState(0);
+
+  useEffect(() => {
+    if (pendingLlamadasWrites <= 0) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue =
+        'Hay llamadas guardándose en Supabase. Espera un segundo antes de cerrar.';
+      return e.returnValue;
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [pendingLlamadasWrites]);
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [supabaseModalOpen, setSupabaseModalOpen] = useState(false);
@@ -229,21 +245,25 @@ export default function App() {
           )
         ) || effectiveUser.sucursal_id;
 
+      const todayMexico = getTodayLocalYYYYMMDD();
       const cajeraRes = await fetchLlamadasParaSucursalHoy(
         matchedSuc,
         loaded.sucursales,
-        getTodayLocalYYYYMMDD()
+        todayMexico
       );
       if (cajeraRes.ok && Array.isArray(cajeraRes.data)) {
         const freshBranchRows = cajeraRes.data;
         setLlamadas((prev) => {
           const branchIds = new Set(freshBranchRows.map((r) => r.id));
-          const otherBranches = prev.filter(
+          const preservedRows = prev.filter(
             (r) =>
               !branchIds.has(r.id) &&
-              !matchesSucursalRecord(r, matchedSuc)
+              !(
+                matchesSucursalRecord(r, matchedSuc) &&
+                getLlamadaLocalDate(r) === todayMexico
+              )
           );
-          return [...freshBranchRows, ...otherBranches].sort((a, b) =>
+          return [...freshBranchRows, ...preservedRows].sort((a, b) =>
             (b.fecha_registro || '').localeCompare(a.fecha_registro || '')
           );
         });
@@ -376,17 +396,31 @@ export default function App() {
       const safeSucNombre =
         (
           suc?.nombre ||
-          ll.sucursal ||
           ll.sucursal_nombre ||
+          ll.sucursal ||
           ll.sucursal_id ||
           'Sucursal'
         ).trim() || 'Sucursal';
+      const normalizedSucursal = normalizeSucursalNameForDb(
+        suc?.nombre || ll.sucursal || ll.sucursal_nombre || ll.sucursal_id
+      );
+      const todayMexico = getTodayLocalYYYYMMDD();
+      const safeFecha = ll.fecha
+        ? toLocalYYYYMMDD(ll.fecha)
+        : ll.fecha_registro
+          ? toLocalYYYYMMDD(ll.fecha_registro)
+          : todayMexico;
+      const safeFechaRegistro = ll.fecha_registro
+        ? toLocalYYYYMMDD(ll.fecha_registro)
+        : safeFecha;
       const isCaj = currentUser?.rol === 'cajera';
       return {
         ...ll,
         sucursal_id: suc?.id || ll.sucursal_id || safeSucNombre,
         sucursal_nombre: safeSucNombre,
-        sucursal: safeSucNombre,
+        sucursal: normalizedSucursal,
+        fecha: safeFecha,
+        fecha_registro: safeFechaRegistro,
         cajera_id: isCaj
           ? currentUser.id
           : ll.cajera_id || currentUser?.id || '',
@@ -552,17 +586,22 @@ export default function App() {
   ): Promise<ServiceResult<LlamadaSucursal>> => {
     const enriched = enrichLlamadaWithAuth(updated);
     const next = llamadas.map((l) => (l.id === enriched.id ? enriched : l));
-    const res = await updateLlamadaById(enriched, next);
-    if (!res.ok) {
-      if (res.error) setSyncError(`Supabase (${res.error})`);
-      return res;
+    setPendingLlamadasWrites((c) => c + 1);
+    try {
+      const res = await updateLlamadaById(enriched, next);
+      if (!res.ok) {
+        if (res.error) setSyncError(`Supabase (${res.error})`);
+        return res;
+      }
+      setSyncError(null);
+      const savedRow = res.data || enriched;
+      setLlamadas((prev) =>
+        prev.map((l) => (l.id === enriched.id ? savedRow : l))
+      );
+      return { ...res, data: savedRow };
+    } finally {
+      setPendingLlamadasWrites((c) => Math.max(0, c - 1));
     }
-    setSyncError(null);
-    const savedRow = res.data || enriched;
-    setLlamadas((prev) =>
-      prev.map((l) => (l.id === enriched.id ? savedRow : l))
-    );
-    return { ...res, data: savedRow };
   };
 
   const handleCreateLlamada = async (
@@ -570,31 +609,52 @@ export default function App() {
   ): Promise<ServiceResult<LlamadaSucursal>> => {
     const enriched = enrichLlamadaWithAuth(nueva);
     const next = [enriched, ...llamadas];
-    const res = await saveLlamada(enriched, next);
-    if (!res.ok) {
-      if (res.error) setSyncError(`Supabase (${res.error})`);
-      return res;
+    setPendingLlamadasWrites((c) => c + 1);
+    try {
+      const res = await saveLlamada(enriched, next);
+      if (!res.ok) {
+        if (res.error) setSyncError(`Supabase (${res.error})`);
+        return res;
+      }
+      setSyncError(null);
+      const savedRow = res.data || enriched;
+      setLlamadas((prev) => [savedRow, ...prev]);
+      return { ...res, data: savedRow };
+    } finally {
+      setPendingLlamadasWrites((c) => Math.max(0, c - 1));
     }
-    setSyncError(null);
-    const savedRow = res.data || enriched;
-    setLlamadas((prev) => [savedRow, ...prev]);
-    return { ...res, data: savedRow };
   };
 
   const handleImportLlamadas = async (
     nuevas: LlamadaSucursal[]
   ): Promise<ServiceResult> => {
-    if (nuevas.length === 0) return { ok: true, insertedCount: 0 };
+    if (nuevas.length === 0) return { ok: true, insertedCount: 0, data: [] };
     const enrichedList = nuevas.map(enrichLlamadaWithAuth);
     const provisional = [...enrichedList, ...llamadas];
-    const res = await saveLlamadasBatch(enrichedList, provisional);
-    if (!res.ok) {
-      if (res.error) setSyncError(`Supabase (${res.error})`);
+    setPendingLlamadasWrites((c) => c + 1);
+    try {
+      const res = await saveLlamadasBatch(enrichedList, provisional);
+      if (!res.ok) {
+        if (res.error) setSyncError(`Supabase (${res.error})`);
+        return res;
+      }
+      if (!Array.isArray(res.data) || res.data.length === 0) {
+        const errMsg =
+          'Supabase no devolvió los registros guardados al importar la base en llamadas_sucursal.';
+        setSyncError(errMsg);
+        return { ok: false, error: errMsg };
+      }
+      setSyncError(null);
+      const savedRows = res.data;
+      setLlamadas((prev) => {
+        const savedIds = new Set(savedRows.map((r) => r.id));
+        const existing = prev.filter((r) => !savedIds.has(r.id));
+        return [...savedRows, ...existing];
+      });
       return res;
+    } finally {
+      setPendingLlamadasWrites((c) => Math.max(0, c - 1));
     }
-    const savedRows = Array.isArray(res.data) ? res.data : enrichedList;
-    setLlamadas((prev) => [...savedRows, ...prev]);
-    return res;
   };
 
   const handleDeleteLlamada = async (id: string) => {

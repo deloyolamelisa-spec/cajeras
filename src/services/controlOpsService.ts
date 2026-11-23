@@ -34,13 +34,16 @@ import {
   buildInitialHorarios,
 } from '../data/mockData';
 import {
+  addDaysYYYYMMDD,
   calcularPuntualidadEnvio,
   ensureBaseDailyCatalogTasks,
+  extractLlamadaBatchInfo,
   getLlamadaLocalDate,
   getMexicoNowParts,
   getTodayLocalYYYYMMDD,
   isLlamadaRealizadaRecord,
   matchesSucursalRecord,
+  normalizeSucursalNameForDb,
   parseMoneyInput,
   roundMoney2,
   toLocalYYYYMMDD,
@@ -324,9 +327,39 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
     }> => {
       const pageSize = 1000;
       const allRows: Record<string, unknown>[] = [];
-      let useOrder = true;
+      const seenIds = new Set<string>();
+      const pushUniqueRows = (chunk: Record<string, unknown>[]) => {
+        for (const r of chunk) {
+          const idKey =
+            r.id !== undefined && r.id !== null ? String(r.id) : '';
+          if (idKey && seenIds.has(idKey)) continue;
+          if (idKey) seenIds.add(idKey);
+          allRows.push(r);
+        }
+      };
 
+      const todayMexico = getTodayLocalYYYYMMDD();
+      const twoDaysLaterMexico = addDaysYYYYMMDD(todayMexico, 2);
+      // Paginated explicit fetch of today's records first so PostgREST's 1000-row cap never cuts off today's calls
       for (let page = 0; page < 10; page++) {
+        const from = page * pageSize;
+        const to = from + pageSize - 1;
+        const todayOrRes = await supabase
+          .from(SUPABASE_TABLES.LLAMADAS)
+          .select('*')
+          .or(
+            `fecha.eq.${todayMexico},and(fecha_registro.gte.${todayMexico},fecha_registro.lt.${twoDaysLaterMexico})`
+          )
+          .order('id', { ascending: false })
+          .range(from, to);
+        if (todayOrRes.error || !Array.isArray(todayOrRes.data)) break;
+        const chunk = todayOrRes.data as Record<string, unknown>[];
+        pushUniqueRows(chunk);
+        if (chunk.length < pageSize) break;
+      }
+
+      let useOrder = true;
+      for (let page = 0; page < 20; page++) {
         const from = page * pageSize;
         const to = from + pageSize - 1;
         const baseQuery = supabase.from(SUPABASE_TABLES.LLAMADAS).select('*');
@@ -342,10 +375,13 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
               .select('*')
               .range(from, to);
             if (fallbackRes.error) {
-              return { data: null, error: fallbackRes.error };
+              return {
+                data: allRows.length > 0 ? allRows : null,
+                error: fallbackRes.error,
+              };
             }
             const chunk = (fallbackRes.data || []) as Record<string, unknown>[];
-            allRows.push(...chunk);
+            pushUniqueRows(chunk);
             if (chunk.length < pageSize) break;
             continue;
           }
@@ -356,7 +392,7 @@ export async function loadAllOperationalData(): Promise<LoadedOperationalData> {
         }
 
         const chunk = (res.data || []) as Record<string, unknown>[];
-        allRows.push(...chunk);
+        pushUniqueRows(chunk);
         if (chunk.length < pageSize) break;
       }
 
@@ -701,6 +737,8 @@ interface LlamadasSchemaCache {
   useAliasSucursal: boolean;
   useAliasCliente: boolean;
   omitGeneratedId: boolean;
+  requireClientId: boolean;
+  requireFechaLlamada: boolean;
   useInsertInsteadOfUpsert: boolean;
   openApiChecked: boolean;
 }
@@ -711,6 +749,8 @@ const llamadasSchemaCache: LlamadasSchemaCache = {
   useAliasSucursal: false,
   useAliasCliente: false,
   omitGeneratedId: false,
+  requireClientId: false,
+  requireFechaLlamada: false,
   useInsertInsteadOfUpsert: false,
   openApiChecked: false,
 };
@@ -789,27 +829,40 @@ function normalizeLlamadaFromDb(
       row.saldo ??
       0
   );
-  const fechaRegistro = String(
-    row.fecha_registro ??
-      row.created_at ??
-      row.fecha ??
-      row.fecha_llamada ??
-      new Date().toISOString()
+  const rawFechaCol = row.fecha ? String(row.fecha).trim() : '';
+  const rawFechaRegistroCol = row.fecha_registro
+    ? String(row.fecha_registro).trim()
+    : '';
+  const rawCreatedAt = row.created_at ? String(row.created_at).trim() : '';
+  const rawFechaLlamada = String(row.fecha_llamada ?? '').trim();
+
+  const resolvedLocalDate = toLocalYYYYMMDD(
+    rawFechaCol ||
+      rawFechaRegistroCol ||
+      rawFechaLlamada ||
+      rawCreatedAt ||
+      getTodayLocalYYYYMMDD()
   );
+
   const rawHora = String(row.hora_llamada ?? '').trim();
   const horaLlamada =
     rawHora ||
-    (isRealizada
-      ? getMexicoNowParts(new Date(fechaRegistro)).hhmm
+    (isRealizada && rawCreatedAt
+      ? getMexicoNowParts(new Date(rawCreatedAt)).hhmm
       : undefined);
-  const rawFechaLlamada = String(row.fecha_llamada ?? row.fecha ?? '').trim();
+
+  const rawLote = Number(row.lote_base);
+  const loteBase =
+    Number.isInteger(rawLote) && rawLote >= 1 ? rawLote : undefined;
 
   return {
     id: idStr,
     sucursal_id: matchedSuc?.id || rawSucId || '',
     sucursal_nombre: matchedSuc?.nombre || rawSucName || 'Sucursal',
-    sucursal: rawSucName || matchedSuc?.nombre || 'Sucursal',
-    cliente_nombre: String(row.cliente_nombre ?? row.cliente ?? 'Cliente'),
+    sucursal: rawSucName || normalizeSucursalNameForDb(matchedSuc?.nombre) || 'SUCURSAL',
+    cliente_nombre: String(
+      row.cliente_nombre ?? row.cliente ?? row.nombre_cliente ?? 'Cliente'
+    ),
     contrato: String(row.contrato ?? ''),
     telefono: String(row.telefono ?? ''),
     monto_prestamo: parsedMonto,
@@ -820,7 +873,11 @@ function normalizeLlamadaFromDb(
     respuesta: reporteCajera,
     estatus_auditoria: estatusAuditoria,
     observaciones_admin: String(
-      row.observaciones_admin ?? row.observaciones ?? ''
+      row.observaciones_admin ??
+        row.observaciones ??
+        row.observacion ??
+        row.notas_cajera ??
+        ''
     ),
     cajera_nombre: String(
       row.cajera_nombre ?? matchedSuc?.responsable_caja ?? ''
@@ -837,12 +894,17 @@ function normalizeLlamadaFromDb(
     fecha_llamada: rawFechaLlamada
       ? toLocalYYYYMMDD(rawFechaLlamada)
       : undefined,
-    fecha_registro: fechaRegistro,
+    fecha: rawFechaCol ? toLocalYYYYMMDD(rawFechaCol) : resolvedLocalDate,
+    fecha_registro: rawFechaRegistroCol
+      ? toLocalYYYYMMDD(rawFechaRegistroCol)
+      : resolvedLocalDate,
+    created_at: rawCreatedAt || undefined,
+    lote_base: loteBase,
   };
 }
 
 function isClientTempId(id: string): boolean {
-  return id.startsWith('ll-');
+  return !id || id.startsWith('ll-') || id.startsWith('temp-');
 }
 
 async function discoverLlamadasSchema(): Promise<void> {
@@ -939,32 +1001,50 @@ function buildLlamadaCandidateValues(
 
   const safeSucursalNombre =
     (
-      llamada.sucursal ||
       llamada.sucursal_nombre ||
+      llamada.sucursal ||
       llamada.sucursal_id ||
       'Sucursal'
     ).trim() || 'Sucursal';
+  const normalizedSucursal = normalizeSucursalNameForDb(
+    llamada.sucursal || llamada.sucursal_nombre || llamada.sucursal_id
+  );
 
   const isTemp = isClientTempId(llamada.id);
   const isRealizada = isLlamadaRealizadaRecord(llamada);
   const estadoLabel = isRealizada ? 'Realizada' : 'Pendiente';
-  const fechaRegistro = llamada.fecha_registro || new Date().toISOString();
+  const todayMexico = getTodayLocalYYYYMMDD();
+  const safeFechaLocal = toLocalYYYYMMDD(
+    llamada.fecha || llamada.fecha_registro || todayMexico
+  );
   const horaLlamada =
-    llamada.hora_llamada ||
-    (isRealizada ? getMexicoNowParts(new Date(fechaRegistro)).hhmm : '');
-  const fechaLlamada =
-    llamada.fecha_llamada ||
-    (isRealizada ? getTodayLocalYYYYMMDD() : toLocalYYYYMMDD(fechaRegistro));
+    llamada.hora_llamada && llamada.hora_llamada.trim()
+      ? llamada.hora_llamada.trim()
+      : isRealizada
+        ? getMexicoNowParts().hhmm
+        : null;
+  const fechaLlamada = isRealizada
+    ? toLocalYYYYMMDD(llamada.fecha_llamada || todayMexico)
+    : llamadasSchemaCache.requireFechaLlamada
+      ? safeFechaLocal
+      : llamada.fecha_llamada
+        ? toLocalYYYYMMDD(llamada.fecha_llamada)
+        : null;
   const respuestaVal =
     llamada.respuesta || llamada.reporte_cajera || 'Sin reporte';
+  const safeCajeraId = (llamada.cajera_id || '').trim() || null;
+
+  const batchLote =
+    llamada.lote_base ?? extractLlamadaBatchInfo(llamada)?.loteNum ?? 1;
 
   return {
     id: isTemp ? llamada.id : toDbFilterId(llamada.id),
     sucursal_id: llamada.sucursal_id || safeSucursalNombre,
     sucursal_nombre: safeSucursalNombre,
-    sucursal: safeSucursalNombre,
+    sucursal: normalizedSucursal,
     cliente_nombre: llamada.cliente_nombre,
     cliente: llamada.cliente_nombre,
+    nombre_cliente: llamada.cliente_nombre,
     contrato: llamada.contrato,
     telefono: llamada.telefono,
     monto_prestamo: safeMonto >= 0 ? safeMonto : 0,
@@ -976,32 +1056,45 @@ function buildLlamadaCandidateValues(
     estatus_auditoria: llamada.estatus_auditoria || 'Sin auditar',
     observaciones_admin: llamada.observaciones_admin ?? '',
     observaciones: llamada.observaciones_admin ?? '',
-    cajera_nombre: llamada.cajera_nombre ?? '',
-    cajera_id: llamada.cajera_id ?? '',
+    observacion: llamada.observaciones_admin ?? '',
+    notas_cajera: llamada.observaciones_admin ?? '',
+    cajera_nombre: (llamada.cajera_nombre ?? '').trim(),
+    cajera_id: safeCajeraId,
     llamada_registrada: isRealizada,
     realizada: isRealizada,
     estatus: estadoLabel,
     estado: estadoLabel,
+    estatus_llamada: estadoLabel,
     hora_llamada: horaLlamada,
     fecha_llamada: fechaLlamada,
-    fecha: fechaLlamada,
-    fecha_registro: fechaRegistro,
+    fecha: safeFechaLocal,
+    fecha_registro: safeFechaLocal,
+    lote_base: Number.isInteger(Number(batchLote)) ? Number(batchLote) : 1,
   };
 }
 
-function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> {
+function buildLlamadaPayload(
+  llamada: LlamadaSucursal,
+  options?: { forceOmitId?: boolean; forceIncludeId?: boolean }
+): Record<string, unknown> {
   const isTemp = isClientTempId(llamada.id);
   const candidateValues = buildLlamadaCandidateValues(llamada);
 
-  const { validColumns, missingColumns, useAliasCliente, omitGeneratedId } =
+  const { validColumns, missingColumns, omitGeneratedId, requireClientId } =
     llamadasSchemaCache;
+
+  const shouldOmitId =
+    options?.forceIncludeId
+      ? false
+      : options?.forceOmitId ||
+        (isTemp && (omitGeneratedId || !requireClientId));
 
   const payload: Record<string, unknown> = {};
 
   if (validColumns && validColumns.size > 0) {
     for (const [col, val] of Object.entries(candidateValues)) {
       if (!validColumns.has(col) || missingColumns.has(col)) continue;
-      if (col === 'id' && omitGeneratedId && isTemp) {
+      if (col === 'id' && shouldOmitId) {
         continue;
       }
       payload[col] = val;
@@ -1013,11 +1106,12 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
   // Missing optional columns are stripped automatically on retry.
   const orderedKeys = [
     'id',
+    'sucursal',
     'sucursal_id',
     'sucursal_nombre',
-    'sucursal',
+    'cliente',
     'cliente_nombre',
-    ...(useAliasCliente ? ['cliente'] : []),
+    'nombre_cliente',
     'contrato',
     'telefono',
     'monto_prestamo',
@@ -1029,21 +1123,25 @@ function buildLlamadaPayload(llamada: LlamadaSucursal): Record<string, unknown> 
     'estatus_auditoria',
     'observaciones_admin',
     'observaciones',
+    'observacion',
+    'notas_cajera',
     'cajera_nombre',
     'cajera_id',
     'llamada_registrada',
     'realizada',
     'estatus',
     'estado',
+    'estatus_llamada',
     'hora_llamada',
     'fecha_llamada',
     'fecha',
     'fecha_registro',
+    'lote_base',
   ];
 
   for (const col of orderedKeys) {
     if (missingColumns.has(col)) continue;
-    if (col === 'id' && omitGeneratedId && isTemp) {
+    if (col === 'id' && shouldOmitId) {
       continue;
     }
     payload[col] = candidateValues[col];
@@ -1058,47 +1156,31 @@ function buildLlamadaUpdatePayload(
   const candidateValues = buildLlamadaCandidateValues(llamada);
   const { validColumns, missingColumns } = llamadasSchemaCache;
 
-  // Always attempt core call-registration fields unless already proven missing in DB
   const updateKeys = [
     'estatus',
     'estado',
+    'estatus_llamada',
     'realizada',
     'llamada_registrada',
     'respuesta',
     'reporte_cajera',
     'hora_llamada',
     'fecha_llamada',
-    'fecha',
-    'fecha_registro',
     'cajera_nombre',
     'cajera_id',
     'observaciones_admin',
     'observaciones',
+    'observacion',
+    'notas_cajera',
     'estatus_auditoria',
-    'sucursal_id',
-    'sucursal_nombre',
-    'sucursal',
+    'lote_base',
   ];
 
   const payload: Record<string, unknown> = {};
+  const hasKnownSchema = Boolean(validColumns && validColumns.size > 0);
   for (const col of updateKeys) {
     if (missingColumns.has(col)) continue;
-    if (
-      validColumns &&
-      validColumns.size > 0 &&
-      !validColumns.has(col) &&
-      ![
-        'estatus',
-        'estado',
-        'realizada',
-        'llamada_registrada',
-        'respuesta',
-        'reporte_cajera',
-        'hora_llamada',
-        'cajera_nombre',
-        'cajera_id',
-      ].includes(col)
-    ) {
+    if (hasKnownSchema && !validColumns!.has(col)) {
       continue;
     }
     payload[col] = candidateValues[col];
@@ -1120,7 +1202,8 @@ function mergeDbRowWithInput(
     dbRow.llamada_registrada !== undefined ||
     dbRow.realizada !== undefined ||
     dbRow.estatus !== undefined ||
-    dbRow.estado !== undefined;
+    dbRow.estado !== undefined ||
+    dbRow.estatus_llamada !== undefined;
   return {
     ...orig,
     id: dbRow.id !== undefined && dbRow.id !== null ? String(dbRow.id) : orig.id,
@@ -1130,11 +1213,18 @@ function mergeDbRowWithInput(
         ? normalizedDb.sucursal_id
         : orig.sucursal_id),
     sucursal_nombre:
-      dbRow.sucursal_nombre !== undefined || dbRow.sucursal !== undefined
+      orig.sucursal_nombre ||
+      (dbRow.sucursal_nombre !== undefined || dbRow.sucursal !== undefined
         ? normalizedDb.sucursal_nombre
-        : orig.sucursal_nombre,
+        : orig.sucursal_nombre),
+    sucursal:
+      dbRow.sucursal !== undefined
+        ? String(dbRow.sucursal)
+        : orig.sucursal || orig.sucursal_nombre,
     cliente_nombre:
-      dbRow.cliente_nombre !== undefined || dbRow.cliente !== undefined
+      dbRow.cliente_nombre !== undefined ||
+      dbRow.cliente !== undefined ||
+      dbRow.nombre_cliente !== undefined
         ? normalizedDb.cliente_nombre
         : orig.cliente_nombre,
     contrato:
@@ -1167,7 +1257,9 @@ function mergeDbRowWithInput(
         : orig.estatus_auditoria,
     observaciones_admin:
       dbRow.observaciones_admin !== undefined ||
-      dbRow.observaciones !== undefined
+      dbRow.observaciones !== undefined ||
+      dbRow.observacion !== undefined ||
+      dbRow.notas_cajera !== undefined
         ? normalizedDb.observaciones_admin
         : orig.observaciones_admin,
     cajera_nombre:
@@ -1191,13 +1283,22 @@ function mergeDbRowWithInput(
         ? normalizedDb.hora_llamada
         : orig.hora_llamada,
     fecha_llamada:
-      dbRow.fecha_llamada !== undefined || dbRow.fecha !== undefined
+      dbRow.fecha_llamada !== undefined
         ? normalizedDb.fecha_llamada
         : orig.fecha_llamada,
+    fecha: dbRow.fecha !== undefined ? normalizedDb.fecha : orig.fecha,
     fecha_registro:
-      dbRow.fecha_registro !== undefined || dbRow.created_at !== undefined
+      dbRow.fecha_registro !== undefined
         ? normalizedDb.fecha_registro
         : orig.fecha_registro,
+    created_at:
+      dbRow.created_at !== undefined
+        ? String(dbRow.created_at)
+        : orig.created_at,
+    lote_base:
+      dbRow.lote_base !== undefined && dbRow.lote_base !== null
+        ? normalizedDb.lote_base
+        : orig.lote_base,
   };
 }
 
@@ -1217,8 +1318,12 @@ async function executeLlamadasWriteChunk(
     code?: string;
   } | null = null;
 
-  for (let attempt = 0; attempt < 25; attempt++) {
-    const payloads = records.map(buildLlamadaPayload);
+  const allClientTemp = records.every((r) => isClientTempId(r.id));
+
+  for (let attempt = 0; attempt < 35; attempt++) {
+    const payloads = records.map((r) =>
+      buildLlamadaPayload(r, allClientTemp ? { forceOmitId: !llamadasSchemaCache.requireClientId } : undefined)
+    );
     const hasPayloadKeys = payloads.every((p) => Object.keys(p).length > 0);
     if (!hasPayloadKeys) {
       return {
@@ -1256,7 +1361,6 @@ async function executeLlamadasWriteChunk(
       } else if (updateRes.data && updateRes.data.length > 0) {
         data = updateRes.data;
       } else {
-        // Fallback if record wasn't persisted yet
         const insertRes = await client
           .from(SUPABASE_TABLES.LLAMADAS)
           .insert(payloads[0])
@@ -1264,6 +1368,14 @@ async function executeLlamadasWriteChunk(
         data = insertRes.data;
         error = insertRes.error;
       }
+    } else if (allClientTemp) {
+      // Real .insert(...).select() for CSV/Excel imports and new call entries
+      const insertRes = await client
+        .from(SUPABASE_TABLES.LLAMADAS)
+        .insert(payloads)
+        .select();
+      data = insertRes.data;
+      error = insertRes.error;
     } else {
       const hasIdInPayload = payloads.every(
         (p) =>
@@ -1288,10 +1400,10 @@ async function executeLlamadasWriteChunk(
         return {
           ok: false,
           savedPairs: [],
-          error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.LLAMADAS} (revisa políticas RLS).`,
+          error: `Supabase no confirmó la escritura en ${SUPABASE_TABLES.LLAMADAS} (devolvió 0 filas; revisa políticas RLS).`,
         };
       }
-      if (!llamadasSchemaCache.validColumns && data.length > 0) {
+      if (data.length > 0) {
         llamadasSchemaCache.validColumns = new Set(
           Object.keys(data[0] as Record<string, unknown>)
         );
@@ -1346,6 +1458,26 @@ async function executeLlamadasWriteChunk(
 
     const msgLower = (error.message || '').toLowerCase();
     if (
+      error.code === '23502' &&
+      (msgLower.includes('"id"') || msgLower.includes('column id')) &&
+      allClientTemp &&
+      !llamadasSchemaCache.requireClientId
+    ) {
+      llamadasSchemaCache.requireClientId = true;
+      llamadasSchemaCache.omitGeneratedId = false;
+      continue;
+    }
+
+    if (
+      error.code === '23502' &&
+      msgLower.includes('fecha_llamada') &&
+      !llamadasSchemaCache.requireFechaLlamada
+    ) {
+      llamadasSchemaCache.requireFechaLlamada = true;
+      continue;
+    }
+
+    if (
       error.code === '42P10' ||
       msgLower.includes('on conflict') ||
       msgLower.includes('no unique or exclusion constraint')
@@ -1356,16 +1488,32 @@ async function executeLlamadasWriteChunk(
       }
     }
 
-    if (
-      error.code === '22P02' &&
-      (msgLower.includes('uuid') ||
-        msgLower.includes('bigint') ||
-        msgLower.includes('integer')) &&
-      !llamadasSchemaCache.omitGeneratedId
-    ) {
-      llamadasSchemaCache.omitGeneratedId = true;
-      llamadasSchemaCache.useInsertInsteadOfUpsert = true;
-      continue;
+    if (error.code === '22P02') {
+      if (
+        msgLower.includes('cajera_id') &&
+        !llamadasSchemaCache.missingColumns.has('cajera_id')
+      ) {
+        llamadasSchemaCache.missingColumns.add('cajera_id');
+        continue;
+      }
+      if (
+        msgLower.includes('sucursal_id') &&
+        !llamadasSchemaCache.missingColumns.has('sucursal_id')
+      ) {
+        llamadasSchemaCache.missingColumns.add('sucursal_id');
+        continue;
+      }
+      if (
+        (msgLower.includes('uuid') ||
+          msgLower.includes('bigint') ||
+          msgLower.includes('integer')) &&
+        !llamadasSchemaCache.omitGeneratedId
+      ) {
+        llamadasSchemaCache.omitGeneratedId = true;
+        llamadasSchemaCache.requireClientId = false;
+        llamadasSchemaCache.useInsertInsteadOfUpsert = true;
+        continue;
+      }
     }
 
     return {
@@ -1391,6 +1539,13 @@ export async function updateLlamadaById(
 ): Promise<ServiceResult<LlamadaSucursal>> {
   const conn = requireConfiguredSupabase();
   if (!conn.ok) return { ok: false, error: conn.error };
+
+  if (isClientTempId(llamada.id)) {
+    return {
+      ok: false,
+      error: `El registro "${llamada.cliente_nombre}" no tiene un ID real de Supabase (${llamada.id}). Recarga o vuelve a importar la base para guardarlo en ${SUPABASE_TABLES.LLAMADAS}.`,
+    };
+  }
 
   try {
     await discoverLlamadasSchema();
@@ -1422,17 +1577,19 @@ export async function updateLlamadaById(
         if (!data || data.length === 0) {
           return {
             ok: false,
-            error: `Supabase no actualizó el registro id=${llamada.id} en ${SUPABASE_TABLES.LLAMADAS} (verifica que el ID exista y que las políticas RLS permitan UPDATE).`,
+            error: `Supabase devolvió 0 filas actualizadas para id=${llamada.id} en ${SUPABASE_TABLES.LLAMADAS}. Verifica que el registro exista y que las políticas RLS permitan UPDATE.`,
           };
         }
         const firstRow = data[0] as Record<string, unknown>;
-        if (!llamadasSchemaCache.validColumns) {
-          llamadasSchemaCache.validColumns = new Set(Object.keys(firstRow));
-        }
+        llamadasSchemaCache.validColumns = new Set(Object.keys(firstRow));
         const saved = mergeDbRowWithInput(llamada, firstRow);
-        const nextList = allLlamadas.map((l) =>
-          l.id === llamada.id ? saved : l
+        const latestLocal = readLocal<LlamadaSucursal[]>(
+          STORAGE_KEYS.LLAMADAS,
+          allLlamadas
         );
+        const nextList = latestLocal.some((l) => l.id === llamada.id)
+          ? latestLocal.map((l) => (l.id === llamada.id ? saved : l))
+          : [saved, ...latestLocal];
         writeLocal(STORAGE_KEYS.LLAMADAS, nextList);
         return { ok: true, data: saved };
       }
@@ -1453,6 +1610,24 @@ export async function updateLlamadaById(
           llamadasSchemaCache.validColumns.delete(missingCol);
         }
         continue;
+      }
+
+      const msgLower = (error.message || '').toLowerCase();
+      if (error.code === '22P02') {
+        if (
+          msgLower.includes('cajera_id') &&
+          !llamadasSchemaCache.missingColumns.has('cajera_id')
+        ) {
+          llamadasSchemaCache.missingColumns.add('cajera_id');
+          continue;
+        }
+        if (
+          msgLower.includes('fecha_llamada') &&
+          !llamadasSchemaCache.missingColumns.has('fecha_llamada')
+        ) {
+          llamadasSchemaCache.missingColumns.add('fecha_llamada');
+          continue;
+        }
       }
 
       return {
@@ -1488,65 +1663,139 @@ export async function fetchLlamadasParaSucursalHoy(
 
   try {
     const pageSize = 1000;
-    const allRows: Record<string, unknown>[] = [];
-    let useOrder = true;
+    const rawRows: Record<string, unknown>[] = [];
+    const seenIds = new Set<string>();
+    const appendRows = (chunk: Record<string, unknown>[]) => {
+      for (const r of chunk) {
+        const key = r.id !== undefined && r.id !== null ? String(r.id) : '';
+        if (key && seenIds.has(key)) continue;
+        if (key) seenIds.add(key);
+        rawRows.push(r);
+      }
+    };
+    let querySucceeded = false;
 
+    const twoDaysLater = addDaysYYYYMMDD(fechaHoy, 2);
+
+    // 1. Paginated direct query filtering by fecha = hoy OR fecha_registro in [hoy, hoy+2d)
     for (let page = 0; page < 10; page++) {
       const from = page * pageSize;
       const to = from + pageSize - 1;
-      const baseQuery = conn.client.from(SUPABASE_TABLES.LLAMADAS).select('*');
-      const res = useOrder
-        ? await baseQuery.order('id', { ascending: false }).range(from, to)
-        : await baseQuery.range(from, to);
-
-      if (res.error) {
-        if (useOrder && page === 0) {
-          useOrder = false;
-          const fallbackRes = await conn.client
-            .from(SUPABASE_TABLES.LLAMADAS)
-            .select('*')
-            .range(from, to);
-          if (fallbackRes.error) {
-            return {
-              ok: false,
-              error: `Error al consultar ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(fallbackRes.error)}`,
-            };
-          }
-          const chunk = (fallbackRes.data || []) as Record<string, unknown>[];
-          allRows.push(...chunk);
-          if (chunk.length < pageSize) break;
-          continue;
-        }
-        return {
-          ok: false,
-          error: `Error al consultar ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(res.error)}`,
-        };
-      }
-
+      const res = await conn.client
+        .from(SUPABASE_TABLES.LLAMADAS)
+        .select('*')
+        .or(
+          `fecha.eq.${fechaHoy},and(fecha_registro.gte.${fechaHoy},fecha_registro.lt.${twoDaysLater})`
+        )
+        .order('id', { ascending: false })
+        .range(from, to);
+      if (res.error) break;
+      querySucceeded = true;
       const chunk = (res.data || []) as Record<string, unknown>[];
-      allRows.push(...chunk);
+      appendRows(chunk);
       if (chunk.length < pageSize) break;
     }
 
-    const normalizedAll = allRows
+    if (!querySucceeded) {
+      // 2. Fallback to single-column date filters if one column doesn't exist
+      let fechaOk = false;
+      for (let page = 0; page < 10; page++) {
+        const from = page * pageSize;
+        const to = from + pageSize - 1;
+        const res = await conn.client
+          .from(SUPABASE_TABLES.LLAMADAS)
+          .select('*')
+          .eq('fecha', fechaHoy)
+          .order('id', { ascending: false })
+          .range(from, to);
+        if (res.error) break;
+        fechaOk = true;
+        const chunk = (res.data || []) as Record<string, unknown>[];
+        appendRows(chunk);
+        if (chunk.length < pageSize) break;
+      }
+      if (fechaOk) {
+        querySucceeded = true;
+      } else {
+        for (let page = 0; page < 10; page++) {
+          const from = page * pageSize;
+          const to = from + pageSize - 1;
+          const res = await conn.client
+            .from(SUPABASE_TABLES.LLAMADAS)
+            .select('*')
+            .gte('fecha_registro', fechaHoy)
+            .lt('fecha_registro', twoDaysLater)
+            .order('id', { ascending: false })
+            .range(from, to);
+          if (res.error) break;
+          querySucceeded = true;
+          const chunk = (res.data || []) as Record<string, unknown>[];
+          appendRows(chunk);
+          if (chunk.length < pageSize) break;
+        }
+      }
+    }
+
+    // 3. Fallback full scan (paginated) if direct date filter failed or returned 0 rows
+    if (!querySucceeded || rawRows.length === 0) {
+      let useOrder = true;
+
+      for (let page = 0; page < 20; page++) {
+        const from = page * pageSize;
+        const to = from + pageSize - 1;
+        const baseQuery = conn.client.from(SUPABASE_TABLES.LLAMADAS).select('*');
+        const res = useOrder
+          ? await baseQuery.order('id', { ascending: false }).range(from, to)
+          : await baseQuery.range(from, to);
+
+        if (res.error) {
+          if (useOrder && page === 0) {
+            useOrder = false;
+            const fallbackRes = await conn.client
+              .from(SUPABASE_TABLES.LLAMADAS)
+              .select('*')
+              .range(from, to);
+            if (fallbackRes.error) {
+              return {
+                ok: false,
+                error: `Error al consultar ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(fallbackRes.error)}`,
+              };
+            }
+            const chunk = (fallbackRes.data || []) as Record<string, unknown>[];
+            appendRows(chunk);
+            if (chunk.length < pageSize) break;
+            continue;
+          }
+          return {
+            ok: false,
+            error: `Error al consultar ${SUPABASE_TABLES.LLAMADAS}: ${formatSupabaseError(res.error)}`,
+          };
+        }
+
+        const chunk = (res.data || []) as Record<string, unknown>[];
+        appendRows(chunk);
+        if (chunk.length < pageSize) break;
+      }
+    }
+
+    const normalizedAll = rawRows
       .map((row) => normalizeLlamadaFromDb(row, sucursales))
       .sort((a, b) =>
-        (b.fecha_registro || '').localeCompare(a.fecha_registro || '')
+        (b.created_at || b.fecha_registro || '').localeCompare(
+          a.created_at || a.fecha_registro || ''
+        )
       );
 
-    // Filter for the Cajera's branch (normalized) and keep full normalized set for state consistency
+    // Match branch ignoring case & 'Sucursal ' prefix, and filter to Mexico local date = fechaHoy (without hiding Pendiente or Realizada)
     const branchToday = normalizedAll.filter(
       (l) =>
         matchesSucursalRecord(l, sucursal) &&
         getLlamadaLocalDate(l) === fechaHoy
     );
-    const branchAll = normalizedAll.filter((l) =>
-      matchesSucursalRecord(l, sucursal)
-    );
 
     return {
       ok: true,
-      data: branchAll.length > 0 ? branchAll : branchToday,
+      data: branchToday,
     };
   } catch (err) {
     return {
@@ -1576,7 +1825,13 @@ export async function saveLlamada(
       };
     }
     const saved = res.savedPairs[0]?.saved || llamada;
-    const nextList = allLlamadas.map((l) => (l.id === llamada.id ? saved : l));
+    const latestLocal = readLocal<LlamadaSucursal[]>(
+      STORAGE_KEYS.LLAMADAS,
+      allLlamadas
+    );
+    const nextList = latestLocal.some((l) => l.id === llamada.id)
+      ? latestLocal.map((l) => (l.id === llamada.id ? saved : l))
+      : [saved, ...latestLocal];
     writeLocal(STORAGE_KEYS.LLAMADAS, nextList);
     return { ok: true, data: saved };
   } catch (err) {

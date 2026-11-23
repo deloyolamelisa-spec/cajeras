@@ -123,7 +123,10 @@ export interface LlamadaSucursal {
   estado?: 'Pendiente' | 'Realizada';
   hora_llamada?: string;
   fecha_llamada?: string;
+  fecha?: string;
   fecha_registro: string;
+  created_at?: string;
+  lote_base?: number;
 }
 
 export type EstatusActividad = 'Pendiente' | 'Completada' | 'Observada';
